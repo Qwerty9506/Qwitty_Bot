@@ -90,7 +90,6 @@ TEXTS = {
     "btn_autoresp": "Автоответчик 🤖", 
     "btn_timenick": "Время в профиль 🕒", 
     "btn_247": "Режим 24/7 ⚡️",
-    "btn_delete": "Очистить сообщения 🧹", 
     "btn_turn_on": "Включить ▶️",
     "btn_turn_off": "Выключить ❌", 
     "btn_tz_select": "Выбрать часовой пояс 🕒", 
@@ -124,8 +123,6 @@ TEXTS = {
     "msg_check_pwd": "🔐 Проверка 2FA...\n⏳ Осталось: {0} сек.",
     "msg_pwd_wrong": "❌ Неверный пароль!\nВведите заново:",
     "msg_pwd_ok": "Пароль принят!\nЮзербот успешно запущен.",
-    "msg_limit_del": "🔒 Исчерпан дневной лимит очисток (макс 2 раза)!",
-    "msg_limit_del_alert": "🚫 Превышен суточный лимит!\nОсталось: {0} ч. {1} мин.",
     "msg_activity_text": "Ваша история активности (за 5 дней):\n\n{0}",
     "msg_timenick_text": "Вывод текущего времени в имя профиля.\n\nТекущий статус: {0}\nСмещение часового пояса: UTC+{1}",
     "msg_tz_select": "Выберите ваш часовой пояс👇", 
@@ -134,10 +131,6 @@ TEXTS = {
     "msg_autoresp_req": "Напишите новый текст приветствия в чат 👇", 
     "msg_autoresp_saved": "Приветствие успешно сохранено! ✅",
     "msg_autoresp_default": "👋 Здравствуйте! Сейчас я не в сети, отвечу позже.",
-    "msg_del_text": "🗑 Зачистка истории\nВыберите число последних сообщений для удаления:",
-    "msg_del_confirm": "Вы уверены что хотите удалить последних {0} сообщений?",
-    "msg_del_start": "🚀 Удаление {0} сообщений... Пожалуйста, подождите.",
-    "msg_del_done": "Успешно зачищено: {0} из {1}.",
     "msg_247_text": "⚡️ **Режим 24/7**\n\nСтатус: {0}\nРаботает без суточного лимита.\nИспользовано времени: {1} ч. {2} мин.",
     "msg_limit_247_reached": "Режим 24/7 больше не имеет суточного лимита."
 }
@@ -211,6 +204,7 @@ def get_user_state(user_id):
             "client": None, "state": "START",
             "time_nick_active": False, "time_nick_task": None, "status_24_7": False, "task_24_7": None,
             "autoresponder_active": False, "activity_task": None, "delete_count": 100,
+            "ui_action_count": 0,
             "temp_greeting": None
         }
     return USER_DATA[user_id]
@@ -288,6 +282,7 @@ class RestartMiddleware(BaseMiddleware):
             user_id = event.from_user.id
             u_state = get_user_state(user_id)
             u_state["msg_id"] = event.message.message_id
+            u_state["ui_action_count"] = u_state.get("ui_action_count", 0) + 1
             if u_state["state"] == "START":
                 uid_str = str(user_id)
                 cfg = MEMORY_DB["config"].get(uid_str) or db_get_data("config", uid_str)
@@ -295,30 +290,67 @@ class RestartMiddleware(BaseMiddleware):
                     u_state["state"] = "MENU"
         return await handler(event, data)
 
+class IncomingUserMessageCleanupMiddleware(BaseMiddleware):
+    async def __call__(self, handler, event, data):
+        if isinstance(event, types.Message) and event.from_user and not event.from_user.is_bot:
+            try:
+                await event.delete()
+            except Exception:
+                pass
+        return await handler(event, data)
+
 dp.callback_query.middleware(RestartMiddleware())
+dp.message.middleware(IncomingUserMessageCleanupMiddleware())
 
 async def edit_or_send(user_id, text, reply_markup=None, parse_mode=None):
     data = get_user_state(user_id)
-    if data["msg_id"]:
+    force_new_message = (
+        data.get("ui_action_count", 0) > 0
+        and data["ui_action_count"] % 5 == 0
+    )
+
+    if force_new_message and data.get("msg_id"):
+        try:
+            await bot.delete_message(chat_id=user_id, message_id=data["msg_id"])
+        except Exception:
+            pass
+        data["msg_id"] = None
+
+    if data.get("msg_id"):
         try:
             await bot.edit_message_text(
-                chat_id=user_id, message_id=data["msg_id"], text=text,
-                reply_markup=reply_markup, parse_mode=parse_mode
+                chat_id=user_id,
+                message_id=data["msg_id"],
+                text=text,
+                reply_markup=reply_markup,
+                parse_mode=parse_mode,
             )
             return
         except TelegramBadRequest as e:
-            if "message is not modified" in str(e).lower(): return
+            if "message is not modified" in str(e).lower():
+                return
             try:
                 await bot.delete_message(chat_id=user_id, message_id=data["msg_id"])
             except Exception:
                 pass
-    msg = await bot.send_message(chat_id=user_id, text=text, reply_markup=reply_markup, parse_mode=parse_mode)
+
+    msg = await bot.send_message(
+        chat_id=user_id,
+        text=text,
+        reply_markup=reply_markup,
+        parse_mode=parse_mode,
+    )
     data["msg_id"] = msg.message_id
 
     uid_str = str(user_id)
     if uid_str in MEMORY_DB["config"]:
         MEMORY_DB["config"][uid_str]["msg_id"] = msg.message_id
-        asyncio.create_task(async_db_save("config", uid_str, MEMORY_DB["config"][uid_str]))
+        asyncio.create_task(
+            async_db_save("config", uid_str, MEMORY_DB["config"][uid_str])
+        )
+
+    if force_new_message:
+        data["ui_action_count"] = 0
 
 def show_start_menu(user_id):
     builder = InlineKeyboardBuilder()
@@ -397,32 +429,56 @@ async def autoresponder_func(client, message):
         logging.error(f"Ошибка автоответчика: {e}")
 
 
+async def get_other_sessions_online(client):
+    """Определяет, активна ли недавно хотя бы одна другая Telegram-сессия.
+
+    Текущая сессия юзербота игнорируется. Telegram отдаёт для каждой
+    авторизации date_active, то есть время последнего использования сессии.
+    Считаем минуту активности, если другая сессия использовалась в последние 90 секунд.
+    """
+    auths = await client.invoke(functions.account.GetAuthorizations())
+    authorizations = getattr(auths, "authorizations", []) or []
+    now = int(time.time())
+    return any(
+        not getattr(auth, "current", False)
+        and int(getattr(auth, "date_active", 0) or 0)
+        and now - int(getattr(auth, "date_active", 0) or 0) <= 90
+        for auth in authorizations
+    )
+
 async def activity_tracker_loop(user_id):
     data = get_user_state(user_id)
     while True:
         await asyncio.sleep(60)
-        if not data["client"]: break
+        client = data.get("client")
+        if not client or not client.is_connected:
+            break
+
         try:
-            await data["client"].get_me()
+            other_session_online = await get_other_sessions_online(client)
         except Unauthorized:
             await handle_revoked_session(user_id, reason="сессия деактивирована пользователем")
             break
-        except Exception:
+        except Exception as e:
+            logging.warning(f"Не удалось проверить активность других сессий: {e}")
+            continue
+
+        if not other_session_online:
             continue
 
         uid_str = str(user_id)
-        if uid_str not in MEMORY_DB["activity"]: 
-            MEMORY_DB["activity"][uid_str] = db_get_data("activity", uid_str) or {}
-        
+        if uid_str not in MEMORY_DB["activity"]:
+            MEMORY_DB["activity"][uid_str] = await async_db_get("activity", uid_str) or {}
+
         today = datetime.datetime.now().strftime("%d.%m.%Y")
-        if today not in MEMORY_DB["activity"][uid_str]: MEMORY_DB["activity"][uid_str][today] = 0
-        MEMORY_DB["activity"][uid_str][today] += 60
+        MEMORY_DB["activity"][uid_str][today] = MEMORY_DB["activity"][uid_str].get(today, 0) + 60
 
         today_date = datetime.datetime.now().date()
         for date_str in list(MEMORY_DB["activity"][uid_str].keys()):
             try:
                 d = datetime.datetime.strptime(date_str, "%d.%m.%Y").date()
-                if (today_date - d).days > 4: del MEMORY_DB["activity"][uid_str][date_str]
+                if (today_date - d).days > 4:
+                    del MEMORY_DB["activity"][uid_str][date_str]
             except ValueError:
                 pass
 
@@ -478,7 +534,7 @@ async def update_profile_branding(user_id):
         branding = ""
         if user_cfg.get("time_nick_active", False):
             offset = user_cfg.get("timezone_offset", 5)
-            tz_now = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=offset)
+            tz_now = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=offset, seconds=30)
             branding += f" [{tz_now.strftime('%H:%M')}]"
         final_name = f"{base_name}{branding}"
         if final_name != me.first_name:
@@ -553,40 +609,69 @@ async def _persist_session_string(user_id, client):
 
 
 async def ensure_client_connected(user_id):
+    """Проверяет/восстанавливает клиент.
+
+    Важное отличие: временная сеть/RPC/FloodWait ошибка НЕ удаляет session_string.
+    Сессия очищается только при явном Unauthorized, то есть когда Telegram
+    действительно сообщает, что авторизация больше недействительна.
+    """
     data = get_user_state(user_id)
     uid_str = str(user_id)
     user_cfg = MEMORY_DB["config"].get(uid_str) or await async_db_get("config", uid_str)
-    if user_cfg:
-        MEMORY_DB["config"][uid_str] = user_cfg
-
-    if not user_cfg.get("logged_in", False):
+    if not user_cfg or not user_cfg.get("logged_in", False):
         return False
+    MEMORY_DB["config"][uid_str] = user_cfg
 
-    # Основной вариант после рестарта: берём session string из Supabase.
+    # Уже подключённый клиент: не создаём второй экземпляр.
+    if data.get("client"):
+        client = data["client"]
+        try:
+            if not client.is_connected:
+                await client.start()
+            await client.get_me()
+            return True
+        except Unauthorized:
+            await handle_revoked_session(user_id, reason="Telegram отклонил сохранённую сессию")
+            return False
+        except Exception as e:
+            logging.warning(f"Временная ошибка проверки клиента {user_id}: {e}")
+            return False
+
     session_string = user_cfg.get("session_string")
     if session_string:
-        try:
-            client = await _build_runtime_client(user_id, session_string)
-            data["client"] = client
-            start_activity_tracker(user_id)
+        # Несколько попыток при временном сбое. Никаких удалений session_string.
+        last_error = None
+        for attempt in range(3):
+            try:
+                client = await _build_runtime_client(user_id, session_string)
+                data["client"] = client
+                start_activity_tracker(user_id)
 
-            if user_cfg.get("status_24_7", False):
-                data["status_24_7"] = True
-                user_cfg["last_247_start_ts"] = time.time()
-                MEMORY_DB["config"][uid_str] = user_cfg
-                asyncio.create_task(async_db_save("config", uid_str, user_cfg))
-                data["task_24_7"] = asyncio.create_task(keep_online_loop(user_id))
+                if user_cfg.get("status_24_7", False):
+                    data["status_24_7"] = True
+                    user_cfg["last_247_start_ts"] = time.time()
+                    MEMORY_DB["config"][uid_str] = user_cfg
+                    asyncio.create_task(async_db_save("config", uid_str, user_cfg))
+                    if not data.get("task_24_7") or data["task_24_7"].done():
+                        data["task_24_7"] = asyncio.create_task(keep_online_loop(user_id))
 
-            if user_cfg.get("time_nick_active", False):
-                data["time_nick_active"] = True
-                data["time_nick_task"] = asyncio.create_task(time_nickname_loop(user_id))
+                if user_cfg.get("time_nick_active", False):
+                    data["time_nick_active"] = True
+                    if not data.get("time_nick_task") or data["time_nick_task"].done():
+                        data["time_nick_task"] = asyncio.create_task(time_nickname_loop(user_id))
 
-            data["autoresponder_active"] = user_cfg.get("autoresponder_active", False)
-            return True
-        except Exception as e:
-            logging.error(f"Ошибка восстановления session string для {user_id}: {e}")
-            await handle_revoked_session(user_id, reason="сессия недействительна")
-            return False
+                data["autoresponder_active"] = user_cfg.get("autoresponder_active", False)
+                return True
+            except Unauthorized:
+                await handle_revoked_session(user_id, reason="сохранённая сессия отозвана Telegram")
+                return False
+            except Exception as e:
+                last_error = e
+                logging.warning(f"Не удалось восстановить сессию {user_id}, попытка {attempt + 1}/3: {e}")
+                await asyncio.sleep(2 * (attempt + 1))
+
+        logging.error(f"Сессия {user_id} сохранена, но временно недоступна: {last_error}")
+        return False
 
     # Миграция старой локальной .session, если она ещё есть.
     pattern = os.path.join(SESSIONS_DIR, f"user_{user_id}_*.session")
@@ -632,10 +717,14 @@ async def ensure_client_connected(user_id):
             data["time_nick_task"] = asyncio.create_task(time_nickname_loop(user_id))
         data["autoresponder_active"] = user_cfg.get("autoresponder_active", False)
         return True
+    except Unauthorized:
+        await close_pyrogram_client(client)
+        await handle_revoked_session(user_id, reason="старая локальная сессия отозвана Telegram")
+        return False
     except Exception as e:
         await close_pyrogram_client(client)
-        logging.error(f"Ошибка миграции локальной сессии: {e}")
-        await handle_revoked_session(user_id, reason="сессия недействительна")
+        logging.error(f"Ошибка миграции локальной сессии {user_id}: {e}")
+        # Не удаляем session_string/config из-за обычной временной ошибки.
         return False
 
 
@@ -692,13 +781,14 @@ async def cmd_start(message: types.Message):
         except Exception:
             pass
         data["msg_id"] = None
+        data["ui_action_count"] = 0
 
     if uid_str not in MEMORY_DB["config"]:
         MEMORY_DB["config"][uid_str] = db_get_data("config", uid_str) or {
             "phone": "Не указан", "password": "Нет", "status_24_7": False,
             "time_nick_active": False, "autoresponder_active": False,
             "autoresponder_greeting": get_text(user_id, "msg_autoresp_default"),
-            "timezone_offset": 5, "delete_today_count": 0, "delete_limit_reset_ts": 0.0,
+            "timezone_offset": 5,
             "used_247_seconds": 0.0, "last_247_start_ts": 0.0, "used_timenick_seconds": 0.0,
             "replied_users": [], "username": message.from_user.username or "N/A",
             "first_name": message.from_user.first_name or "User", "logged_in": False,
@@ -958,38 +1048,13 @@ async def process_password(message: types.Message):
 
 def show_main_menu_builder(user_id):
     builder = InlineKeyboardBuilder()
-    user_cfg = MEMORY_DB["config"].get(str(user_id), {})
-    now = time.time()
-    reset_ts = user_cfg.get("delete_limit_reset_ts", 0.0)
-    day_count = user_cfg.get("delete_today_count", 0)
-    if now >= reset_ts: day_count = 0
-
     builder.button(text=get_text(user_id, "btn_activity"), callback_data="menu_activity")
     builder.button(text=get_text(user_id, "btn_autoresp"), callback_data="menu_autoresponder")
     builder.button(text=get_text(user_id, "btn_timenick"), callback_data="menu_timenick")
-
     builder.button(text=get_text(user_id, "btn_247"), callback_data="menu_247")
-
-    if day_count >= 2:
-        btn_del_clean = get_text(user_id, 'btn_delete').replace('🧹', '').strip()
-        builder.button(text=f"{btn_del_clean} 🚫", callback_data="del_limit_blocked")
-    else:
-        builder.button(text=get_text(user_id, "btn_delete"), callback_data="menu_delete")
-
     builder.button(text=get_text(user_id, "btn_rules"), callback_data="rules_menu_view")
-
-    builder.adjust(2, 2, 2)
+    builder.adjust(2, 2, 1)
     return builder
-
-@dp.callback_query(F.data == "del_limit_blocked")
-async def del_limit_blocked_handler(callback: types.CallbackQuery):
-    user_id = callback.from_user.id
-    user_cfg = MEMORY_DB["config"].get(str(user_id), {})
-    reset_ts = user_cfg.get("delete_limit_reset_ts", 0.0)
-    rem = max(0, int(reset_ts - time.time()))
-    hours, minutes = rem // 3600, (rem % 3600) // 60
-    try: await callback.answer(get_text(user_id, "msg_limit_del_alert", hours, minutes), show_alert=True)
-    except Exception: pass
 
 @dp.callback_query(F.data == "main_menu")
 async def main_menu(callback: types.CallbackQuery):
@@ -1233,81 +1298,6 @@ async def set_tz(callback: types.CallbackQuery):
     asyncio.create_task(async_db_save("config", uid_str, user_cfg))
     await update_profile_branding(user_id)
     await menu_timenick(callback)
-
-# === ОЧИСТКА СООБЩЕНИЙ ===
-@dp.callback_query(F.data == "menu_delete")
-async def menu_delete(callback: types.CallbackQuery):
-    user_id = callback.from_user.id
-    builder = InlineKeyboardBuilder()
-    builder.button(text="10", callback_data="confirm_del_10")
-    builder.button(text="50", callback_data="confirm_del_50")
-    builder.button(text="100", callback_data="confirm_del_100")
-    builder.button(text="200", callback_data="confirm_del_200")
-    builder.button(text="500", callback_data="confirm_del_500")
-    builder.button(text=get_text(user_id, "btn_back_menu"), callback_data="main_menu")
-    builder.adjust(2, 2, 2)
-    await edit_or_send(user_id, get_text(user_id, "msg_del_text"), reply_markup=builder.as_markup())
-    try: await callback.answer()
-    except Exception: pass
-
-@dp.callback_query(F.data.startswith("confirm_del_"))
-async def confirm_del(callback: types.CallbackQuery):
-    user_id = callback.from_user.id
-    count = int(callback.data.split("_")[-1])
-    data = get_user_state(user_id)
-    data["delete_count"] = count
-
-    builder = InlineKeyboardBuilder()
-    builder.button(text=get_text(user_id, "btn_im_sure"), callback_data="execute_delete")
-    builder.button(text=get_text(user_id, "btn_back"), callback_data="menu_delete")
-    builder.adjust(1)
-    await edit_or_send(user_id, get_text(user_id, "msg_del_confirm", count), reply_markup=builder.as_markup())
-    try: await callback.answer()
-    except Exception: pass
-
-@dp.callback_query(F.data == "execute_delete")
-async def execute_delete(callback: types.CallbackQuery):
-    user_id = callback.from_user.id
-    data = get_user_state(user_id)
-    client = data.get("client")
-    count = data.get("delete_count", 100)
-
-    if not client or not client.is_connected:
-        await edit_or_send(user_id, get_text(user_id, "msg_session_missing"), reply_markup=get_missing_session_markup(user_id))
-        return
-
-    await edit_or_send(user_id, get_text(user_id, "msg_del_start", count))
-    
-    deleted = 0
-    try:
-        msg_ids = []
-        async for msg in client.get_chat_history("me", limit=count):
-            msg_ids.append(msg.id)
-            if len(msg_ids) >= 100:
-                await client.delete_messages("me", msg_ids)
-                deleted += len(msg_ids)
-                msg_ids = []
-                await asyncio.sleep(1)
-        if msg_ids:
-            await client.delete_messages("me", msg_ids)
-            deleted += len(msg_ids)
-
-        uid_str = str(user_id)
-        user_cfg = MEMORY_DB["config"].get(uid_str) or db_get_data("config", uid_str)
-        user_cfg["delete_today_count"] = user_cfg.get("delete_today_count", 0) + 1
-        if user_cfg.get("delete_today_count", 0) >= 2:
-            user_cfg["delete_limit_reset_ts"] = time.time() + 86400
-        MEMORY_DB["config"][uid_str] = user_cfg
-        asyncio.create_task(async_db_save("config", uid_str, user_cfg))
-
-        log_action(user_id, f"Удалено {deleted} сообщений в 'Избранное'")
-        builder = InlineKeyboardBuilder()
-        builder.button(text=get_text(user_id, "btn_back_menu"), callback_data="main_menu")
-        await edit_or_send(user_id, get_text(user_id, "msg_del_done", deleted, count), reply_markup=builder.as_markup())
-    except Exception as e:
-        builder = InlineKeyboardBuilder()
-        builder.button(text=get_text(user_id, "btn_back_menu"), callback_data="main_menu")
-        await edit_or_send(user_id, f"Ошибка при удалении: {e}", reply_markup=builder.as_markup())
 
 # === RENDER WEB SERVICE ENDPOINT ===
 async def handle_ping(request):
