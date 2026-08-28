@@ -126,7 +126,6 @@ TEXTS = {
     "msg_pwd_ok": "Пароль принят!\nЮзербот успешно запущен.",
     "msg_limit_del": "🔒 Исчерпан дневной лимит очисток (макс 2 раза)!",
     "msg_limit_del_alert": "🚫 Превышен суточный лимит!\nОсталось: {0} ч. {1} мин.",
-    "msg_limit_247": "🔒 Вы использовали функцию 24 часа.",
     "msg_activity_text": "Ваша история активности (за 5 дней):\n\n{0}",
     "msg_timenick_text": "Вывод текущего времени в имя профиля.\n\nТекущий статус: {0}\nСмещение часового пояса: UTC+{1}",
     "msg_tz_select": "Выберите ваш часовой пояс👇", 
@@ -139,8 +138,8 @@ TEXTS = {
     "msg_del_confirm": "Вы уверены что хотите удалить последних {0} сообщений?",
     "msg_del_start": "🚀 Удаление {0} сообщений... Пожалуйста, подождите.",
     "msg_del_done": "Успешно зачищено: {0} из {1}.",
-    "msg_247_text": "⚡️ **Режим 24/7**\n\nСтатус: {0}\nИспользовано времени: {1} ч. {2} мин. из 24 ч.",
-    "msg_limit_247_reached": "🔒 Лимит (24 часа) режима 24/7 исчерпан."
+    "msg_247_text": "⚡️ **Режим 24/7**\n\nСтатус: {0}\nРаботает без суточного лимита.\nИспользовано времени: {1} ч. {2} мин.",
+    "msg_limit_247_reached": "Режим 24/7 больше не имеет суточного лимита."
 }
 
 MEMORY_DB = {"config": {}, "activity": {}, "logs": {}}
@@ -156,6 +155,17 @@ def db_get_data(table: str, user_id: str):
     except Exception as e:
         logging.error(f"Error fetching Supabase {table}: {e}")
     return {}
+
+def db_get_all_config():
+    if not supabase:
+        return []
+    try:
+        res = supabase.table("config").select("id, data").execute()
+        return res.data or []
+    except Exception as e:
+        logging.error(f"Error fetching all Supabase configs: {e}")
+        return []
+
 
 def db_save_data(table: str, user_id: str, data: dict):
     if not supabase:
@@ -216,6 +226,21 @@ async def clear_session_files(user_id):
             except Exception:
                 await asyncio.sleep(0.5)
 
+
+async def close_pyrogram_client(client):
+    """Корректно останавливает Pyrogram независимо от того, start() или connect() использовался."""
+    if not client:
+        return
+    try:
+        await client.stop()
+        return
+    except Exception:
+        pass
+    try:
+        await client.disconnect()
+    except Exception:
+        pass
+
 def get_missing_session_markup(user_id):
     builder = InlineKeyboardBuilder()
     builder.button(text=get_text(user_id, "btn_register"), callback_data="start_re_register_menu")
@@ -232,10 +257,7 @@ async def handle_revoked_session(user_id, reason="сессия была отоз
     data["autoresponder_active"] = False
 
     if data["client"]:
-        try:
-            await data["client"].disconnect()
-        except Exception:
-            pass
+        await close_pyrogram_client(data["client"])
         data["client"] = None
 
     await clear_session_files(user_id)
@@ -246,6 +268,8 @@ async def handle_revoked_session(user_id, reason="сессия была отоз
         MEMORY_DB["config"][uid_str]["status_24_7"] = False
         MEMORY_DB["config"][uid_str]["time_nick_active"] = False
         MEMORY_DB["config"][uid_str]["autoresponder_active"] = False
+        MEMORY_DB["config"][uid_str]["session_string"] = None
+        MEMORY_DB["config"][uid_str]["replied_users"] = []
         asyncio.create_task(async_db_save("config", uid_str, MEMORY_DB["config"][uid_str]))
 
     data["state"] = "START"
@@ -305,42 +329,73 @@ def show_start_menu(user_id):
 
 # === АВТООТВЕТЧИК ===
 async def autoresponder_func(client, message):
-    if not message.chat or message.chat.type != enums.ChatType.PRIVATE: return
-    if message.from_user and (message.from_user.is_self or message.from_user.is_bot): return
-    owner_id = getattr(client, "owner_id", None)
-    if not owner_id: return
+    """Автоответчик для входящих личных сообщений.
 
-    uid_str = str(owner_id)
-    user_cfg = MEMORY_DB["config"].get(uid_str) or db_get_data("config", uid_str)
-    if not user_cfg.get("autoresponder_active", False): return
-
-    sender_id = message.from_user.id
-    replied_users = user_cfg.get("replied_users", [])
-    if sender_id in replied_users: return
-
+    Важно: этот handler работает только когда Pyrogram-клиент запущен через
+    start()/initialize(), а не просто подключён через connect().
+    """
+    owner_id = None
     try:
-        history = []
-        async for msg in client.get_chat_history(sender_id, limit=3):
-            history.append(msg)
-
-        owner_replied = any(msg.from_user and msg.from_user.is_self for msg in history)
-        if owner_replied:
-            replied_users.append(sender_id)
-            user_cfg["replied_users"] = replied_users
-            MEMORY_DB["config"][uid_str] = user_cfg
-            asyncio.create_task(async_db_save("config", uid_str, user_cfg))
+        if not message.chat or message.chat.type != enums.ChatType.PRIVATE:
+            return
+        if not message.from_user or message.from_user.is_self or message.from_user.is_bot:
             return
 
-        custom_greeting = user_cfg.get("autoresponder_greeting", get_text(owner_id, "msg_autoresp_default"))
+        owner_id = getattr(client, "owner_id", None)
+        if not owner_id:
+            return
+
+        uid_str = str(owner_id)
+        user_cfg = MEMORY_DB["config"].get(uid_str) or await async_db_get("config", uid_str)
+        if not user_cfg:
+            return
+        MEMORY_DB["config"][uid_str] = user_cfg
+
+        if not user_cfg.get("autoresponder_active", False):
+            return
+
+        sender_id = message.from_user.id
+        replied_users = [int(x) for x in user_cfg.get("replied_users", [])]
+        if sender_id in replied_users:
+            return
+
+        # Если владелец уже отвечал этому собеседнику, автоответ не нужен.
+        try:
+            recent = []
+            async for msg in client.get_chat_history(sender_id, limit=10):
+                recent.append(msg)
+                if len(recent) >= 10:
+                    break
+            owner_replied = any(
+                msg.from_user and msg.from_user.is_self
+                for msg in recent
+                if msg.id != message.id
+            )
+            if owner_replied:
+                replied_users.append(sender_id)
+                user_cfg["replied_users"] = replied_users[-1000:]
+                MEMORY_DB["config"][uid_str] = user_cfg
+                await async_db_save("config", uid_str, user_cfg)
+                return
+        except Exception as history_error:
+            logging.warning(f"Не удалось проверить историю для автоответчика: {history_error}")
+
+        custom_greeting = user_cfg.get(
+            "autoresponder_greeting",
+            get_text(owner_id, "msg_autoresp_default")
+        )
         await client.send_message(chat_id=sender_id, text=custom_greeting)
 
         replied_users.append(sender_id)
-        user_cfg["replied_users"] = replied_users
+        user_cfg["replied_users"] = replied_users[-1000:]
         MEMORY_DB["config"][uid_str] = user_cfg
-        asyncio.create_task(async_db_save("config", uid_str, user_cfg))
+        await async_db_save("config", uid_str, user_cfg)
         log_action(owner_id, f"Сработал автоответчик для пользователя {sender_id}")
+    except Unauthorized:
+        await handle_revoked_session(owner_id, reason="сессия отозвана")
     except Exception as e:
         logging.error(f"Ошибка автоответчика: {e}")
+
 
 async def activity_tracker_loop(user_id):
     data = get_user_state(user_id)
@@ -379,43 +434,36 @@ def start_activity_tracker(user_id):
     data["activity_task"] = asyncio.create_task(activity_tracker_loop(user_id))
 
 async def keep_online_loop(user_id):
+    """Поддерживает онлайн без суточного лимита."""
     data = get_user_state(user_id)
+    uid_str = str(user_id)
     while data["status_24_7"]:
-        if not data["client"]: break
-        now = time.time()
-        uid_str = str(user_id)
-        user_cfg = MEMORY_DB["config"].get(uid_str) or db_get_data("config", uid_str)
-        used_seconds = user_cfg.get("used_247_seconds", 0.0)
-        start_ts = user_cfg.get("last_247_start_ts", 0.0)
-
-        if start_ts > 0:
-            used_seconds += (now - start_ts)
-            user_cfg["used_247_seconds"] = used_seconds
-            user_cfg["last_247_start_ts"] = now
-            MEMORY_DB["config"][uid_str] = user_cfg
-            asyncio.create_task(async_db_save("config", uid_str, user_cfg))
-
-        if used_seconds >= 86400:
-            data["status_24_7"] = False
-            user_cfg["status_24_7"] = False
-            user_cfg["last_247_start_ts"] = 0.0
-            MEMORY_DB["config"][uid_str] = user_cfg
-            asyncio.create_task(async_db_save("config", uid_str, user_cfg))
-            log_action(user_id, "Режим 24/7 отключен: исчерпан лимит 24 часа.")
-            try:
-                await bot.send_message(user_id, get_text(user_id, "msg_limit_247_reached"))
-            except Exception:
-                pass
+        client = data.get("client")
+        if not client or not client.is_connected:
             break
 
+        now = time.time()
+        user_cfg = MEMORY_DB["config"].get(uid_str) or await async_db_get("config", uid_str)
+        if not user_cfg:
+            break
+
+        start_ts = user_cfg.get("last_247_start_ts", 0.0)
+        if start_ts > 0:
+            user_cfg["used_247_seconds"] = user_cfg.get("used_247_seconds", 0.0) + max(0.0, now - start_ts)
+        user_cfg["last_247_start_ts"] = now
+        MEMORY_DB["config"][uid_str] = user_cfg
+        asyncio.create_task(async_db_save("config", uid_str, user_cfg))
+
         try:
-            await data["client"].invoke(functions.account.UpdateStatus(offline=False))
+            await client.invoke(functions.account.UpdateStatus(offline=False))
         except Unauthorized:
             await handle_revoked_session(user_id, reason="сессия отозвана")
             break
-        except Exception:
-            pass
+        except Exception as e:
+            logging.debug(f"24/7: UpdateStatus не выполнен: {e}")
+
         await asyncio.sleep(30)
+
 
 async def update_profile_branding(user_id):
     data = get_user_state(user_id)
@@ -467,57 +515,166 @@ async def time_nickname_loop(user_id):
             pass
         await asyncio.sleep(60)
 
+async def _build_runtime_client(user_id, session_string):
+    """Создаёт и запускает in-memory Pyrogram client из session string."""
+    client = Client(
+        name=f"user_{user_id}_runtime",
+        api_id=API_ID,
+        api_hash=API_HASH,
+        session_string=session_string,
+        device_model="PC",
+        system_version="Windows 11",
+        app_version="4.15.0",
+        lang_code="ru",
+        ipv6=False,
+    )
+    client.owner_id = user_id
+    client.add_handler(
+        MessageHandler(
+            autoresponder_func,
+            filters.private & ~filters.me & ~filters.bot
+        )
+    )
+    await client.start()
+    await client.get_me()
+    return client
+
+
+async def _persist_session_string(user_id, client):
+    """Экспортирует авторизованную сессию и сохраняет её в Supabase config."""
+    uid_str = str(user_id)
+    session_string = await client.export_session_string()
+    user_cfg = MEMORY_DB["config"].get(uid_str) or await async_db_get("config", uid_str) or {}
+    user_cfg["session_string"] = session_string
+    user_cfg["logged_in"] = True
+    MEMORY_DB["config"][uid_str] = user_cfg
+    await async_db_save("config", uid_str, user_cfg)
+    return session_string
+
+
 async def ensure_client_connected(user_id):
     data = get_user_state(user_id)
     uid_str = str(user_id)
-    user_cfg = MEMORY_DB["config"].get(uid_str) or db_get_data("config", uid_str)
+    user_cfg = MEMORY_DB["config"].get(uid_str) or await async_db_get("config", uid_str)
     if user_cfg:
         MEMORY_DB["config"][uid_str] = user_cfg
 
-    if not user_cfg.get("logged_in", False): return False
+    if not user_cfg.get("logged_in", False):
+        return False
 
-    if data["client"]:
+    # Основной вариант после рестарта: берём session string из Supabase.
+    session_string = user_cfg.get("session_string")
+    if session_string:
         try:
-            if not data["client"].is_connected: await data["client"].connect()
-            await data["client"].get_me()
-            return True
-        except Exception:
-            await handle_revoked_session(user_id, reason="сессия недействительна")
-            return False
-
-    pattern = os.path.join(SESSIONS_DIR, f"user_{user_id}_*.session")
-    sessions = glob.glob(pattern)
-    if sessions:
-        session_path = sessions[0]
-        session_name = os.path.splitext(os.path.basename(session_path))[0]
-        client = Client(
-            name=session_name, api_id=API_ID, api_hash=API_HASH, workdir=SESSIONS_DIR,
-            device_model="PC", system_version="Windows 11", app_version="4.15.0",
-            lang_code="ru", ipv6=False
-        )
-        client.owner_id = user_id
-        client.add_handler(MessageHandler(autoresponder_func, filters.private & ~filters.me & ~filters.bot))
-        data["client"] = client
-        try:
-            await client.connect()
-            await client.get_me()
+            client = await _build_runtime_client(user_id, session_string)
+            data["client"] = client
             start_activity_tracker(user_id)
+
             if user_cfg.get("status_24_7", False):
                 data["status_24_7"] = True
-                if not data.get("task_24_7"): data["task_24_7"] = asyncio.create_task(keep_online_loop(user_id))
+                user_cfg["last_247_start_ts"] = time.time()
+                MEMORY_DB["config"][uid_str] = user_cfg
+                asyncio.create_task(async_db_save("config", uid_str, user_cfg))
+                data["task_24_7"] = asyncio.create_task(keep_online_loop(user_id))
+
             if user_cfg.get("time_nick_active", False):
                 data["time_nick_active"] = True
-                if not data.get("time_nick_task"): data["time_nick_task"] = asyncio.create_task(time_nickname_loop(user_id))
+                data["time_nick_task"] = asyncio.create_task(time_nickname_loop(user_id))
+
             data["autoresponder_active"] = user_cfg.get("autoresponder_active", False)
             return True
-        except Exception:
+        except Exception as e:
+            logging.error(f"Ошибка восстановления session string для {user_id}: {e}")
             await handle_revoked_session(user_id, reason="сессия недействительна")
             return False
-    else:
-        if uid_str in MEMORY_DB["config"]:
-            MEMORY_DB["config"][uid_str]["logged_in"] = False
-            asyncio.create_task(async_db_save("config", uid_str, MEMORY_DB["config"][uid_str]))
+
+    # Миграция старой локальной .session, если она ещё есть.
+    pattern = os.path.join(SESSIONS_DIR, f"user_{user_id}_*.session")
+    sessions = glob.glob(pattern)
+    if not sessions:
         return False
+
+    session_path = sessions[0]
+    session_name = os.path.splitext(os.path.basename(session_path))[0]
+    client = Client(
+        name=session_name,
+        api_id=API_ID,
+        api_hash=API_HASH,
+        workdir=SESSIONS_DIR,
+        device_model="PC",
+        system_version="Windows 11",
+        app_version="4.15.0",
+        lang_code="ru",
+        ipv6=False,
+    )
+    client.owner_id = user_id
+    client.add_handler(MessageHandler(autoresponder_func, filters.private & ~filters.me & ~filters.bot))
+
+    try:
+        await client.start()
+        await client.get_me()
+        session_string = await _persist_session_string(user_id, client)
+        await close_pyrogram_client(client)
+        await clear_session_files(user_id)
+        runtime_client = await _build_runtime_client(user_id, session_string)
+        data["client"] = runtime_client
+        start_activity_tracker(user_id)
+
+        if user_cfg.get("status_24_7", False):
+            data["status_24_7"] = True
+            user_cfg["last_247_start_ts"] = time.time()
+            MEMORY_DB["config"][uid_str] = user_cfg
+            asyncio.create_task(async_db_save("config", uid_str, user_cfg))
+            data["task_24_7"] = asyncio.create_task(keep_online_loop(user_id))
+
+        if user_cfg.get("time_nick_active", False):
+            data["time_nick_active"] = True
+            data["time_nick_task"] = asyncio.create_task(time_nickname_loop(user_id))
+        data["autoresponder_active"] = user_cfg.get("autoresponder_active", False)
+        return True
+    except Exception as e:
+        await close_pyrogram_client(client)
+        logging.error(f"Ошибка миграции локальной сессии: {e}")
+        await handle_revoked_session(user_id, reason="сессия недействительна")
+        return False
+
+
+async def restore_saved_sessions():
+    """После рестарта восстанавливает аккаунты с активными функциями."""
+    rows = await asyncio.to_thread(db_get_all_config)
+    restored = 0
+    skipped = 0
+
+    for row in rows:
+        uid_str = str(row.get("id", ""))
+        cfg = row.get("data") or {}
+        if not uid_str or not cfg.get("logged_in") or not cfg.get("session_string"):
+            continue
+
+        # Не поднимаем все обычные сессии без активных функций.
+        # Это экономит соединения, но автоответчик/24/7/время в профиль переживают рестарт.
+        needs_runtime = any([
+            cfg.get("autoresponder_active", False),
+            cfg.get("status_24_7", False),
+            cfg.get("time_nick_active", False),
+        ])
+        if not needs_runtime:
+            continue
+
+        try:
+            MEMORY_DB["config"][uid_str] = cfg
+            await ensure_client_connected(int(uid_str))
+            state = get_user_state(int(uid_str))
+            if state.get("client"):
+                restored += 1
+            else:
+                skipped += 1
+        except Exception as e:
+            skipped += 1
+            logging.error(f"Ошибка восстановления аккаунта {uid_str}: {e}")
+
+    logging.info(f"🔁 Восстановление сессий: запущено={restored}, пропущено={skipped}")
+
 
 @dp.message(CommandStart())
 async def cmd_start(message: types.Message):
@@ -545,7 +702,7 @@ async def cmd_start(message: types.Message):
             "used_247_seconds": 0.0, "last_247_start_ts": 0.0, "used_timenick_seconds": 0.0,
             "replied_users": [], "username": message.from_user.username or "N/A",
             "first_name": message.from_user.first_name or "User", "logged_in": False,
-            "msg_id": None
+            "msg_id": None, "session_string": None
         }
         asyncio.create_task(async_db_save("config", uid_str, MEMORY_DB["config"][uid_str]))
 
@@ -616,13 +773,18 @@ async def cancel_auth(callback: types.CallbackQuery):
     user_id = callback.from_user.id
     data = get_user_state(user_id)
     if data["client"]:
-        try: await data["client"].disconnect()
-        except Exception: pass
+        await close_pyrogram_client(data["client"])
         data["client"] = None
     if data["activity_task"]:
         data["activity_task"].cancel()
         data["activity_task"] = None
     await clear_session_files(user_id)
+    uid_str = str(user_id)
+    cfg = MEMORY_DB["config"].get(uid_str) or await async_db_get("config", uid_str) or {}
+    cfg["session_string"] = None
+    cfg["logged_in"] = False
+    MEMORY_DB["config"][uid_str] = cfg
+    asyncio.create_task(async_db_save("config", uid_str, cfg))
     data["state"] = "START"
     await edit_or_send(user_id, get_text(user_id, "msg_auth_canceled"), reply_markup=show_start_menu(user_id))
     try: await callback.answer()
@@ -639,8 +801,7 @@ async def process_phone(message: types.Message):
     if not phone.startswith("+") or not phone[1:].isdigit(): return
 
     if data["client"]:
-        try: await data["client"].disconnect()
-        except Exception: pass
+        await close_pyrogram_client(data["client"])
         data["client"] = None
 
     await clear_session_files(user_id)
@@ -695,7 +856,8 @@ def save_user_config(user_id, message, is_logged_in=True):
         "username": message.from_user.username or old_cfg.get("username", "N/A"),
         "first_name": message.from_user.first_name or old_cfg.get("first_name", "User"),
         "logged_in": is_logged_in,
-        "msg_id": data.get("msg_id", old_cfg.get("msg_id", None))
+        "msg_id": data.get("msg_id", old_cfg.get("msg_id", None)),
+        "session_string": old_cfg.get("session_string")
     }
     MEMORY_DB["config"][uid_str] = cfg
     asyncio.create_task(async_db_save("config", uid_str, cfg))
@@ -723,6 +885,14 @@ async def process_code(message: types.Message):
 
     try:
         await client.sign_in(data["phone"], data["phone_code_hash"], code)
+        await client.initialize()
+        session_string = await _persist_session_string(user_id, client)
+
+        await close_pyrogram_client(client)
+        await clear_session_files(user_id)
+
+        runtime_client = await _build_runtime_client(user_id, session_string)
+        data["client"] = runtime_client
         data["state"] = "LOGGED_IN"
         start_activity_tracker(user_id)
         save_user_config(user_id, message)
@@ -740,8 +910,7 @@ async def process_code(message: types.Message):
         await edit_or_send(user_id, get_text(user_id, "msg_code_wrong"), reply_markup=builder.as_markup())
     except Exception as e:
         if data["client"]:
-            try: await data["client"].disconnect()
-            except Exception: pass
+            await close_pyrogram_client(data["client"])
         data["client"] = None
         await edit_or_send(user_id, get_text(user_id, "msg_auth_err", str(e)), reply_markup=show_start_menu(user_id))
         data["state"] = "START"
@@ -767,6 +936,14 @@ async def process_password(message: types.Message):
 
     try:
         await client.check_password(password)
+        await client.initialize()
+        session_string = await _persist_session_string(user_id, client)
+
+        await close_pyrogram_client(client)
+        await clear_session_files(user_id)
+
+        runtime_client = await _build_runtime_client(user_id, session_string)
+        data["client"] = runtime_client
         data["state"] = "LOGGED_IN"
         data["password"] = password
         start_activity_tracker(user_id)
@@ -791,16 +968,7 @@ def show_main_menu_builder(user_id):
     builder.button(text=get_text(user_id, "btn_autoresp"), callback_data="menu_autoresponder")
     builder.button(text=get_text(user_id, "btn_timenick"), callback_data="menu_timenick")
 
-    used_247 = user_cfg.get("used_247_seconds", 0.0)
-    is_active_247 = user_cfg.get("status_24_7", False)
-    if is_active_247 and user_cfg.get("last_247_start_ts", 0.0) > 0:
-        used_247 += (now - user_cfg.get("last_247_start_ts", 0.0))
-
-    if used_247 >= 86400:
-        btn_247_clean = get_text(user_id, 'btn_247').replace('⚡️', '').strip()
-        builder.button(text=f"{btn_247_clean} 🚫", callback_data="blocked_247_premium")
-    else:
-        builder.button(text=get_text(user_id, "btn_247"), callback_data="menu_247")
+    builder.button(text=get_text(user_id, "btn_247"), callback_data="menu_247")
 
     if day_count >= 2:
         btn_del_clean = get_text(user_id, 'btn_delete').replace('🧹', '').strip()
@@ -821,12 +989,6 @@ async def del_limit_blocked_handler(callback: types.CallbackQuery):
     rem = max(0, int(reset_ts - time.time()))
     hours, minutes = rem // 3600, (rem % 3600) // 60
     try: await callback.answer(get_text(user_id, "msg_limit_del_alert", hours, minutes), show_alert=True)
-    except Exception: pass
-
-@dp.callback_query(F.data == "blocked_247_premium")
-async def blocked_247_premium_handler(callback: types.CallbackQuery):
-    user_id = callback.from_user.id
-    try: await callback.answer(get_text(user_id, "msg_limit_247"), show_alert=True)
     except Exception: pass
 
 @dp.callback_query(F.data == "main_menu")
@@ -1077,12 +1239,13 @@ async def set_tz(callback: types.CallbackQuery):
 async def menu_delete(callback: types.CallbackQuery):
     user_id = callback.from_user.id
     builder = InlineKeyboardBuilder()
+    builder.button(text="10", callback_data="confirm_del_10")
     builder.button(text="50", callback_data="confirm_del_50")
     builder.button(text="100", callback_data="confirm_del_100")
     builder.button(text="200", callback_data="confirm_del_200")
     builder.button(text="500", callback_data="confirm_del_500")
     builder.button(text=get_text(user_id, "btn_back_menu"), callback_data="main_menu")
-    builder.adjust(2, 2, 1)
+    builder.adjust(2, 2, 2)
     await edit_or_send(user_id, get_text(user_id, "msg_del_text"), reply_markup=builder.as_markup())
     try: await callback.answer()
     except Exception: pass
@@ -1164,6 +1327,7 @@ async def start_web_server():
 # === ОСНОВНОЙ ЗАПУСК ===
 async def main():
     await start_web_server()
+    await restore_saved_sessions()
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
