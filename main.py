@@ -3,6 +3,8 @@ import re
 import os
 import random
 from datetime import datetime
+from aiohttp import web
+
 from aiogram import Bot, Dispatcher, Router, F, BaseMiddleware
 from aiogram.types import Message, CallbackQuery
 from aiogram.filters import CommandStart
@@ -25,6 +27,7 @@ API_ID = int(os.getenv("API_ID", "123456"))
 API_HASH = os.getenv("API_HASH", "YOUR_API_HASH")
 SUPABASE_URL = os.getenv("SUPABASE_URL", "YOUR_SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY", "YOUR_SUPABASE_KEY")
+PORT = int(os.getenv("PORT", 8080))
 
 supabase: SupabaseClient = create_client(SUPABASE_URL, SUPABASE_KEY)
 
@@ -127,7 +130,6 @@ async def cmd_start(message: Message, state: FSMContext):
     db_user = await get_db_user(user_id)
     
     if db_user and db_user.get("session_string"):
-        # Проверка сессии Pyrogram
         is_valid = await check_session_validity(db_user["session_string"])
         if not is_valid:
             supabase.table("auth_users").delete().eq("user_id", user_id).execute()
@@ -137,7 +139,6 @@ async def cmd_start(message: Message, state: FSMContext):
             await edit_or_send(user_id, text, reply_markup=builder.as_markup())
             return
         
-        # Повторный вход — без приветствия
         text = (
             "<b>Главное меню Qwitty Auth API</b>\n\n"
             "Ваш ключ доступа для подключения сервисов:\n"
@@ -146,7 +147,6 @@ async def cmd_start(message: Message, state: FSMContext):
         )
         await edit_or_send(user_id, text, reply_markup=get_main_menu_kb())
     else:
-        # Первичный запуск — сообщение с правилами
         text = "Здравствуйте! Добро пожаловать в Qwitty Auth Bot — единую систему авторизации."
         builder = InlineKeyboardBuilder()
         builder.button(text="Правила 📜", callback_data="show_rules")
@@ -182,7 +182,6 @@ async def start_registration(cb: CallbackQuery, state: FSMContext):
 @router.message(AuthStates.waiting_for_phone)
 async def process_phone(message: Message, state: FSMContext):
     user_id = message.from_user.id
-    # Очистка номера от букв и пробелов
     clean_phone = re.sub(r'\D', '', message.text)
     
     if len(clean_phone) < 7:
@@ -264,7 +263,6 @@ async def finalize_registration(user_id: int, client: Client, state: FSMContext,
     
     referral_key = f"Qy{random.randint(10000, 99999)}"
     
-    # Сохранение в Supabase
     supabase.table("auth_users").upsert({
         "user_id": user_id,
         "phone": phone,
@@ -303,13 +301,12 @@ async def support_menu(cb: CallbackQuery, state: FSMContext):
 async def process_support_msg(message: Message, state: FSMContext):
     user_id = message.from_user.id
     
-    # Сохранение в Supabase
     supabase.table("support_tickets").insert({
         "user_id": user_id,
         "message": message.text.strip()
     }).execute()
 
-    text = "✅ Ваша обращение зарегистрировано! Специалисты поддержки свяжутся с вами при необходимости."
+    text = "✅ Ваше обращение зарегистрировано! Специалисты поддержки свяжутся с вами при необходимости."
     builder = InlineKeyboardBuilder().button(text="Вернуться в меню 🔙", callback_data="main_menu")
     await edit_or_send(user_id, text, reply_markup=builder.as_markup())
     await state.clear()
@@ -341,7 +338,20 @@ async def cancel_action(cb: CallbackQuery, state: FSMContext):
     await cmd_start(cb.message, state)
     await cb.answer()
 
+# Веб-сервер для прохождения проверки Render (Health Check)
+async def handle_ping(request):
+    return web.Response(text="OK")
+
+async def start_web_server():
+    app = web.Application()
+    app.router.add_get('/', handle_ping)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', PORT)
+    await site.start()
+
 async def main():
+    asyncio.create_task(start_web_server())
     dp.update.middleware(AutoDeleteMiddleware())
     dp.include_router(router)
     await bot.delete_webhook(drop_pending_updates=True)
