@@ -8,15 +8,19 @@ import time
 import random
 import logging
 from typing import Dict, Any, Optional, List, Tuple
-from aiohttp import web
-from supabase import create_client, Client as SupabaseClient
 
 if sys.platform != "win32":
     try:
         import uvloop
-        uvloop.install()
+        asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
     except ImportError:
         pass
+
+loop = asyncio.new_event_loop()
+asyncio.set_event_loop(loop)
+
+from aiohttp import web
+from supabase import create_client, Client as SupabaseClient
 
 from aiogram import Bot, Dispatcher, types, F, BaseMiddleware
 from aiogram.filters import CommandStart, Command
@@ -288,7 +292,7 @@ def strip_time_nick(name: Optional[str]) -> str:
 
 def apply_custom_nick(base_name: str, time_str: str, style_idx: int) -> str:
     bold_map = str.maketrans("0123456789", "𝟎𝟏𝟐𝟑𝟒𝟓𝟔𝟕𝟖𝟗")
-    double_map = str.maketrans("0123456789", "𝟘𝟙𝟚𝟛𝟜𝟝𝞮𝟟𝟠𝟡")
+    double_map = str.maketrans("0123456789", "𝟘𝟙𝟚𝛓𝟜𝟝𝞮𝟟𝟠𝟡")
     sans_map = str.maketrans("0123456789", "𝟢𝟣𝟤𝟥𝟦𝟧𝟨𝟩𝟪𝟫")
     mono_map = str.maketrans("0123456789", "𝟶𝟷𝸸𝟹𝟺𝟻𝟼𝟽𝟾𝟿")
     
@@ -1187,4 +1191,9 @@ async def main():
                     pass
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        loop.run_until_complete(main())
+    except KeyboardInterrupt:
+        logger.info("Application stopped")
+    finally:
+        loop.close()
