@@ -16,10 +16,6 @@ aiosqlite>=0.20.0
 # Math & Logic
 sympy>=1.12
 
-# GUI / Mobile (Kivy Desktop/Android)
-kivy>=2.3.0
-kivymd>=1.2.0
-
 # Environment & Utilities
 python-dotenv>=1.0.1
 pydantic>=2.6.0
