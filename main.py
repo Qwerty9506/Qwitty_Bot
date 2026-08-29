@@ -159,7 +159,6 @@ def db_get_all_config():
         logging.error(f"Error fetching all Supabase configs: {e}")
         return []
 
-
 def db_save_data(table: str, user_id: str, data: dict):
     if not supabase:
         return
@@ -219,7 +218,6 @@ async def clear_session_files(user_id):
                 break
             except Exception:
                 await asyncio.sleep(0.5)
-
 
 async def close_pyrogram_client(client):
     """Корректно останавливает Pyrogram независимо от того, start() или connect() использовался."""
@@ -362,15 +360,9 @@ def show_start_menu(user_id):
 # === АВТООТВЕТЧИК ===
 async def autoresponder_func(client, message):
     """
-    Отвечает, только если текущее входящее сообщение является первым
-    сообщением в текущем диалоге.
-
-    Если переписка была полностью очищена, Telegram снова возвращает
-    пустую историю, поэтому следующий собеседник, написавший первым,
-    снова получит автоответ.
+    Отвечает новым собеседникам в ЛС новым приветственным сообщением.
     """
     owner_id = None
-
     try:
         if not message.chat or message.chat.type != enums.ChatType.PRIVATE:
             return
@@ -386,37 +378,23 @@ async def autoresponder_func(client, message):
             return
 
         uid_str = str(owner_id)
-
         user_cfg = (
             MEMORY_DB["config"].get(uid_str)
             or await async_db_get("config", uid_str)
         )
 
-        if not user_cfg:
+        if not user_cfg or not user_cfg.get("autoresponder_active", False):
             return
 
         MEMORY_DB["config"][uid_str] = user_cfg
 
-        if not user_cfg.get("autoresponder_active", False):
-            return
+        # Проверяем историю сообщений: до текущего входящего сообщения
+        history_count = 0
+        async for msg in client.get_chat_history(message.chat.id, limit=5):
+            if msg.id != message.id:
+                history_count += 1
 
-        # Получаем историю ЛС.
-        # Текущее сообщение не считается.
-        # Если до него сообщений нет, значит собеседник написал первым.
-        previous_message_exists = False
-
-        async for msg in client.get_chat_history(
-            message.chat.id,
-            limit=10
-        ):
-            if msg.id == message.id:
-                continue
-
-            previous_message_exists = True
-            break
-
-        # В чате уже была переписка, поэтому автоответ не нужен.
-        if previous_message_exists:
+        if history_count > 0:
             return
 
         custom_greeting = user_cfg.get(
@@ -436,22 +414,12 @@ async def autoresponder_func(client, message):
 
     except Unauthorized:
         if owner_id:
-            await handle_revoked_session(
-                owner_id,
-                reason="сессия отозвана"
-            )
-
+            await handle_revoked_session(owner_id, reason="сессия отозвана")
     except Exception as e:
         logging.error(f"Ошибка автоответчика: {e}")
 
-
 async def get_other_sessions_online(client):
-    """Определяет, активна ли недавно хотя бы одна другая Telegram-сессия.
-
-    Текущая сессия юзербота игнорируется. Telegram отдаёт для каждой
-    авторизации date_active, то есть время последнего использования сессии.
-    Считаем минуту активности, если другая сессия использовалась в последние 90 секунд.
-    """
+    """Определяет, активна ли недавно хотя бы одна другая Telegram-сессия."""
     auths = await client.invoke(functions.account.GetAuthorizations())
     authorizations = getattr(auths, "authorizations", []) or []
     now = int(time.time())
@@ -536,7 +504,6 @@ async def keep_online_loop(user_id):
 
         await asyncio.sleep(30)
 
-
 async def update_profile_branding(user_id):
     data = get_user_state(user_id)
     uid_str = str(user_id)
@@ -611,7 +578,6 @@ async def _build_runtime_client(user_id, session_string):
     await client.get_me()
     return client
 
-
 async def _persist_session_string(user_id, client):
     """Экспортирует авторизованную сессию и сохраняет её в Supabase config."""
     uid_str = str(user_id)
@@ -623,14 +589,8 @@ async def _persist_session_string(user_id, client):
     await async_db_save("config", uid_str, user_cfg)
     return session_string
 
-
 async def ensure_client_connected(user_id):
-    """Проверяет/восстанавливает клиент.
-
-    Важное отличие: временная сеть/RPC/FloodWait ошибка НЕ удаляет session_string.
-    Сессия очищается только при явном Unauthorized, то есть когда Telegram
-    действительно сообщает, что авторизация больше недействительна.
-    """
+    """Проверяет/восстанавливает клиент."""
     data = get_user_state(user_id)
     uid_str = str(user_id)
     user_cfg = MEMORY_DB["config"].get(uid_str) or await async_db_get("config", uid_str)
@@ -638,7 +598,6 @@ async def ensure_client_connected(user_id):
         return False
     MEMORY_DB["config"][uid_str] = user_cfg
 
-    # Уже подключённый клиент: не создаём второй экземпляр.
     if data.get("client"):
         client = data["client"]
         try:
@@ -655,7 +614,6 @@ async def ensure_client_connected(user_id):
 
     session_string = user_cfg.get("session_string")
     if session_string:
-        # Несколько попыток при временном сбое. Никаких удалений session_string.
         last_error = None
         for attempt in range(3):
             try:
@@ -689,7 +647,6 @@ async def ensure_client_connected(user_id):
         logging.error(f"Сессия {user_id} сохранена, но временно недоступна: {last_error}")
         return False
 
-    # Миграция старой локальной .session, если она ещё есть.
     pattern = os.path.join(SESSIONS_DIR, f"user_{user_id}_*.session")
     sessions = glob.glob(pattern)
     if not sessions:
@@ -740,9 +697,7 @@ async def ensure_client_connected(user_id):
     except Exception as e:
         await close_pyrogram_client(client)
         logging.error(f"Ошибка миграции локальной сессии {user_id}: {e}")
-        # Не удаляем session_string/config из-за обычной временной ошибки.
         return False
-
 
 async def restore_saved_sessions():
     """После рестарта восстанавливает аккаунты с активными функциями."""
@@ -756,8 +711,6 @@ async def restore_saved_sessions():
         if not uid_str or not cfg.get("logged_in") or not cfg.get("session_string"):
             continue
 
-        # Не поднимаем все обычные сессии без активных функций.
-        # Это экономит соединения, но автоответчик/24/7/время в профиль переживают рестарт.
         needs_runtime = any([
             cfg.get("autoresponder_active", False),
             cfg.get("status_24_7", False),
@@ -779,7 +732,6 @@ async def restore_saved_sessions():
             logging.error(f"Ошибка восстановления аккаунта {uid_str}: {e}")
 
     logging.info(f"🔁 Восстановление сессий: запущено={restored}, пропущено={skipped}")
-
 
 @dp.message(CommandStart())
 async def cmd_start(message: types.Message):
