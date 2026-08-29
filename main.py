@@ -100,10 +100,10 @@ TEXTS = {
     "msg_start": "Здравствуйте!\nДобро пожаловать в бота автоматизированного управления аккаунтом.\nОзнакомьтесь с правилами.",
     "msg_start_register": "Чтобы зарегистрироваться заново, нажмите кнопку ниже 👇",
     "msg_menu": "Что умеет этот бот?\nВыбирайте доступные функции управления вашим аккаунтом на кнопках снизу:",
-    "msg_rules_text": "📜 **Правила использования бота:**\n\n1. Бот только для ознакомительных целей.\n2. Бот работает через юзербота.\n3. Очистка истории безвозвратна.\n4. Не авторизуйтесь слишком часто.\n5. Все действия автоматизированы.\n\n_Соблюдайте правила для безопасности._",
+    "msg_rules_text": "📜 **Правила использования бота:**\n\n1. Бот только для ознакомительных целей.\n2. Бот работает через юзербота.\n3. Не авторизуйтесь слишком часто.\n5. Все действия автоматизированы.\n\n_Соблюдайте правила для безопасности._",
     "msg_rules_done": "Всё, правила прочитаны! 👍\n\nЖмите кнопку начала ниже, чтобы привязать аккаунт.",
-    "msg_phone_req": "Пожалуйста, отправьте ваш номер телефона в международном формате (например, +998901234567).",
-    "msg_code_req": "Код авторизации отправлен в Telegram.\n⚠️ Напишите код через пробел или дефис!",
+    "msg_phone_req": "Пожалуйста, отправьте ваш номер телефона в международном формате.\nПример: +12345678",
+    "msg_code_req": "Код авторизации отправлен в Telegram.\n⚠️ Напишите код через дефис.\nПример: 12-45-6",
     "msg_pwd_req": "Аккаунт защищен облачным паролем.\nВведите его в чат:",
     "msg_success_login": "Бот успешно зашел в аккаунт!\nНажмите кнопку ниже для продолжения.",
     "msg_btn_go": "Поехали ➡️",
@@ -361,10 +361,12 @@ def show_start_menu(user_id):
 
 # === АВТООТВЕТЧИК ===
 async def autoresponder_func(client, message):
-    """Автоответчик для входящих личных сообщений.
+    """Отвечает только на первое входящее сообщение в пустом ЛС.
 
-    Важно: этот handler работает только когда Pyrogram-клиент запущен через
-    start()/initialize(), а не просто подключён через connect().
+    Если до текущего входящего сообщения в диалоге не было никаких
+    сообщений, значит собеседник написал первым и автоответчик отвечает.
+    После очистки диалога история снова становится пустой, поэтому
+    следующий первый входящий снова вызовет автоответчик.
     """
     owner_id = None
     try:
@@ -386,45 +388,29 @@ async def autoresponder_func(client, message):
         if not user_cfg.get("autoresponder_active", False):
             return
 
-        sender_id = message.from_user.id
-        replied_users = [int(x) for x in user_cfg.get("replied_users", [])]
-        if sender_id in replied_users:
-            return
+        # Проверяем только сообщения ДО текущего входящего.
+        # Если там вообще ничего нет, собеседник действительно написал первым.
+        history_before = []
+        async for msg in client.get_chat_history(message.chat.id, limit=10):
+            if msg.id == message.id:
+                continue
+            history_before.append(msg)
+            if len(history_before) >= 10:
+                break
 
-        # Если владелец уже отвечал этому собеседнику, автоответ не нужен.
-        try:
-            recent = []
-            async for msg in client.get_chat_history(sender_id, limit=10):
-                recent.append(msg)
-                if len(recent) >= 10:
-                    break
-            owner_replied = any(
-                msg.from_user and msg.from_user.is_self
-                for msg in recent
-                if msg.id != message.id
-            )
-            if owner_replied:
-                replied_users.append(sender_id)
-                user_cfg["replied_users"] = replied_users[-1000:]
-                MEMORY_DB["config"][uid_str] = user_cfg
-                await async_db_save("config", uid_str, user_cfg)
-                return
-        except Exception as history_error:
-            logging.warning(f"Не удалось проверить историю для автоответчика: {history_error}")
+        if history_before:
+            return
 
         custom_greeting = user_cfg.get(
             "autoresponder_greeting",
             get_text(owner_id, "msg_autoresp_default")
         )
-        await client.send_message(chat_id=sender_id, text=custom_greeting)
+        await client.send_message(chat_id=message.chat.id, text=custom_greeting)
+        log_action(owner_id, f"Сработал автоответчик для пользователя {message.from_user.id}")
 
-        replied_users.append(sender_id)
-        user_cfg["replied_users"] = replied_users[-1000:]
-        MEMORY_DB["config"][uid_str] = user_cfg
-        await async_db_save("config", uid_str, user_cfg)
-        log_action(owner_id, f"Сработал автоответчик для пользователя {sender_id}")
     except Unauthorized:
-        await handle_revoked_session(owner_id, reason="сессия отозвана")
+        if owner_id:
+            await handle_revoked_session(owner_id, reason="сессия отозвана")
     except Exception as e:
         logging.error(f"Ошибка автоответчика: {e}")
 
