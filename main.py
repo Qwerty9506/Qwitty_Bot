@@ -361,18 +361,24 @@ def show_start_menu(user_id):
 
 # === АВТООТВЕТЧИК ===
 async def autoresponder_func(client, message):
-    """Отвечает только на первое входящее сообщение в пустом ЛС.
+    """
+    Отвечает, только если текущее входящее сообщение является первым
+    сообщением в текущем диалоге.
 
-    Если до текущего входящего сообщения в диалоге не было никаких
-    сообщений, значит собеседник написал первым и автоответчик отвечает.
-    После очистки диалога история снова становится пустой, поэтому
-    следующий первый входящий снова вызовет автоответчик.
+    Если переписка была полностью очищена, Telegram снова возвращает
+    пустую историю, поэтому следующий собеседник, написавший первым,
+    снова получит автоответ.
     """
     owner_id = None
+
     try:
         if not message.chat or message.chat.type != enums.ChatType.PRIVATE:
             return
-        if not message.from_user or message.from_user.is_self or message.from_user.is_bot:
+
+        if not message.from_user:
+            return
+
+        if message.from_user.is_self or message.from_user.is_bot:
             return
 
         owner_id = getattr(client, "owner_id", None)
@@ -380,37 +386,61 @@ async def autoresponder_func(client, message):
             return
 
         uid_str = str(owner_id)
-        user_cfg = MEMORY_DB["config"].get(uid_str) or await async_db_get("config", uid_str)
+
+        user_cfg = (
+            MEMORY_DB["config"].get(uid_str)
+            or await async_db_get("config", uid_str)
+        )
+
         if not user_cfg:
             return
+
         MEMORY_DB["config"][uid_str] = user_cfg
 
         if not user_cfg.get("autoresponder_active", False):
             return
 
-        # Проверяем только сообщения ДО текущего входящего.
-        # Если там вообще ничего нет, собеседник действительно написал первым.
-        history_before = []
-        async for msg in client.get_chat_history(message.chat.id, limit=10):
+        # Получаем историю ЛС.
+        # Текущее сообщение не считается.
+        # Если до него сообщений нет, значит собеседник написал первым.
+        previous_message_exists = False
+
+        async for msg in client.get_chat_history(
+            message.chat.id,
+            limit=10
+        ):
             if msg.id == message.id:
                 continue
-            history_before.append(msg)
-            if len(history_before) >= 10:
-                break
 
-        if history_before:
+            previous_message_exists = True
+            break
+
+        # В чате уже была переписка, поэтому автоответ не нужен.
+        if previous_message_exists:
             return
 
         custom_greeting = user_cfg.get(
             "autoresponder_greeting",
             get_text(owner_id, "msg_autoresp_default")
         )
-        await client.send_message(chat_id=message.chat.id, text=custom_greeting)
-        log_action(owner_id, f"Сработал автоответчик для пользователя {message.from_user.id}")
+
+        await client.send_message(
+            chat_id=message.chat.id,
+            text=custom_greeting
+        )
+
+        log_action(
+            owner_id,
+            f"Сработал автоответчик для пользователя {message.from_user.id}"
+        )
 
     except Unauthorized:
         if owner_id:
-            await handle_revoked_session(owner_id, reason="сессия отозвана")
+            await handle_revoked_session(
+                owner_id,
+                reason="сессия отозвана"
+            )
+
     except Exception as e:
         logging.error(f"Ошибка автоответчика: {e}")
 
