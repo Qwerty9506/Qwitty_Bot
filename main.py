@@ -80,6 +80,55 @@ TIMEZONE_NAMES = {
     9: "Tokyo/Seoul UTC+9"
 }
 
+REGISTRATION_FLOOD_SECONDS_DEFAULT = 0
+USER_MESSAGE_DELETE_DELAY = 3
+
+
+def format_remaining_time(seconds):
+    """Возвращает оставшееся время в удобном виде, включая секунды."""
+    total = max(0, int(seconds))
+    days, rem = divmod(total, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes, secs = divmod(rem, 60)
+
+    if days:
+        parts = [f"{days} дн."]
+        if hours:
+            parts.append(f"{hours} ч.")
+        if minutes:
+            parts.append(f"{minutes} мин.")
+        if secs:
+            parts.append(f"{secs} сек.")
+        return " ".join(parts)
+    if hours:
+        parts = [f"{hours} ч."]
+        if minutes:
+            parts.append(f"{minutes} мин.")
+        if secs:
+            parts.append(f"{secs} сек.")
+        return " ".join(parts)
+    if minutes:
+        return f"{minutes} мин. {secs} сек." if secs else f"{minutes} мин."
+    return f"{secs} сек."
+
+
+def get_registration_block_until(user_id):
+    uid_str = str(user_id)
+    cfg = MEMORY_DB["config"].get(uid_str) or db_get_data("config", uid_str) or {}
+    try:
+        return float(cfg.get("registration_block_until_ts", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def get_registration_block_remaining(user_id):
+    # +0.999 превращает время в понятный потолок до следующей полной секунды.
+    return max(0, int(get_registration_block_until(user_id) - time.time() + 0.999))
+
+
+def is_registration_blocked(user_id):
+    return get_registration_block_until(user_id) > time.time()
+
 TEXTS = {
     "btn_start": "Начинаем 🚀", 
     "btn_rules": "Правила 📜",
@@ -112,7 +161,7 @@ TEXTS = {
     "msg_already_logged": "Вы уже авторизованы! Переходим в меню...",
     "msg_auth_canceled": "Авторизация отменена.", 
     "msg_sending_req": "Отправка запроса... Подождите.",
-    "msg_limit_tg": "⚠️ **ЛИМИТ от Telegram!**\nПопробуйте через: **{0} сек.**",
+    "msg_limit_tg": "⚠️ **Вы поймали флуд от Telegram!**\n\nСлишком часто запрашивалась регистрация/код.\nПовторите через **{0}**.",
     "msg_error_send_code": "Ошибка при отправке кода: {0}\nПопробуйте снова через /start",
     "msg_auth_err": "Произошла ошибка: {0}\nПерезапустите через /start",
     "msg_session_lost": "Сессия разорвана.\nНачните заново через /start",
@@ -203,6 +252,7 @@ def get_user_state(user_id):
             "client": None, "state": "START",
             "time_nick_active": False, "time_nick_task": None, "status_24_7": False, "task_24_7": None,
             "autoresponder_active": False, "activity_task": None, "delete_count": 100,
+            "registration_block_until_ts": 0.0,
             "ui_action_count": 0,
             "temp_greeting": None
         }
@@ -233,7 +283,19 @@ async def close_pyrogram_client(client):
     except Exception:
         pass
 
+def show_registration_block_markup(user_id):
+    builder = InlineKeyboardBuilder()
+    builder.button(text=get_text(user_id, "btn_back_menu"), callback_data="registration_block_back")
+    return builder.as_markup()
+
+
+def get_registration_block_text(user_id):
+    return get_text(user_id, "msg_limit_tg", format_remaining_time(get_registration_block_remaining(user_id)))
+
+
 def get_missing_session_markup(user_id):
+    if is_registration_blocked(user_id):
+        return show_registration_block_markup(user_id)
     builder = InlineKeyboardBuilder()
     builder.button(text=get_text(user_id, "btn_register"), callback_data="start_re_register_menu")
     return builder.as_markup()
@@ -288,13 +350,14 @@ class RestartMiddleware(BaseMiddleware):
                     u_state["state"] = "MENU"
         return await handler(event, data)
 
+async def delete_user_message_later(message: types.Message, delay=USER_MESSAGE_DELETE_DELAY):
+    """Удаляет любое входящее сообщение пользователя ровно по истечении 3 секунд."""
+    await asyncio.sleep(delay)
+
 class IncomingUserMessageCleanupMiddleware(BaseMiddleware):
     async def __call__(self, handler, event, data):
         if isinstance(event, types.Message) and event.from_user and not event.from_user.is_bot:
-            try:
-                await event.delete()
-            except Exception:
-                pass
+            asyncio.create_task(delete_user_message_later(event))
         return await handler(event, data)
 
 dp.callback_query.middleware(RestartMiddleware())
@@ -508,20 +571,36 @@ async def update_profile_branding(user_id):
     data = get_user_state(user_id)
     uid_str = str(user_id)
     user_cfg = MEMORY_DB["config"].get(uid_str) or db_get_data("config", uid_str)
-    if not data["client"] or not data["client"].is_connected: return
+    if not data["client"] or not data["client"].is_connected:
+        return
 
     try:
         me = await data["client"].get_me()
-        base_name = me.first_name or "User"
-        base_name = re.sub(r'\s*\[.*?\]', '', base_name).strip()
-        branding = ""
+
+        # Удаляем только временной маркер времени вида [12:34].
+        clean_first = re.sub(r"\s*\[\d{1,2}:\d{2}\]", "", me.first_name or "User").strip()
+        clean_last = re.sub(r"\s*\[\d{1,2}:\d{2}\]", "", me.last_name or "").strip()
+
+        if not clean_first:
+            clean_first = "User"
+
+        new_first = clean_first
+        new_last = clean_last
+
         if user_cfg.get("time_nick_active", False):
             offset = user_cfg.get("timezone_offset", 5)
-            tz_now = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=offset, seconds=45)
-            branding += f" [{tz_now.strftime('%H:%M')}]"
-        final_name = f"{base_name}{branding}"
-        if final_name != me.first_name:
-            await data["client"].update_profile(first_name=final_name)
+            tz_now = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=offset)
+            time_marker = f"[{tz_now.strftime('%H:%M')}]"
+
+            # Фамилия есть -> время после фамилии.
+            # Фамилии нет -> время после имени/ника.
+            if clean_last:
+                new_last = f"{clean_last} {time_marker}"
+            else:
+                new_first = f"{clean_first} {time_marker}"
+
+        if new_first != (me.first_name or "") or new_last != (me.last_name or ""):
+            await data["client"].update_profile(first_name=new_first, last_name=new_last)
     except Exception as e:
         logging.error(f"Ошибка брендинга профиля: {e}")
 
@@ -738,11 +817,6 @@ async def cmd_start(message: types.Message):
     user_id = message.from_user.id
     data = get_user_state(user_id)
     uid_str = str(user_id)
-    try:
-        await message.delete()
-    except Exception:
-        pass
-
     if data.get("msg_id"):
         try:
             await bot.delete_message(chat_id=user_id, message_id=data["msg_id"])
@@ -758,6 +832,7 @@ async def cmd_start(message: types.Message):
             "autoresponder_greeting": get_text(user_id, "msg_autoresp_default"),
             "timezone_offset": 5,
             "used_247_seconds": 0.0, "last_247_start_ts": 0.0, "used_timenick_seconds": 0.0,
+            "registration_block_until_ts": 0.0,
             "replied_users": [], "username": message.from_user.username or "N/A",
             "first_name": message.from_user.first_name or "User", "logged_in": False,
             "msg_id": None, "session_string": None
@@ -773,7 +848,15 @@ async def cmd_start(message: types.Message):
     else:
         data["state"] = "START"
         log_action(user_id, "Ввёл команду /start")
-        await edit_or_send(user_id, get_text(user_id, "msg_start"), reply_markup=show_start_menu(user_id))
+        if is_registration_blocked(user_id):
+            await edit_or_send(
+                user_id,
+                get_registration_block_text(user_id),
+                reply_markup=show_registration_block_markup(user_id),
+                parse_mode="Markdown"
+            )
+        else:
+            await edit_or_send(user_id, get_text(user_id, "msg_start"), reply_markup=show_start_menu(user_id))
 
 @dp.callback_query(F.data.in_(["rules_view", "rules_menu_view"]))
 async def handle_rules(callback: types.CallbackQuery):
@@ -805,13 +888,65 @@ async def start_re_register_menu(callback: types.CallbackQuery):
     user_id = callback.from_user.id
     data = get_user_state(user_id)
     data["state"] = "START"
+
+    if is_registration_blocked(user_id):
+        await edit_or_send(
+            user_id,
+            get_registration_block_text(user_id),
+            reply_markup=show_registration_block_markup(user_id),
+            parse_mode="Markdown"
+        )
+        try: await callback.answer()
+        except Exception: pass
+        return
+
     await edit_or_send(user_id, get_text(user_id, "msg_start_register"), reply_markup=show_start_menu(user_id))
+    try: await callback.answer()
+    except Exception: pass
+
+
+@dp.callback_query(F.data == "registration_block_back")
+async def registration_block_back(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
+
+    if is_registration_blocked(user_id):
+        await edit_or_send(
+            user_id,
+            get_registration_block_text(user_id),
+            reply_markup=show_registration_block_markup(user_id),
+            parse_mode="Markdown"
+        )
+    else:
+        await edit_or_send(
+            user_id,
+            get_text(user_id, "msg_start"),
+            reply_markup=show_start_menu(user_id)
+        )
+
     try: await callback.answer()
     except Exception: pass
 
 @dp.callback_query(F.data == "start_login")
 async def start_login(callback: types.CallbackQuery):
     user_id = callback.from_user.id
+
+    if is_registration_blocked(user_id):
+        remaining_text = get_registration_block_text(user_id)
+        await edit_or_send(
+            user_id,
+            remaining_text,
+            reply_markup=show_registration_block_markup(user_id),
+            parse_mode="Markdown"
+        )
+        try:
+            await callback.answer(
+                f"Регистрация временно заморожена: {format_remaining_time(get_registration_block_remaining(user_id))}",
+                show_alert=True
+            )
+        except Exception:
+            pass
+        return
+
     is_valid = await ensure_client_connected(user_id)
     if is_valid:
         try: await callback.answer(get_text(user_id, "msg_already_logged"), show_alert=False)
@@ -852,10 +987,18 @@ async def cancel_auth(callback: types.CallbackQuery):
 async def process_phone(message: types.Message):
     user_id = message.from_user.id
     data = get_user_state(user_id)
-    phone = message.text.strip().replace(" ", "")
-    try: await message.delete()
-    except Exception: pass
 
+    if is_registration_blocked(user_id):
+        data["state"] = "START"
+        await edit_or_send(
+            user_id,
+            get_registration_block_text(user_id),
+            reply_markup=show_registration_block_markup(user_id),
+            parse_mode="Markdown"
+        )
+        return
+
+    phone = (message.text or "").strip().replace(" ", "")
     if not phone.startswith("+") or not phone[1:].isdigit(): return
 
     if data["client"]:
@@ -886,9 +1029,26 @@ async def process_phone(message: types.Message):
         await edit_or_send(user_id, get_text(user_id, "msg_code_req"), reply_markup=builder.as_markup(), parse_mode="Markdown")
     except FloodWait as e:
         data["state"] = "START"
-        builder = InlineKeyboardBuilder()
-        builder.button(text=get_text(user_id, "btn_back"), callback_data="cancel_auth")
-        await edit_or_send(user_id, get_text(user_id, "msg_limit_tg", e.value), reply_markup=builder.as_markup(), parse_mode="Markdown")
+        flood_seconds = max(0, int(getattr(e, "value", 0) or 0))
+
+        # Сохраняем момент разблокировки в Supabase, поэтому после рестарта
+        # регистрация всё равно останется замороженной до истечения полного срока.
+        uid_str = str(user_id)
+        cfg = MEMORY_DB["config"].get(uid_str) or await async_db_get("config", uid_str) or {}
+        cfg["registration_block_until_ts"] = time.time() + flood_seconds
+        MEMORY_DB["config"][uid_str] = cfg
+        asyncio.create_task(async_db_save("config", uid_str, cfg))
+
+        if data.get("client"):
+            await close_pyrogram_client(data["client"])
+            data["client"] = None
+
+        await edit_or_send(
+            user_id,
+            get_text(user_id, "msg_limit_tg", format_remaining_time(flood_seconds)),
+            reply_markup=show_registration_block_markup(user_id),
+            parse_mode="Markdown"
+        )
     except Exception as e:
         await edit_or_send(user_id, get_text(user_id, "msg_error_send_code", str(e)), reply_markup=show_start_menu(user_id))
         data["state"] = "START"
@@ -907,6 +1067,7 @@ def save_user_config(user_id, message, is_logged_in=True):
         "timezone_offset": old_cfg.get("timezone_offset", 5),
         "delete_today_count": old_cfg.get("delete_today_count", 0),
         "delete_limit_reset_ts": old_cfg.get("delete_limit_reset_ts", 0.0),
+        "registration_block_until_ts": old_cfg.get("registration_block_until_ts", 0.0),
         "used_247_seconds": old_cfg.get("used_247_seconds", 0.0),
         "last_247_start_ts": old_cfg.get("last_247_start_ts", 0.0),
         "used_timenick_seconds": old_cfg.get("used_timenick_seconds", 0.0),
@@ -925,9 +1086,6 @@ async def process_code(message: types.Message):
     user_id = message.from_user.id
     data = get_user_state(user_id)
     code = re.sub(r'\D', '', message.text.strip())
-
-    try: await message.delete()
-    except Exception: pass
 
     if not code.isdigit(): return
 
@@ -979,9 +1137,6 @@ async def process_password(message: types.Message):
     data = get_user_state(user_id)
     password = message.text.strip()
     client = data["client"]
-
-    try: await message.delete()
-    except Exception: pass
 
     if not client or not client.is_connected:
         data["state"] = "START"
@@ -1099,9 +1254,6 @@ async def process_autoresponder_greeting(message: types.Message):
     user_id = message.from_user.id
     data = get_user_state(user_id)
     new_greeting = message.text.strip()
-    try: await message.delete()
-    except Exception: pass
-
     uid_str = str(user_id)
     user_cfg = MEMORY_DB["config"].get(uid_str) or db_get_data("config", uid_str)
     user_cfg["autoresponder_greeting"] = new_greeting
