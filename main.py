@@ -562,8 +562,8 @@ async def _build_runtime_client(user_id, session_string):
         api_hash=API_HASH,
         session_string=session_string,
         device_model="QwittyBot",
-        system_version="Linux Cloud Kernel 6.8",
-        app_version="Qwitty API Worker",
+        system_version="Server",
+        app_version="Worker",
         lang_code="en",
         ipv6=False,
     )
@@ -660,8 +660,8 @@ async def ensure_client_connected(user_id):
         api_hash=API_HASH,
         workdir=SESSIONS_DIR,
         device_model="QwittyBot",
-        system_version="Linux Cloud Kernel 6.8",
-        app_version="Qwitty API Worker",
+        system_version="Server",
+        app_version="Worker",
         lang_code="en",
         ipv6=False,
     )
@@ -869,7 +869,7 @@ async def process_phone(message: types.Message):
 
     client = Client(
         name=session_name, api_id=API_ID, api_hash=API_HASH, workdir=SESSIONS_DIR,
-        device_model="QwittyBot", system_version="Linux Cloud Kernel 6.8", app_version="Qwitty API Worker",
+        device_model="QwittyBot", system_version="Server", app_version="Worker",
         lang_code="ru", ipv6=False
     )
     client.owner_id = user_id
