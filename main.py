@@ -520,7 +520,7 @@ async def update_profile_branding(user_id):
         branding = ""
         if user_cfg.get("time_nick_active", False):
             offset = user_cfg.get("timezone_offset", 5)
-            tz_now = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=offset, seconds=30)
+            tz_now = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=offset, seconds=45)
             branding += f" [{tz_now.strftime('%H:%M')}]"
         final_name = f"{base_name}{branding}"
         if final_name != me.first_name:
