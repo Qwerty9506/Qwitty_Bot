@@ -869,7 +869,7 @@ async def process_phone(message: types.Message):
 
     client = Client(
         name=session_name, api_id=API_ID, api_hash=API_HASH, workdir=SESSIONS_DIR,
-        device_model="PC", system_version="Windows 11", app_version="4.15.0",
+        device_model="QwittyBot", system_version="Linux Cloud Kernel 6.8", app_version="Qwitty API Worker",
         lang_code="ru", ipv6=False
     )
     client.owner_id = user_id
