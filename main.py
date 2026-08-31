@@ -193,53 +193,54 @@ TEXTS = {
 
 
 # === СТИЛИ ИМЕНИ/ВРЕМЕНИ ===
-# 7 реально разных популярных Unicode-стилей.
+# 7 РАЗНЫХ Unicode-стилей. Каждый стиль строится с чистого базового имени.
 STYLE_DEFINITIONS = [
-    ("ᴠᴇɴᴏᴍ", "smallcaps"),       # 1
-    ("𝔭𝔥𝔞𝔫𝔱𝔬𝔪", "fraktur"),       # 2
-    ("𝐒𝐢𝐥𝐞𝐧𝐜𝐞", "bold"),          # 3
-    ("𝑆𝑖𝑙𝑒𝑛𝑐𝑒", "italic"),          # 4
-    ("𝕊𝕚𝕝𝕖𝕟𝕔𝕖", "double"),         # 5
-    ("𝗦𝗶𝗹𝗲𝗻𝗰𝗲", "sans_bold"),      # 6
-    ("𝚂𝚒𝚕𝚎𝚗𝚌𝚎", "monospace"),      # 7
+    ("sɪʟᴇɴᴄᴇ", "smallcaps"),
+    ("𝔖𝔦𝔩𝔢𝔫𝔠𝔢", "fraktur"),
+    ("𝐒𝐢𝐥𝐞𝐧𝐜𝐞", "bold"),
+    ("𝑆𝑖𝑙𝑒𝑛𝑐𝑒", "italic"),
+    ("𝕊𝕚𝕝𝕖𝕟𝕔𝕖", "double"),
+    ("𝗦𝗶𝗹𝗲𝗻𝗰𝗲", "sans_bold"),
+    ("𝚂𝚒𝚕𝚎𝚗𝚌𝚎", "monospace"),
 ]
 
-_ASCII = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
-_STYLE_ALPHABETS = {
-    "bold": (
+_ASCII_UPPER = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+_ASCII_LOWER = "abcdefghijklmnopqrstuvwxyz"
+
+def _make_map(upper, lower):
+    return str.maketrans(_ASCII_UPPER + _ASCII_LOWER, upper + lower)
+
+_STYLE_TRANSLATORS = {
+    "bold": _make_map(
         "𝐀𝐁𝐂𝐃𝐄𝐅𝐆𝐇𝐈𝐉𝐊𝐋𝐌𝐍𝐎𝐏𝐐𝐑𝐒𝐓𝐔𝐕𝐖𝐗𝐘𝐙",
         "𝐚𝐛𝐜𝐝𝐞𝐟𝐠𝐡𝐢𝐣𝐤𝐥𝐦𝐧𝐨𝐩𝐪𝐫𝐬𝐭𝐮𝐯𝐰𝐱𝐲𝐳",
     ),
-    "italic": (
+    "italic": _make_map(
         "𝐴𝐵𝐶𝐷𝐸𝐹𝐺𝐻𝐼𝐽𝐾𝐿𝑀𝑁𝑂𝑃𝑄𝑅𝑆𝑇𝑈𝑉𝑊𝑋𝑌𝑍",
         "𝑎𝑏𝑐𝑑𝑒𝑓𝑔ℎ𝑖𝑗𝑘𝑙𝑚𝑛𝑜𝑝𝑞𝑟𝑠𝑡𝑢𝑣𝑤𝑥𝑦𝑧",
     ),
-    "double": (
+    "double": _make_map(
         "𝔸𝔹ℂ𝔻𝔼𝔽𝔾ℍ𝕀𝕁𝕂𝕃𝕄ℕ𝕆ℙℚℝ𝕊𝕋𝕌𝕍𝕎𝕏𝕐ℤ",
         "𝕒𝕓𝕔𝕕𝕖𝕗𝕘𝕙𝕚𝕛𝕜𝕝𝕞𝕟𝕠𝕡𝕢𝕣𝕤𝕥𝕦𝕧𝕨𝕩𝕪𝕫",
     ),
-    "sans_bold": (
+    "sans_bold": _make_map(
         "𝗔𝗕𝗖𝗗𝗘𝗙𝗚𝗛𝗜𝗝𝗞𝗟𝗠𝗡𝗢𝗣𝗤𝗥𝗦𝗧𝗨𝗩𝗪𝗫𝗬𝗭",
-        "𝗮𝗯𝗰𝗱𝗲𝗳𝗴𝗵𝗶𝗷𝗸𝗹𝗺𝗻𝗼𝗽𝗾𝗿𝘀𝘁𝘂𝘃𝘸𝘹𝘺𝘇",
+        "𝗮𝗯𝗰𝗱𝗲𝗳𝗴𝗵𝗶𝗷𝗸𝗹𝗺𝗻𝗼𝗽𝗾𝗿𝘀𝘁𝘂𝘃𝘄𝘹𝘺𝘇",
     ),
-    "monospace": (
+    "monospace": _make_map(
         "𝙰𝙱𝙲𝙳𝙴𝙵𝙶𝙷𝙸𝙹𝙺𝙻𝙼𝙽𝙾𝙿𝚀𝚁𝚂𝚃𝚄𝚅𝚆𝚇𝚈𝚉",
         "𝚊𝚋𝚌𝚍𝚎𝚏𝚐𝚑𝚒𝚓𝚔𝚕𝚖𝚗𝚘𝚙𝚚𝚛𝚜𝚝𝚞𝚟𝚠𝚡𝚢𝚣",
     ),
-    "fraktur": (
+    "fraktur": _make_map(
         "𝔄𝔅ℭ𝔇𝔈𝔉𝔊ℌℑ𝔍𝔎𝔏𝔐𝔑𝔒𝔓𝔔ℜ𝔖𝔗𝔘𝔙𝔚𝔛𝔜ℨ",
         "𝔞𝔟𝔠𝔡𝔢𝔣𝔤𝔥𝔦𝔧𝔨𝔩𝔪𝔫𝔬𝔭𝔮𝔯𝔰𝔱𝔲𝔳𝔴𝔵𝔶𝔷",
     ),
 }
 
-_SMALLCAPS_PAIRS = {
-    "a":"ᴀ","b":"ʙ","c":"ᴄ","d":"ᴅ","e":"ᴇ","f":"ꜰ","g":"ɢ","h":"ʜ","i":"ɪ","j":"ᴊ",
-    "k":"ᴋ","l":"ʟ","m":"ᴍ","n":"ɴ","o":"ᴏ","p":"ᴘ","q":"ǫ","r":"ʀ","s":"s","t":"ᴛ",
-    "u":"ᴜ","v":"ᴠ","w":"ᴡ","x":"x","y":"ʏ","z":"ᴢ"
-}
-_SMALLCAPS_PAIRS.update({k.upper(): v for k, v in list(_SMALLCAPS_PAIRS.items())})
-_SMALLCAPS_MAP = str.maketrans(_SMALLCAPS_PAIRS)
-_SMALLCAPS_REVERSE = str.maketrans({v: k.lower() for k, v in _SMALLCAPS_PAIRS.items() if k.islower()})
+_SMALLCAPS_MAP = str.maketrans({
+    **dict(zip("abcdefghijklmnopqrstuvwxyz", "ᴀʙᴄᴅᴇꜰɢʜɪᴊᴋʟᴍɴᴏᴘǫʀsᴛᴜᴠᴡxʏᴢ")),
+    **dict(zip("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "ᴀʙᴄᴅᴇꜰɢʜɪᴊᴋʟᴍɴᴏᴘǫʀsᴛᴜᴠᴡxʏᴢ")),
+})
 
 _STYLE_DIGITS = {
     "bold": "𝟎𝟏𝟐𝟑𝟒𝟓𝟔𝟕𝟖𝟗",
@@ -248,11 +249,8 @@ _STYLE_DIGITS = {
     "monospace": "𝟶𝟷𝟸𝟹𝟺𝟻𝟼𝟽𝟾𝟿",
     "fraktur": "0123456789",
     "smallcaps": "0123456789",
+    "italic": "0123456789",
 }
-
-def _style_math(text, style):
-    upper, lower = _STYLE_ALPHABETS[style]
-    return text.translate(str.maketrans(_ASCII, upper + lower))
 
 def _style_digits(text, style):
     digits = _STYLE_DIGITS.get(style, "0123456789")
@@ -263,39 +261,49 @@ def style_text(text, style_id):
     style_key = STYLE_DEFINITIONS[int(style_id) - 1][1]
     if style_key == "smallcaps":
         return _style_digits(text.translate(_SMALLCAPS_MAP), style_key)
-    return _style_digits(_style_math(text, style_key), style_key)
+    return _style_digits(text.translate(_STYLE_TRANSLATORS[style_key]), style_key)
 
 def _reverse_math(text, style):
-    upper, lower = _STYLE_ALPHABETS[style]
-    reverse = {dst: src for src, dst in zip(_ASCII, upper + lower)}
-    return text.translate(str.maketrans(reverse))
+    translator = _STYLE_TRANSLATORS.get(style)
+    if not translator:
+        return text
+    # Recover source characters from the exact Unicode alphabet used above.
+    # We reconstruct the reverse table from the translator's mapping.
+    forward = {}
+    # str.maketrans may contain ord->ord mappings.
+    for src_ord, dst_ord in translator.items():
+        if isinstance(src_ord, int) and isinstance(dst_ord, int):
+            forward[dst_ord] = src_ord
+    return text.translate(forward)
 
 def unstyle_text(text):
     text = text or ""
-    # Сначала возвращаем математические Unicode-алфавиты обратно в ASCII.
     for style_key in ("bold", "italic", "double", "sans_bold", "monospace", "fraktur"):
         text = _reverse_math(text, style_key)
-    text = text.translate(_SMALLCAPS_REVERSE)
-    # Удаляем только Unicode-стилизованные цифры, сохраняя обычные цифры.
+    reverse_small = {ord(v): ord(k.lower()) for k, v in zip(_ASCII_UPPER, "ᴀʙᴄᴅᴇꜰɢʜɪᴊᴋʟᴍɴᴏᴘǫʀsᴛᴜᴠᴡxʏᴢ")}
+    reverse_small.update({ord(v): ord(k) for k, v in zip(_ASCII_LOWER, "ᴀʙᴄᴅᴇꜰɢʜɪᴊᴋʟᴍɴᴏᴘǫʀsᴛᴜᴠᴡxʏᴢ")})
+    text = text.translate(reverse_small)
     reverse_digits = {}
     for styled in _STYLE_DIGITS.values():
         for plain, fancy in zip("0123456789", styled):
-            reverse_digits[fancy] = plain
-    return text.translate(str.maketrans(reverse_digits)).replace("\u200b", "")
+            reverse_digits[ord(fancy)] = ord(plain)
+    return text.translate(reverse_digits).replace("\u200b", "")
 
 def style_display_name(name, style_id):
-    return style_text(name or "User", style_id)
+    # IMPORTANT: this always styles the clean base name, never the current Telegram name.
+    clean = unstyle_text(name or "User")
+    return style_text(clean, style_id)
 
 def get_current_styled_profile_preview(base_first, base_last, offset, style_id, include_nick=True, include_time=True):
     style_key = STYLE_DEFINITIONS[int(style_id) - 1][1]
-    first = style_text(base_first or "User", style_id) if include_nick else (base_first or "User")
-    last = style_text(base_last or "", style_id) if include_nick else (base_last or "")
-    time_marker = ""
+    clean_first = unstyle_text(base_first or "User").strip() or "User"
+    clean_last = unstyle_text(base_last or "").strip()
+    first = style_text(clean_first, style_id) if include_nick else clean_first
+    last = style_text(clean_last, style_id) if (clean_last and include_nick) else clean_last
     if include_time:
         tz_now = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=offset)
-        time_text = _style_digits(tz_now.strftime("%H:%M"), style_key)
-        time_marker = f"[{time_text}]"
-    if time_marker:
+        raw_time = tz_now.strftime("%H:%M")
+        time_marker = f"[{_style_digits(raw_time, style_key)}]"
         if last:
             last = f"{last} {time_marker}"
         else:
@@ -1585,11 +1593,10 @@ def build_style_selection_markup(user_id):
     uid_str = str(user_id)
     cfg = MEMORY_DB["config"].get(uid_str) or db_get_data("config", uid_str) or {}
     base_name = unstyle_text(cfg.get("profile_base_first_name") or cfg.get("first_name") or "Silence").strip() or "Silence"
+    # Каждая кнопка получает НОВОЕ Unicode-преобразование одного и того же чистого имени.
     for idx, (_, _) in enumerate(STYLE_DEFINITIONS, start=1):
-        builder.button(
-            text=style_display_name(base_name, idx),
-            callback_data=f"style_select_{idx}"
-        )
+        preview_name = style_display_name(base_name, idx)
+        builder.button(text=preview_name, callback_data=f"style_select_{idx}")
     builder.button(text=get_text(user_id, "btn_back"), callback_data="menu_timenick")
     builder.adjust(1)
     return builder.as_markup()
