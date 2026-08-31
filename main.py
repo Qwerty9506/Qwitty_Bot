@@ -273,7 +273,7 @@ def _reverse_math(text, style):
 def unstyle_text(text):
     text = text or ""
     # Сначала возвращаем математические Unicode-алфавиты обратно в ASCII.
-    for style_key in ("bold", "bold_italic", "double", "sans_bold", "monospace", "fraktur"):
+    for style_key in ("bold", "italic", "double", "sans_bold", "monospace", "fraktur"):
         text = _reverse_math(text, style_key)
     text = text.translate(_SMALLCAPS_REVERSE)
     # Удаляем только Unicode-стилизованные цифры, сохраняя обычные цифры.
