@@ -193,24 +193,26 @@ TEXTS = {
 
 
 # === СТИЛИ ИМЕНИ/ВРЕМЕНИ ===
+# 7 реально разных популярных Unicode-стилей.
 STYLE_DEFINITIONS = [
-    ("ᴠᴇɴᴏᴍ", "smallcaps"),
-    ("𝔭𝔥𝔞𝔫𝔱𝔬𝔪", "fraktur"),
-    ("𝑺𝒊𝒍𝒆𝒏𝒄𝒆", "bold_italic"),
-    ("ᴠ ᴏ ɪ ᴅ", "spaced_smallcaps"),
-    ("𝕊𝕙𝕒𝕕𝕠𝕨", "double"),
-    ("𝗦𝗶𝗹𝗲𝗻𝗰𝗲", "sans_bold"),
-    ("𝘚𝘪𝘭𝘦𝘯𝘤𝘦", "sans_italic"),
+    ("ᴠᴇɴᴏᴍ", "smallcaps"),       # 1
+    ("𝔭𝔥𝔞𝔫𝔱𝔬𝔪", "fraktur"),       # 2
+    ("𝐒𝐢𝐥𝐞𝐧𝐜𝐞", "bold"),          # 3
+    ("𝑆𝑖𝑙𝑒𝑛𝑐𝑒", "italic"),          # 4
+    ("𝕊𝕚𝕝𝕖𝕟𝕔𝕖", "double"),         # 5
+    ("𝗦𝗶𝗹𝗲𝗻𝗰𝗲", "sans_bold"),      # 6
+    ("𝚂𝚒𝚕𝚎𝚗𝚌𝚎", "monospace"),      # 7
 ]
 
-# Unicode mathematical alphabets. Digits are styled where Unicode provides them;
-# for small-caps/fraktur styles the digits remain regular because there is no
-# matching complete Unicode digit alphabet.
 _ASCII = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
 _STYLE_ALPHABETS = {
-    "bold_italic": (
-        "𝑨𝑩𝑪𝑫𝑬𝑭𝑮𝑯𝑰𝑱𝑲𝑳𝑴𝑵𝑶𝑷𝑸𝑹𝑺𝑻𝑼𝑽𝑾𝑿𝒀𝒁",
-        "𝒂𝒃𝒄𝒅𝒆𝒇𝒈𝒉𝒊𝒋𝒌𝒍𝒎𝒏𝒐𝒑𝒒𝒓𝒔𝒕𝒖𝒗𝒘𝒙𝒚𝒛",
+    "bold": (
+        "𝐀𝐁𝐂𝐃𝐄𝐅𝐆𝐇𝐈𝐉𝐊𝐋𝐌𝐍𝐎𝐏𝐐𝐑𝐒𝐓𝐔𝐕𝐖𝐗𝐘𝐙",
+        "𝐚𝐛𝐜𝐝𝐞𝐟𝐠𝐡𝐢𝐣𝐤𝐥𝐦𝐧𝐨𝐩𝐪𝐫𝐬𝐭𝐮𝐯𝐰𝐱𝐲𝐳",
+    ),
+    "italic": (
+        "𝐴𝐵𝐶𝐷𝐸𝐹𝐺𝐻𝐼𝐽𝐾𝐿𝑀𝑁𝑂𝑃𝑄𝑅𝑆𝑇𝑈𝑉𝑊𝑋𝑌𝑍",
+        "𝑎𝑏𝑐𝑑𝑒𝑓𝑔ℎ𝑖𝑗𝑘𝑙𝑚𝑛𝑜𝑝𝑞𝑟𝑠𝑡𝑢𝑣𝑤𝑥𝑦𝑧",
     ),
     "double": (
         "𝔸𝔹ℂ𝔻𝔼𝔽𝔾ℍ𝕀𝕁𝕂𝕃𝕄ℕ𝕆ℙℚℝ𝕊𝕋𝕌𝕍𝕎𝕏𝕐ℤ",
@@ -218,11 +220,11 @@ _STYLE_ALPHABETS = {
     ),
     "sans_bold": (
         "𝗔𝗕𝗖𝗗𝗘𝗙𝗚𝗛𝗜𝗝𝗞𝗟𝗠𝗡𝗢𝗣𝗤𝗥𝗦𝗧𝗨𝗩𝗪𝗫𝗬𝗭",
-        "𝗮𝗯𝗰𝗱𝗲𝗳𝗴𝗵𝗶𝗷𝗸𝗹𝗺𝗻𝗼𝗽𝗾𝗿𝘀𝘁𝘂𝘃𝘸𝘹𝘆𝘇",
+        "𝗮𝗯𝗰𝗱𝗲𝗳𝗴𝗵𝗶𝗷𝗸𝗹𝗺𝗻𝗼𝗽𝗾𝗿𝘀𝘁𝘂𝘃𝘸𝘹𝘺𝘇",
     ),
-    "sans_italic": (
-        "𝘈𝘉𝘊𝘋𝘌𝘍𝘎𝘏𝘐𝘑𝘒𝘓𝘔𝘕𝘖𝘗𝘘𝘙𝘚𝘛𝘜𝘝𝘞𝘟𝘠𝘡",
-        "𝘢𝘣𝘤𝘥𝘦𝘧𝘨𝘩𝘪𝘫𝘬𝘭𝘮𝘯𝘰𝘱𝘲𝘳𝘴𝘵𝘶𝘷𝘸𝘹𝘺𝘻",
+    "monospace": (
+        "𝙰𝙱𝙲𝙳𝙴𝙵𝙶𝙷𝙸𝙹𝙺𝙻𝙼𝙽𝙾𝙿𝚀𝚁𝚂𝚃𝚄𝚅𝚆𝚇𝚈𝚉",
+        "𝚊𝚋𝚌𝚍𝚎𝚏𝚐𝚑𝚒𝚓𝚔𝚕𝚖𝚗𝚘𝚙𝚚𝚛𝚜𝚝𝚞𝚟𝚠𝚡𝚢𝚣",
     ),
     "fraktur": (
         "𝔄𝔅ℭ𝔇𝔈𝔉𝔊ℌℑ𝔍𝔎𝔏𝔐𝔑𝔒𝔓𝔔ℜ𝔖𝔗𝔘𝔙𝔚𝔛𝔜ℨ",
@@ -230,83 +232,75 @@ _STYLE_ALPHABETS = {
     ),
 }
 
-_SMALLCAPS_MAP = str.maketrans({
-    "a":"ᴀ","b":"ʙ","c":"ᴄ","d":"ᴅ","e":"ᴇ","f":"ꜰ","g":"ɢ","h":"ʜ","i":"ɪ","j":"ᴊ",
-    "k":"ᴋ","l":"ʟ","m":"ᴍ","n":"ɴ","o":"ᴏ","p":"ᴘ","q":"ǫ","r":"ʀ","s":"s","t":"ᴛ",
-    "u":"ᴜ","v":"ᴠ","w":"ᴡ","x":"x","y":"ʏ","z":"ᴢ",
-    "A":"ᴀ","B":"ʙ","C":"ᴄ","D":"ᴅ","E":"ᴇ","F":"ꜰ","G":"ɢ","H":"ʜ","I":"ɪ","J":"ᴊ",
-    "K":"ᴋ","L":"ʟ","M":"ᴍ","N":"ɴ","O":"ᴏ","P":"ᴘ","Q":"ǫ","R":"ʀ","S":"s","T":"ᴛ",
-    "U":"ᴜ","V":"ᴠ","W":"ᴡ","X":"x","Y":"ʏ","Z":"ᴢ",
-})
-
-_SMALLCAPS_REVERSE = str.maketrans({v:k for k,v in {
+_SMALLCAPS_PAIRS = {
     "a":"ᴀ","b":"ʙ","c":"ᴄ","d":"ᴅ","e":"ᴇ","f":"ꜰ","g":"ɢ","h":"ʜ","i":"ɪ","j":"ᴊ",
     "k":"ᴋ","l":"ʟ","m":"ᴍ","n":"ɴ","o":"ᴏ","p":"ᴘ","q":"ǫ","r":"ʀ","s":"s","t":"ᴛ",
     "u":"ᴜ","v":"ᴠ","w":"ᴡ","x":"x","y":"ʏ","z":"ᴢ"
-}.items()})
+}
+_SMALLCAPS_PAIRS.update({k.upper(): v for k, v in list(_SMALLCAPS_PAIRS.items())})
+_SMALLCAPS_MAP = str.maketrans(_SMALLCAPS_PAIRS)
+_SMALLCAPS_REVERSE = str.maketrans({v: k.lower() for k, v in _SMALLCAPS_PAIRS.items() if k.islower()})
+
+_STYLE_DIGITS = {
+    "bold": "𝟎𝟏𝟐𝟑𝟒𝟓𝟔𝟕𝟖𝟗",
+    "double": "𝟘𝟙𝟚𝟛𝟜𝟝𝟞𝟟𝟠𝟡",
+    "sans_bold": "𝟬𝟭𝟮𝟯𝟰𝟱𝟲𝟳𝟴𝟵",
+    "monospace": "𝟶𝟷𝟸𝟹𝟺𝟻𝟼𝟽𝟾𝟿",
+    "fraktur": "0123456789",
+    "smallcaps": "0123456789",
+}
 
 def _style_math(text, style):
     upper, lower = _STYLE_ALPHABETS[style]
-    trans = str.maketrans(_ASCII, upper + lower)
-    return text.translate(trans)
+    return text.translate(str.maketrans(_ASCII, upper + lower))
 
 def _style_digits(text, style):
-    digit_sets = {
-        "bold_italic": "𝟎𝟏𝟐𝟑𝟒𝟓𝟔𝟕𝟖𝟗",
-        "sans_bold": "𝟬𝟭𝟮𝟯𝟰𝟱𝟲𝟳𝟴𝟵",
-        "double": "𝟘𝟙𝟚𝟛𝟜𝟝𝟞𝟟𝟠𝟡",
-        "sans_italic": "0123456789",
-        "fraktur": "0123456789",
-        "smallcaps": "0123456789",
-        "spaced_smallcaps": "0123456789",
-    }
-    return text.translate(str.maketrans("0123456789", digit_sets[style]))
+    digits = _STYLE_DIGITS.get(style, "0123456789")
+    return text.translate(str.maketrans("0123456789", digits))
 
 def style_text(text, style_id):
+    text = text or ""
     style_key = STYLE_DEFINITIONS[int(style_id) - 1][1]
     if style_key == "smallcaps":
         return _style_digits(text.translate(_SMALLCAPS_MAP), style_key)
-    if style_key == "spaced_smallcaps":
-        base = _style_digits(text.translate(_SMALLCAPS_MAP), style_key)
-        return " ".join(list(base.replace(" ", "")))
-    styled = _style_math(text, style_key)
-    return _style_digits(styled, style_key)
+    return _style_digits(_style_math(text, style_key), style_key)
 
 def _reverse_math(text, style):
     upper, lower = _STYLE_ALPHABETS[style]
-    reverse = {}
-    for src, dst in zip(_ASCII, upper + lower):
-        reverse[dst] = src
+    reverse = {dst: src for src, dst in zip(_ASCII, upper + lower)}
     return text.translate(str.maketrans(reverse))
 
 def unstyle_text(text):
-    text = text.translate(_SMALLCAPS_REVERSE)
-    for style_key in ("bold_italic", "double", "sans_bold", "sans_italic", "fraktur"):
+    text = text or ""
+    # Сначала возвращаем математические Unicode-алфавиты обратно в ASCII.
+    for style_key in ("bold", "bold_italic", "double", "sans_bold", "monospace", "fraktur"):
         text = _reverse_math(text, style_key)
-    return text.replace("\u200b", "")
+    text = text.translate(_SMALLCAPS_REVERSE)
+    # Удаляем только Unicode-стилизованные цифры, сохраняя обычные цифры.
+    reverse_digits = {}
+    for styled in _STYLE_DIGITS.values():
+        for plain, fancy in zip("0123456789", styled):
+            reverse_digits[fancy] = plain
+    return text.translate(str.maketrans(reverse_digits)).replace("\u200b", "")
 
 def style_display_name(name, style_id):
     return style_text(name or "User", style_id)
 
-def get_style_label(user_id, style_id, base_name):
-    return style_text(base_name or get_text(user_id, "msg_menu"), style_id)
-
 def get_current_styled_profile_preview(base_first, base_last, offset, style_id, include_nick=True, include_time=True):
+    style_key = STYLE_DEFINITIONS[int(style_id) - 1][1]
     first = style_text(base_first or "User", style_id) if include_nick else (base_first or "User")
     last = style_text(base_last or "", style_id) if include_nick else (base_last or "")
-    time_text = ""
+    time_marker = ""
     if include_time:
         tz_now = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=offset)
-        time_text = _style_digits(tz_now.strftime("%H:%M"), STYLE_DEFINITIONS[int(style_id)-1][1])
-        time_text = f"[{time_text}]"
-    if time_text:
+        time_text = _style_digits(tz_now.strftime("%H:%M"), style_key)
+        time_marker = f"[{time_text}]"
+    if time_marker:
         if last:
-            last = f"{last} {time_text}"
+            last = f"{last} {time_marker}"
         else:
-            first = f"{first} {time_text}"
-    if last:
-        return f"{first}\n{last}"
-    return first
+            first = f"{first} {time_marker}"
+    return f"{first}\n{last}" if last else first
 
 async def ensure_profile_base(user_id, me=None):
     data = get_user_state(user_id)
@@ -315,12 +309,13 @@ async def ensure_profile_base(user_id, me=None):
     if me is None and data.get("client") and data["client"].is_connected:
         me = await data["client"].get_me()
     if me:
+        # Базовое имя записываем ОДИН раз. Стили никогда не применяются к нему повторно.
         if not cfg.get("profile_base_first_name"):
-            base_first = re.sub(r"\s*\[\d{1,2}:\d{2}\]", "", me.first_name or "User").strip()
-            cfg["profile_base_first_name"] = unstyle_text(base_first) or "User"
+            clean_first = re.sub(r"\s*\[[^\]]+\]", "", me.first_name or "User").strip()
+            cfg["profile_base_first_name"] = unstyle_text(clean_first) or "User"
         if not cfg.get("profile_base_last_name"):
-            base_last = re.sub(r"\s*\[\d{1,2}:\d{2}\]", "", me.last_name or "").strip()
-            cfg["profile_base_last_name"] = unstyle_text(base_last)
+            clean_last = re.sub(r"\s*\[[^\]]+\]", "", me.last_name or "").strip()
+            cfg["profile_base_last_name"] = unstyle_text(clean_last)
         MEMORY_DB["config"][uid_str] = cfg
         asyncio.create_task(async_db_save("config", uid_str, cfg))
     return cfg
@@ -737,8 +732,8 @@ async def update_profile_branding(user_id):
         me = await data["client"].get_me()
         user_cfg = await ensure_profile_base(user_id, me)
 
-        base_first = user_cfg.get("profile_base_first_name") or unstyle_text(me.first_name or "User")
-        base_last = user_cfg.get("profile_base_last_name") or unstyle_text(me.last_name or "")
+        base_first = unstyle_text(user_cfg.get("profile_base_first_name") or me.first_name or "User").strip() or "User"
+        base_last = unstyle_text(user_cfg.get("profile_base_last_name") or me.last_name or "").strip()
         style_id = int(user_cfg.get("time_nick_style", 1) or 1)
         style_nick_enabled = bool(user_cfg.get("style_nick_enabled", True))
         style_time_enabled = bool(user_cfg.get("style_time_enabled", True))
@@ -1589,7 +1584,7 @@ def build_style_selection_markup(user_id):
     builder = InlineKeyboardBuilder()
     uid_str = str(user_id)
     cfg = MEMORY_DB["config"].get(uid_str) or db_get_data("config", uid_str) or {}
-    base_name = cfg.get("profile_base_first_name") or cfg.get("first_name") or "Silence"
+    base_name = unstyle_text(cfg.get("profile_base_first_name") or cfg.get("first_name") or "Silence").strip() or "Silence"
     for idx, (_, _) in enumerate(STYLE_DEFINITIONS, start=1):
         builder.button(
             text=style_display_name(base_name, idx),
