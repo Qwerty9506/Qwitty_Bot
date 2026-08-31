@@ -204,6 +204,23 @@ STYLE_DEFINITIONS = [
     ("𝚂𝚒𝚕𝚎𝚗𝚌𝚎", "monospace"),
 ]
 
+# В Unicode нет полноценных font-алфавитов для кириллицы.
+# Поэтому для кириллических имён используем разные Unicode-комбинируемые
+# эффекты. Это гарантирует, что все 7 пунктов реально отличаются, а не
+# превращаются в одинаковое обычное имя.
+_CYRILLIC_STYLE_MARKS = {
+    "smallcaps": "\u0332",   # подчёркивание
+    "fraktur": "\u0305",     # верхняя линия
+    "bold": "\u0336",       # зачёркивание
+    "italic": "\u0307",     # точка сверху
+    "double": "\u0308",     # две точки сверху
+    "sans_bold": "\u030A",  # кружок сверху
+    "monospace": "\u0333",  # двойное подчёркивание
+}
+
+# Минус 60 секунд: время в профиле обновляется на минуту раньше.
+PROFILE_TIME_OFFSET_SECONDS = -60
+
 _ASCII_UPPER = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 _ASCII_LOWER = "abcdefghijklmnopqrstuvwxyz"
 
@@ -259,9 +276,21 @@ def _style_digits(text, style):
 def style_text(text, style_id):
     text = text or ""
     style_key = STYLE_DEFINITIONS[int(style_id) - 1][1]
+
     if style_key == "smallcaps":
-        return _style_digits(text.translate(_SMALLCAPS_MAP), style_key)
-    return _style_digits(text.translate(_STYLE_TRANSLATORS[style_key]), style_key)
+        styled = _style_digits(text.translate(_SMALLCAPS_MAP), style_key)
+    else:
+        styled = _style_digits(text.translate(_STYLE_TRANSLATORS[style_key]), style_key)
+
+    # Для чистой кириллицы обычные mathematical Unicode-шрифты ничего
+    # не меняют. Добавляем уникальный комбинируемый эффект для каждого
+    # стиля, чтобы кнопки выбора и итоговый никнейм действительно различались.
+    if text.strip() and not any(("A" <= ch <= "Z") or ("a" <= ch <= "z") for ch in text):
+        mark = _CYRILLIC_STYLE_MARKS.get(style_key)
+        if mark:
+            styled = "".join(ch + mark if not ch.isspace() else ch for ch in styled)
+
+    return styled
 
 def _reverse_math(text, style):
     translator = _STYLE_TRANSLATORS.get(style)
@@ -278,6 +307,12 @@ def _reverse_math(text, style):
 
 def unstyle_text(text):
     text = text or ""
+
+    # Убираем наши кириллические style-маркеры, чтобы новый стиль всегда
+    # строился от чистого базового имени и стили не наслаивались друг на друга.
+    for mark in _CYRILLIC_STYLE_MARKS.values():
+        text = text.replace(mark, "")
+
     for style_key in ("bold", "italic", "double", "sans_bold", "monospace", "fraktur"):
         text = _reverse_math(text, style_key)
     reverse_small = {ord(v): ord(k.lower()) for k, v in zip(_ASCII_UPPER, "ᴀʙᴄᴅᴇꜰɢʜɪᴊᴋʟᴍɴᴏᴘǫʀsᴛᴜᴠᴡxʏᴢ")}
@@ -301,7 +336,11 @@ def get_current_styled_profile_preview(base_first, base_last, offset, style_id, 
     first = style_text(clean_first, style_id) if include_nick else clean_first
     last = style_text(clean_last, style_id) if (clean_last and include_nick) else clean_last
     if include_time:
-        tz_now = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=offset)
+        tz_now = (
+            datetime.datetime.now(datetime.timezone.utc)
+            + datetime.timedelta(hours=offset, seconds=60)
+            + datetime.timedelta(seconds=PROFILE_TIME_OFFSET_SECONDS)
+        )
         raw_time = tz_now.strftime("%H:%M")
         time_marker = f"[{_style_digits(raw_time, style_key)}]"
         if last:
@@ -754,7 +793,11 @@ async def update_profile_branding(user_id):
 
         if user_cfg.get("time_nick_active", False):
             offset = user_cfg.get("timezone_offset", 5)
-            tz_now = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=offset)
+            tz_now = (
+                datetime.datetime.now(datetime.timezone.utc)
+                + datetime.timedelta(hours=offset, seconds=60)
+                + datetime.timedelta(seconds=PROFILE_TIME_OFFSET_SECONDS)
+            )
             time_value = tz_now.strftime('%H:%M')
             styled_time = _style_digits(time_value, STYLE_DEFINITIONS[style_id - 1][1]) if style_time_enabled else time_value
             time_marker = f"[{styled_time}]"
