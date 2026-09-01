@@ -1404,45 +1404,58 @@ async def toggle_247(callback: types.CallbackQuery):
 @dp.callback_query(F.data == "menu_timenick")
 async def menu_timenick(callback: types.CallbackQuery):
     user_id = callback.from_user.id
-    uid_str = str(user_id)
-    user_cfg = MEMORY_DB["config"].get(uid_str) or db_get_data("config", uid_str) or {}
-    is_active = user_cfg.get("time_nick_active", False)
-    offset = user_cfg.get("timezone_offset", 5)
+    try:
+        uid_str = str(user_id)
+        user_cfg = MEMORY_DB["config"].get(uid_str) or await async_db_get("config", uid_str) or {}
+        MEMORY_DB["config"][uid_str] = user_cfg
 
-    status = get_text(user_id, "status_on") if is_active else get_text(user_id, "status_off")
-    base_first = user_cfg.get("profile_base_first_name") or user_cfg.get("first_name") or "User"
-    base_last = user_cfg.get("profile_base_last_name") or ""
+        is_active = bool(user_cfg.get("time_nick_active", False))
+        offset = int(user_cfg.get("timezone_offset", 5) or 5)
+        status = get_text(user_id, "status_on") if is_active else get_text(user_id, "status_off")
 
-    preview_first = clean_profile_name(base_first) or "User"
-    preview_last = clean_profile_name(base_last)
-    if is_active:
-        tz_now = (
-            datetime.datetime.now(datetime.timezone.utc)
-            + datetime.timedelta(hours=offset, seconds=60)
-            + datetime.timedelta(seconds=PROFILE_TIME_OFFSET_SECONDS)
+        base_first = get_profile_base_name(
+            user_cfg.get("profile_base_first_name") or user_cfg.get("first_name") or "User",
+            "User"
         )
-        time_marker = f"[{tz_now.strftime('%H:%M')}]"
-        if preview_last:
-            preview_last = f"{preview_last} {time_marker}"
+        base_last = clean_profile_name(
+            user_cfg.get("profile_base_last_name") or user_cfg.get("last_name") or ""
+        )
+
+        preview_first = base_first
+        preview_last = base_last
+        if is_active:
+            tz_now = (
+                datetime.datetime.now(datetime.timezone.utc)
+                + datetime.timedelta(hours=offset)
+                + datetime.timedelta(seconds=PROFILE_TIME_OFFSET_SECONDS)
+            )
+            time_marker = f"[{tz_now.strftime('%H:%M')}]"
+            if preview_last:
+                preview_last = f"{preview_last} {time_marker}"
+            else:
+                preview_first = f"{preview_first} {time_marker}"
+
+        profile_preview = f"{preview_first}\n{preview_last}" if preview_last else preview_first
+        text = get_text(user_id, "msg_timenick_text", status, offset)
+        text += f"\n\nПредпросмотр:\n{profile_preview}"
+
+        builder = InlineKeyboardBuilder()
+        if is_active:
+            builder.button(text=get_text(user_id, "btn_turn_off"), callback_data="toggle_timenick_off")
         else:
-            preview_first = f"{preview_first} {time_marker}"
+            builder.button(text=get_text(user_id, "btn_turn_on"), callback_data="toggle_timenick_on")
+        builder.button(text=get_text(user_id, "btn_tz_select"), callback_data="select_tz_menu")
+        builder.button(text=get_text(user_id, "btn_back_menu"), callback_data="main_menu")
+        builder.adjust(1)
 
-    profile_preview = f"{preview_first}\n{preview_last}" if preview_last else preview_first
-    text = get_text(user_id, "msg_timenick_text", status, offset)
-    text += f"\n\nПредпросмотр:\n{profile_preview}"
-
-    builder = InlineKeyboardBuilder()
-    if is_active:
-        builder.button(text=get_text(user_id, "btn_turn_off"), callback_data="toggle_timenick_off")
-    else:
-        builder.button(text=get_text(user_id, "btn_turn_on"), callback_data="toggle_timenick_on")
-    builder.button(text=get_text(user_id, "btn_tz_select"), callback_data="select_tz_menu")
-    builder.button(text=get_text(user_id, "btn_back_menu"), callback_data="main_menu")
-    builder.adjust(1)
-
-    await edit_or_send(user_id, text, reply_markup=builder.as_markup())
-    try: await callback.answer()
-    except Exception: pass
+        await edit_or_send(user_id, text, reply_markup=builder.as_markup())
+        await callback.answer()
+    except Exception as e:
+        logging.exception("Ошибка открытия меню 'Время в профиль': %s", e)
+        try:
+            await callback.answer("Не удалось открыть меню. Ошибка записана в лог.", show_alert=True)
+        except Exception:
+            pass
 
 @dp.callback_query(F.data.startswith("toggle_timenick_"))
 async def toggle_timenick(callback: types.CallbackQuery):
