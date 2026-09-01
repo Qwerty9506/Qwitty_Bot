@@ -183,7 +183,7 @@ TEXTS = {
     "msg_limit_247_reached": "Режим 24/7 больше не имеет суточного лимита."
 }
 
-PROFILE_TIME_OFFSET_SECONDS = 0
+PROFILE_TIME_OFFSET_SECONDS = +20
 
 def unstyle_text(text):
     return text or ""
