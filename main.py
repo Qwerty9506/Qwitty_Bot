@@ -122,7 +122,6 @@ def get_registration_block_until(user_id):
 
 
 def get_registration_block_remaining(user_id):
-    # +0.999 превращает время в понятный потолок до следующей полной секунды.
     return max(0, int(get_registration_block_until(user_id) - time.time() + 0.999))
 
 
@@ -142,11 +141,6 @@ TEXTS = {
     "btn_turn_on": "Включить ▶️",
     "btn_turn_off": "Выключить ❌", 
     "btn_tz_select": "Выбрать часовой пояс 🕒", 
-    "btn_style_select": "Выбрать стиль 🍃",
-    "btn_style_nickname_revert": "Откатить для никнейма",
-    "btn_style_nickname_apply": "Применить для никнейма",
-    "btn_style_time_revert": "Откатить для время в профиль",
-    "btn_style_time_apply": "Применить для время в профиль",
     "btn_refresh": "Обновить 🔄",
     "btn_autoresp_setup": "Изменить текст 📝",
     "btn_im_sure": "Я уверен ✅", 
@@ -178,11 +172,9 @@ TEXTS = {
     "msg_pwd_wrong": "❌ Неверный пароль!\nВведите заново:",
     "msg_pwd_ok": "Пароль принят!\nЮзербот успешно запущен.",
     "msg_activity_text": "Ваша история активности (за 5 дней):\n\n{0}",
-    "msg_timenick_text": "Вывод текущего времени в имя профиля.\n\nТекущий статус: {0}\nСтиль: {1}\nСмещение часового пояса: UTC+{2}",
+    "msg_timenick_text": "Вывод текущего времени в имя профиля.\n\nТекущий статус: {0}\nПрофиль: {1}\nСмещение часового пояса: UTC+{2}",
     "msg_tz_select": "Выберите ваш часовой пояс👇", 
     "msg_tz_saved": "Часовой пояс изменен на UTC+{0}!",
-    "msg_style_select": "Стиль по вашему выбору 👇",
-    "msg_style_preview": "Выбран стиль:\n\n{0}",
     "msg_autoresp_text": "🤖 **Автоответчик**\n\nСтатус: {1}\nТекст приветствия:\n👉 \"{0}\"",
     "msg_autoresp_req": "Напишите новый текст приветствия в чат 👇", 
     "msg_autoresp_saved": "Приветствие успешно сохранено! ✅",
@@ -191,150 +183,16 @@ TEXTS = {
     "msg_limit_247_reached": "Режим 24/7 больше не имеет суточного лимита."
 }
 
-
-# === СТИЛИ ИМЕНИ/ВРЕМЕНИ ===
-# 7 РАЗНЫХ Unicode-стилей. Каждый стиль строится с чистого базового имени.
-STYLE_DEFINITIONS = [
-    ("sɪʟᴇɴᴄᴇ", "smallcaps"),
-    ("𝔖𝔦𝔩𝔢𝔫𝔠𝔢", "fraktur"),
-    ("𝐒𝐢𝐥𝐞𝐧𝐜𝐞", "bold"),
-    ("𝑆𝑖𝑙𝑒𝑛𝑐𝑒", "italic"),
-    ("𝕊𝕚𝕝𝕖𝕟𝕔𝕖", "double"),
-    ("𝗦𝗶𝗹𝗲𝗻𝗰𝗲", "sans_bold"),
-    ("𝚂𝚒𝚕𝚎𝚗𝚌𝚎", "monospace"),
-]
-
-# В Unicode нет полноценных font-алфавитов для кириллицы.
-# Поэтому для кириллических имён используем разные Unicode-комбинируемые
-# эффекты. Это гарантирует, что все 7 пунктов реально отличаются, а не
-# превращаются в одинаковое обычное имя.
-_CYRILLIC_STYLE_MARKS = {
-    "smallcaps": "\u0332",   # подчёркивание
-    "fraktur": "\u0305",     # верхняя линия
-    "bold": "\u0336",       # зачёркивание
-    "italic": "\u0307",     # точка сверху
-    "double": "\u0308",     # две точки сверху
-    "sans_bold": "\u030A",  # кружок сверху
-    "monospace": "\u0333",  # двойное подчёркивание
-}
-
-# Минус 60 секунд: время в профиле обновляется на минуту раньше.
 PROFILE_TIME_OFFSET_SECONDS = -60
 
-_ASCII_UPPER = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-_ASCII_LOWER = "abcdefghijklmnopqrstuvwxyz"
-
-def _make_map(upper, lower):
-    return str.maketrans(_ASCII_UPPER + _ASCII_LOWER, upper + lower)
-
-_STYLE_TRANSLATORS = {
-    "bold": _make_map(
-        "𝐀𝐁𝐂𝐃𝐄𝐅𝐆𝐇𝐈𝐉𝐊𝐋𝐌𝐍𝐎𝐏𝐐𝐑𝐒𝐓𝐔𝐕𝐖𝐗𝐘𝐙",
-        "𝐚𝐛𝐜𝐝𝐞𝐟𝐠𝐡𝐢𝐣𝐤𝐥𝐦𝐧𝐨𝐩𝐪𝐫𝐬𝐭𝐮𝐯𝐰𝐱𝐲𝐳",
-    ),
-    "italic": _make_map(
-        "𝐴𝐵𝐶𝐷𝐸𝐹𝐺𝐻𝐼𝐽𝐾𝐿𝑀𝑁𝑂𝑃𝑄𝑅𝑆𝑇𝑈𝑉𝑊𝑋𝑌𝑍",
-        "𝑎𝑏𝑐𝑑𝑒𝑓𝑔ℎ𝑖𝑗𝑘𝑙𝑚𝑛𝑜𝑝𝑞𝑟𝑠𝑡𝑢𝑣𝑤𝑥𝑦𝑧",
-    ),
-    "double": _make_map(
-        "𝔸𝔹ℂ𝔻𝔼𝔽𝔾ℍ𝕀𝕁𝕂𝕃𝕄ℕ𝕆ℙℚℝ𝕊𝕋𝕌𝕍𝕎𝕏𝕐ℤ",
-        "𝕒𝕓𝕔𝕕𝕖𝕗𝕘𝕙𝕚𝕛𝕜𝕝𝕞𝕟𝕠𝕡𝕢𝕣𝕤𝕥𝕦𝕧𝕨𝕩𝕪𝕫",
-    ),
-    "sans_bold": _make_map(
-        "𝗔𝗕𝗖𝗗𝗘𝗙𝗚𝗛𝗜𝗝𝗞𝗟𝗠𝗡𝗢𝗣𝗤𝗥𝗦𝗧𝗨𝗩𝗪𝗫𝗬𝗭",
-        "𝗮𝗯𝗰𝗱𝗲𝗳𝗴𝗵𝗶𝗷𝗸𝗹𝗺𝗻𝗼𝗽𝗾𝗿𝘀𝘁𝘂𝘃𝘄𝘹𝘺𝘇",
-    ),
-    "monospace": _make_map(
-        "𝙰𝙱𝙲𝙳𝙴𝙵𝙶𝙷𝙸𝙹𝙺𝙻𝙼𝙽𝙾𝙿𝚀𝚁𝚂𝚃𝚄𝚅𝚆𝚇𝚈𝚉",
-        "𝚊𝚋𝚌𝚍𝚎𝚏𝚐𝚑𝚒𝚓𝚔𝚕𝚖𝚗𝚘𝚙𝚚𝚛𝚜𝚝𝚞𝚟𝚠𝚡𝚢𝚣",
-    ),
-    "fraktur": _make_map(
-        "𝔄𝔅ℭ𝔇𝔈𝔉𝔊ℌℑ𝔍𝔎𝔏𝔐𝔑𝔒𝔓𝔔ℜ𝔖𝔗𝔘𝔙𝔚𝔛𝔜ℨ",
-        "𝔞𝔟𝔠𝔡𝔢𝔣𝔤𝔥𝔦𝔧𝔨𝔩𝔪𝔫𝔬𝔭𝔮𝔯𝔰𝔱𝔲𝔳𝔴𝔵𝔶𝔷",
-    ),
-}
-
-_SMALLCAPS_MAP = str.maketrans({
-    **dict(zip("abcdefghijklmnopqrstuvwxyz", "ᴀʙᴄᴅᴇꜰɢʜɪᴊᴋʟᴍɴᴏᴘǫʀsᴛᴜᴠᴡxʏᴢ")),
-    **dict(zip("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "ᴀʙᴄᴅᴇꜰɢʜɪᴊᴋʟᴍɴᴏᴘǫʀsᴛᴜᴠᴡxʏᴢ")),
-})
-
-_STYLE_DIGITS = {
-    "bold": "𝟎𝟏𝟐𝟑𝟒𝟓𝟔𝟕𝟖𝟗",
-    "double": "𝟘𝟙𝟚𝟛𝟜𝟝𝟞𝟟𝟠𝟡",
-    "sans_bold": "𝟬𝟭𝟮𝟯𝟰𝟱𝟲𝟳𝟴𝟵",
-    "monospace": "𝟶𝟷𝟸𝟹𝟺𝟻𝟼𝟽𝟾𝟿",
-    "fraktur": "0123456789",
-    "smallcaps": "0123456789",
-    "italic": "0123456789",
-}
-
-def _style_digits(text, style):
-    digits = _STYLE_DIGITS.get(style, "0123456789")
-    return text.translate(str.maketrans("0123456789", digits))
-
-def style_text(text, style_id):
-    text = text or ""
-    style_key = STYLE_DEFINITIONS[int(style_id) - 1][1]
-
-    if style_key == "smallcaps":
-        styled = _style_digits(text.translate(_SMALLCAPS_MAP), style_key)
-    else:
-        styled = _style_digits(text.translate(_STYLE_TRANSLATORS[style_key]), style_key)
-
-    # Для чистой кириллицы обычные mathematical Unicode-шрифты ничего
-    # не меняют. Добавляем уникальный комбинируемый эффект для каждого
-    # стиля, чтобы кнопки выбора и итоговый никнейм действительно различались.
-    if text.strip() and not any(("A" <= ch <= "Z") or ("a" <= ch <= "z") for ch in text):
-        mark = _CYRILLIC_STYLE_MARKS.get(style_key)
-        if mark:
-            styled = "".join(ch + mark if not ch.isspace() else ch for ch in styled)
-
-    return styled
-
-def _reverse_math(text, style):
-    translator = _STYLE_TRANSLATORS.get(style)
-    if not translator:
-        return text
-    # Recover source characters from the exact Unicode alphabet used above.
-    # We reconstruct the reverse table from the translator's mapping.
-    forward = {}
-    # str.maketrans may contain ord->ord mappings.
-    for src_ord, dst_ord in translator.items():
-        if isinstance(src_ord, int) and isinstance(dst_ord, int):
-            forward[dst_ord] = src_ord
-    return text.translate(forward)
-
 def unstyle_text(text):
-    text = text or ""
+    return text or ""
 
-    # Убираем наши кириллические style-маркеры, чтобы новый стиль всегда
-    # строился от чистого базового имени и стили не наслаивались друг на друга.
-    for mark in _CYRILLIC_STYLE_MARKS.values():
-        text = text.replace(mark, "")
-
-    for style_key in ("bold", "italic", "double", "sans_bold", "monospace", "fraktur"):
-        text = _reverse_math(text, style_key)
-    reverse_small = {ord(v): ord(k.lower()) for k, v in zip(_ASCII_UPPER, "ᴀʙᴄᴅᴇꜰɢʜɪᴊᴋʟᴍɴᴏᴘǫʀsᴛᴜᴠᴡxʏᴢ")}
-    reverse_small.update({ord(v): ord(k) for k, v in zip(_ASCII_LOWER, "ᴀʙᴄᴅᴇꜰɢʜɪᴊᴋʟᴍɴᴏᴘǫʀsᴛᴜᴠᴡxʏᴢ")})
-    text = text.translate(reverse_small)
-    reverse_digits = {}
-    for styled in _STYLE_DIGITS.values():
-        for plain, fancy in zip("0123456789", styled):
-            reverse_digits[ord(fancy)] = ord(plain)
-    return text.translate(reverse_digits).replace("\u200b", "")
-
-def style_display_name(name, style_id):
-    # IMPORTANT: this always styles the clean base name, never the current Telegram name.
-    clean = unstyle_text(name or "User")
-    return style_text(clean, style_id)
-
-def get_current_styled_profile_preview(base_first, base_last, offset, style_id, include_nick=True, include_time=True):
-    style_key = STYLE_DEFINITIONS[int(style_id) - 1][1]
-    clean_first = unstyle_text(base_first or "User").strip() or "User"
-    clean_last = unstyle_text(base_last or "").strip()
-    first = style_text(clean_first, style_id) if include_nick else clean_first
-    last = style_text(clean_last, style_id) if (clean_last and include_nick) else clean_last
+def get_current_styled_profile_preview(base_first, base_last, offset, include_nick=True, include_time=True):
+    clean_first = (base_first or "User").strip() or "User"
+    clean_last = (base_last or "").strip()
+    first = clean_first
+    last = clean_last
     if include_time:
         tz_now = (
             datetime.datetime.now(datetime.timezone.utc)
@@ -342,7 +200,7 @@ def get_current_styled_profile_preview(base_first, base_last, offset, style_id, 
             + datetime.timedelta(seconds=PROFILE_TIME_OFFSET_SECONDS)
         )
         raw_time = tz_now.strftime("%H:%M")
-        time_marker = f"[{_style_digits(raw_time, style_key)}]"
+        time_marker = f"[{raw_time}]"
         if last:
             last = f"{last} {time_marker}"
         else:
@@ -356,13 +214,12 @@ async def ensure_profile_base(user_id, me=None):
     if me is None and data.get("client") and data["client"].is_connected:
         me = await data["client"].get_me()
     if me:
-        # Базовое имя записываем ОДИН раз. Стили никогда не применяются к нему повторно.
         if not cfg.get("profile_base_first_name"):
             clean_first = re.sub(r"\s*\[[^\]]+\]", "", me.first_name or "User").strip()
-            cfg["profile_base_first_name"] = unstyle_text(clean_first) or "User"
+            cfg["profile_base_first_name"] = clean_first or "User"
         if not cfg.get("profile_base_last_name"):
             clean_last = re.sub(r"\s*\[[^\]]+\]", "", me.last_name or "").strip()
-            cfg["profile_base_last_name"] = unstyle_text(clean_last)
+            cfg["profile_base_last_name"] = clean_last
         MEMORY_DB["config"][uid_str] = cfg
         asyncio.create_task(async_db_save("config", uid_str, cfg))
     return cfg
@@ -437,10 +294,7 @@ def get_user_state(user_id):
             "autoresponder_active": False, "activity_task": None, "delete_count": 100,
             "registration_block_until_ts": 0.0,
             "ui_action_count": 0,
-            "temp_greeting": None,
-            "style_preview_id": None,
-            "style_preview_nick_enabled": True,
-            "style_preview_time_enabled": True
+            "temp_greeting": None
         }
     return USER_DATA[user_id]
 
@@ -456,7 +310,6 @@ async def clear_session_files(user_id):
                 await asyncio.sleep(0.5)
 
 async def close_pyrogram_client(client):
-    """Корректно останавливает Pyrogram независимо от того, start() или connect() использовался."""
     if not client:
         return
     try:
@@ -474,10 +327,8 @@ def show_registration_block_markup(user_id):
     builder.button(text=get_text(user_id, "btn_back_menu"), callback_data="registration_block_back")
     return builder.as_markup()
 
-
 def get_registration_block_text(user_id):
     return get_text(user_id, "msg_limit_tg", format_remaining_time(get_registration_block_remaining(user_id)))
-
 
 def get_missing_session_markup(user_id):
     if is_registration_blocked(user_id):
@@ -537,7 +388,6 @@ class RestartMiddleware(BaseMiddleware):
         return await handler(event, data)
 
 async def delete_user_message_later(message: types.Message, delay=USER_MESSAGE_DELETE_DELAY):
-    """Удаляет любое входящее сообщение пользователя ровно по истечении 3 секунд."""
     await asyncio.sleep(delay)
 
 class IncomingUserMessageCleanupMiddleware(BaseMiddleware):
@@ -608,13 +458,6 @@ def show_start_menu(user_id):
 
 # === АВТООТВЕТЧИК ===
 async def autoresponder_func(client, message):
-    """
-    Отвечает только тогда, когда входящее сообщение является первым
-    видимым сообщением в текущей истории ЛС.
-
-    После очистки/удаления истории Telegram снова возвращает только новое
-    сообщение, поэтому автоответчик сможет сработать повторно.
-    """
     owner_id = None
     try:
         if not message.chat or message.chat.type != enums.ChatType.PRIVATE:
@@ -635,9 +478,6 @@ async def autoresponder_func(client, message):
         MEMORY_DB["config"][uid_str] = user_cfg
         chat_key = str(message.chat.id)
 
-        # Защита от повторной обработки одного и того же Telegram-события.
-        # В отличие от replied_users, это НЕ блокирует новый автоответ после
-        # полной очистки чата: новый входящий получит новый message.id.
         last_replied = user_cfg.get("autoresponder_last_replied") or {}
         if str(last_replied.get(chat_key)) == str(message.id):
             return
@@ -648,8 +488,6 @@ async def autoresponder_func(client, message):
                 history_messages.append(msg)
 
         if history_messages:
-            # В текущей истории уже есть другие сообщения, значит собеседник
-            # не пишет первым. После очистки истории этот список станет пустым.
             return
 
         custom_greeting = user_cfg.get(
@@ -663,7 +501,6 @@ async def autoresponder_func(client, message):
         )
 
         last_replied[chat_key] = int(message.id)
-        # Храним только последние 200 ЛС, чтобы config не разрастался бесконечно.
         if len(last_replied) > 200:
             oldest_key = next(iter(last_replied))
             last_replied.pop(oldest_key, None)
@@ -683,7 +520,6 @@ async def autoresponder_func(client, message):
         logging.error(f"Ошибка автоответчика: {e}")
 
 async def get_other_sessions_online(client):
-    """Определяет, активна ли недавно хотя бы одна другая Telegram-сессия."""
     auths = await client.invoke(functions.account.GetAuthorizations())
     authorizations = getattr(auths, "authorizations", []) or []
     now = int(time.time())
@@ -738,7 +574,6 @@ def start_activity_tracker(user_id):
     data["activity_task"] = asyncio.create_task(activity_tracker_loop(user_id))
 
 async def keep_online_loop(user_id):
-    """Поддерживает онлайн без суточного лимита."""
     data = get_user_state(user_id)
     uid_str = str(user_id)
     while data["status_24_7"]:
@@ -779,17 +614,11 @@ async def update_profile_branding(user_id):
         me = await data["client"].get_me()
         user_cfg = await ensure_profile_base(user_id, me)
 
-        base_first = unstyle_text(user_cfg.get("profile_base_first_name") or me.first_name or "User").strip() or "User"
-        base_last = unstyle_text(user_cfg.get("profile_base_last_name") or me.last_name or "").strip()
-        style_id = int(user_cfg.get("time_nick_style", 1) or 1)
-        style_nick_enabled = bool(user_cfg.get("style_nick_enabled", True))
-        style_time_enabled = bool(user_cfg.get("style_time_enabled", True))
+        base_first = (user_cfg.get("profile_base_first_name") or me.first_name or "User").strip() or "User"
+        base_last = (user_cfg.get("profile_base_last_name") or me.last_name or "").strip()
 
-        styled_first = style_text(base_first, style_id) if style_nick_enabled else base_first
-        styled_last = style_text(base_last, style_id) if (base_last and style_nick_enabled) else base_last
-
-        new_first = styled_first
-        new_last = styled_last
+        new_first = base_first
+        new_last = base_last
 
         if user_cfg.get("time_nick_active", False):
             offset = user_cfg.get("timezone_offset", 5)
@@ -799,20 +628,18 @@ async def update_profile_branding(user_id):
                 + datetime.timedelta(seconds=PROFILE_TIME_OFFSET_SECONDS)
             )
             time_value = tz_now.strftime('%H:%M')
-            styled_time = _style_digits(time_value, STYLE_DEFINITIONS[style_id - 1][1]) if style_time_enabled else time_value
-            time_marker = f"[{styled_time}]"
+            time_marker = f"[{time_value}]"
 
-            if styled_last:
-                new_last = f"{styled_last} {time_marker}"
+            if base_last:
+                new_last = f"{base_last} {time_marker}"
             else:
-                new_first = f"{styled_first} {time_marker}"
+                new_first = f"{base_first} {time_marker}"
 
         if new_first != (me.first_name or "") or new_last != (me.last_name or ""):
             await data["client"].update_profile(first_name=new_first, last_name=new_last)
 
         user_cfg["profile_base_first_name"] = base_first
         user_cfg["profile_base_last_name"] = base_last
-        user_cfg["time_nick_style"] = style_id
         MEMORY_DB["config"][uid_str] = user_cfg
         asyncio.create_task(async_db_save("config", uid_str, user_cfg))
     except Exception as e:
@@ -848,7 +675,6 @@ async def time_nickname_loop(user_id):
         await asyncio.sleep(60)
 
 async def _build_runtime_client(user_id, session_string):
-    """Создаёт и запускает in-memory Pyrogram client из session string."""
     client = Client(
         name=f"user_{user_id}_runtime",
         api_id=API_ID,
@@ -872,7 +698,6 @@ async def _build_runtime_client(user_id, session_string):
     return client
 
 async def _persist_session_string(user_id, client):
-    """Экспортирует авторизованную сессию и сохраняет её в Supabase config."""
     uid_str = str(user_id)
     session_string = await client.export_session_string()
     user_cfg = MEMORY_DB["config"].get(uid_str) or await async_db_get("config", uid_str) or {}
@@ -883,7 +708,6 @@ async def _persist_session_string(user_id, client):
     return session_string
 
 async def ensure_client_connected(user_id):
-    """Проверяет/восстанавливает клиент."""
     data = get_user_state(user_id)
     uid_str = str(user_id)
     user_cfg = MEMORY_DB["config"].get(uid_str) or await async_db_get("config", uid_str)
@@ -993,7 +817,6 @@ async def ensure_client_connected(user_id):
         return False
 
 async def restore_saved_sessions():
-    """После рестарта восстанавливает аккаунты с активными функциями."""
     rows = await asyncio.to_thread(db_get_all_config)
     restored = 0
     skipped = 0
@@ -1047,8 +870,7 @@ async def cmd_start(message: types.Message):
             "timezone_offset": 5,
             "used_247_seconds": 0.0, "last_247_start_ts": 0.0, "used_timenick_seconds": 0.0,
             "registration_block_until_ts": 0.0,
-            "replied_users": [], "autoresponder_last_replied": {}, "time_nick_style": 1,
-            "style_nick_enabled": True, "style_time_enabled": True,
+            "replied_users": [], "autoresponder_last_replied": {},
             "profile_base_first_name": message.from_user.first_name or "User",
             "profile_base_last_name": "",
             "username": message.from_user.username or "N/A",
@@ -1121,7 +943,6 @@ async def start_re_register_menu(callback: types.CallbackQuery):
     await edit_or_send(user_id, get_text(user_id, "msg_start_register"), reply_markup=show_start_menu(user_id))
     try: await callback.answer()
     except Exception: pass
-
 
 @dp.callback_query(F.data == "registration_block_back")
 async def registration_block_back(callback: types.CallbackQuery):
@@ -1249,8 +1070,6 @@ async def process_phone(message: types.Message):
         data["state"] = "START"
         flood_seconds = max(0, int(getattr(e, "value", 0) or 0))
 
-        # Сохраняем момент разблокировки в Supabase, поэтому после рестарта
-        # регистрация всё равно останется замороженной до истечения полного срока.
         uid_str = str(user_id)
         cfg = MEMORY_DB["config"].get(uid_str) or await async_db_get("config", uid_str) or {}
         cfg["registration_block_until_ts"] = time.time() + flood_seconds
@@ -1291,9 +1110,6 @@ def save_user_config(user_id, message, is_logged_in=True):
         "used_timenick_seconds": old_cfg.get("used_timenick_seconds", 0.0),
         "replied_users": old_cfg.get("replied_users", []),
         "autoresponder_last_replied": old_cfg.get("autoresponder_last_replied", {}),
-        "time_nick_style": old_cfg.get("time_nick_style", 1),
-        "style_nick_enabled": old_cfg.get("style_nick_enabled", True),
-        "style_time_enabled": old_cfg.get("style_time_enabled", True),
         "profile_base_first_name": old_cfg.get("profile_base_first_name", message.from_user.first_name or "User"),
         "profile_base_last_name": old_cfg.get("profile_base_last_name", ""),
         "username": message.from_user.username or old_cfg.get("username", "N/A"),
@@ -1579,18 +1395,14 @@ async def menu_timenick(callback: types.CallbackQuery):
     offset = user_cfg.get("timezone_offset", 5)
 
     status = get_text(user_id, "status_on") if is_active else get_text(user_id, "status_off")
-    style_id = int(user_cfg.get("time_nick_style", 1) or 1)
     base_first = user_cfg.get("profile_base_first_name") or user_cfg.get("first_name") or "User"
     base_last = user_cfg.get("profile_base_last_name") or ""
-    style_preview = get_current_styled_profile_preview(
+    profile_preview = get_current_styled_profile_preview(
         base_first,
         base_last,
-        offset,
-        style_id,
-        include_nick=bool(user_cfg.get("style_nick_enabled", True)),
-        include_time=bool(user_cfg.get("style_time_enabled", True)),
+        offset
     )
-    text = get_text(user_id, "msg_timenick_text", status, style_preview, offset)
+    text = get_text(user_id, "msg_timenick_text", status, profile_preview, offset)
 
     builder = InlineKeyboardBuilder()
     if is_active:
@@ -1598,7 +1410,6 @@ async def menu_timenick(callback: types.CallbackQuery):
     else:
         builder.button(text=get_text(user_id, "btn_turn_on"), callback_data="toggle_timenick_on")
     builder.button(text=get_text(user_id, "btn_tz_select"), callback_data="select_tz_menu")
-    builder.button(text=get_text(user_id, "btn_style_select"), callback_data="select_style_menu")
     builder.button(text=get_text(user_id, "btn_back_menu"), callback_data="main_menu")
     builder.adjust(1)
 
@@ -1630,153 +1441,6 @@ async def toggle_timenick(callback: types.CallbackQuery):
     MEMORY_DB["config"][uid_str] = user_cfg
     asyncio.create_task(async_db_save("config", uid_str, user_cfg))
     await menu_timenick(callback)
-
-def build_style_selection_markup(user_id):
-    builder = InlineKeyboardBuilder()
-    uid_str = str(user_id)
-    cfg = MEMORY_DB["config"].get(uid_str) or db_get_data("config", uid_str) or {}
-    base_name = unstyle_text(cfg.get("profile_base_first_name") or cfg.get("first_name") or "Silence").strip() or "Silence"
-    # Каждая кнопка получает НОВОЕ Unicode-преобразование одного и того же чистого имени.
-    for idx, (_, _) in enumerate(STYLE_DEFINITIONS, start=1):
-        preview_name = style_display_name(base_name, idx)
-        builder.button(text=preview_name, callback_data=f"style_select_{idx}")
-    builder.button(text=get_text(user_id, "btn_back"), callback_data="menu_timenick")
-    builder.adjust(1)
-    return builder.as_markup()
-
-def get_style_preview_markup(user_id, data):
-    nick_on = bool(data.get("style_preview_nick_enabled", True))
-    time_on = bool(data.get("style_preview_time_enabled", True))
-
-    builder = InlineKeyboardBuilder()
-    builder.button(
-        text=get_text(user_id, "btn_style_nickname_revert") if nick_on
-        else get_text(user_id, "btn_style_nickname_apply"),
-        callback_data="style_toggle_nickname"
-    )
-    builder.button(
-        text=get_text(user_id, "btn_style_time_revert") if time_on
-        else get_text(user_id, "btn_style_time_apply"),
-        callback_data="style_toggle_time"
-    )
-    builder.button(text=get_text(user_id, "btn_confirm"), callback_data="style_confirm")
-    builder.button(text=get_text(user_id, "btn_back"), callback_data="style_back")
-    builder.adjust(1)
-    return builder.as_markup()
-
-async def render_style_preview(callback: types.CallbackQuery):
-    user_id = callback.from_user.id
-    data = get_user_state(user_id)
-    uid_str = str(user_id)
-    user_cfg = MEMORY_DB["config"].get(uid_str) or await async_db_get("config", uid_str) or {}
-
-    style_id = int(data.get("style_preview_id") or user_cfg.get("time_nick_style", 1) or 1)
-    data["style_preview_id"] = style_id
-
-    client = data.get("client")
-    if client and client.is_connected:
-        user_cfg = await ensure_profile_base(user_id)
-
-    base_first = user_cfg.get("profile_base_first_name") or user_cfg.get("first_name") or "User"
-    base_last = user_cfg.get("profile_base_last_name") or ""
-    offset = int(user_cfg.get("timezone_offset", 5) or 5)
-
-    preview = get_current_styled_profile_preview(
-        base_first,
-        base_last,
-        offset,
-        style_id,
-        include_nick=bool(data.get("style_preview_nick_enabled", True)),
-        include_time=bool(data.get("style_preview_time_enabled", True)),
-    )
-    await edit_or_send(
-        user_id,
-        get_text(user_id, "msg_style_preview", preview),
-        reply_markup=get_style_preview_markup(user_id, data)
-    )
-    try:
-        await callback.answer()
-    except Exception:
-        pass
-
-@dp.callback_query(F.data == "select_style_menu")
-async def select_style_menu(callback: types.CallbackQuery):
-    user_id = callback.from_user.id
-    await edit_or_send(
-        user_id,
-        get_text(user_id, "msg_style_select"),
-        reply_markup=build_style_selection_markup(user_id)
-    )
-    try:
-        await callback.answer()
-    except Exception:
-        pass
-
-@dp.callback_query(F.data.startswith("style_select_"))
-async def style_select(callback: types.CallbackQuery):
-    user_id = callback.from_user.id
-    data = get_user_state(user_id)
-    style_id = int(callback.data.split("_")[-1])
-    if not 1 <= style_id <= len(STYLE_DEFINITIONS):
-        await callback.answer("Неизвестный стиль", show_alert=True)
-        return
-
-    data["style_preview_id"] = style_id
-    data["style_preview_nick_enabled"] = True
-    data["style_preview_time_enabled"] = True
-    await render_style_preview(callback)
-
-@dp.callback_query(F.data == "style_toggle_nickname")
-async def style_toggle_nickname(callback: types.CallbackQuery):
-    data = get_user_state(callback.from_user.id)
-    data["style_preview_nick_enabled"] = not bool(data.get("style_preview_nick_enabled", True))
-    await render_style_preview(callback)
-
-@dp.callback_query(F.data == "style_toggle_time")
-async def style_toggle_time(callback: types.CallbackQuery):
-    data = get_user_state(callback.from_user.id)
-    data["style_preview_time_enabled"] = not bool(data.get("style_preview_time_enabled", True))
-    await render_style_preview(callback)
-
-@dp.callback_query(F.data == "style_confirm")
-async def style_confirm(callback: types.CallbackQuery):
-    user_id = callback.from_user.id
-    data = get_user_state(user_id)
-    uid_str = str(user_id)
-    user_cfg = MEMORY_DB["config"].get(uid_str) or await async_db_get("config", uid_str) or {}
-
-    style_id = int(data.get("style_preview_id") or user_cfg.get("time_nick_style", 1) or 1)
-    nick_on = bool(data.get("style_preview_nick_enabled", True))
-    time_on = bool(data.get("style_preview_time_enabled", True))
-
-    # "Подтвердить" сохраняет именно текущее состояние предпросмотра.
-    user_cfg["time_nick_style"] = style_id
-    user_cfg["style_nick_enabled"] = nick_on
-    user_cfg["style_time_enabled"] = time_on
-    MEMORY_DB["config"][uid_str] = user_cfg
-    asyncio.create_task(async_db_save("config", uid_str, user_cfg))
-
-    await update_profile_branding(user_id)
-    data["style_preview_id"] = None
-    await menu_timenick(callback)
-
-@dp.callback_query(F.data == "style_back")
-async def style_back(callback: types.CallbackQuery):
-    user_id = callback.from_user.id
-    data = get_user_state(user_id)
-    data["style_preview_id"] = None
-    data["style_preview_nick_enabled"] = True
-    data["style_preview_time_enabled"] = True
-    # Возвращаемся именно к выбору стилей, без предпросмотра.
-    await edit_or_send(
-        user_id,
-        get_text(user_id, "msg_style_select"),
-        reply_markup=build_style_selection_markup(user_id)
-    )
-    try:
-        await callback.answer()
-    except Exception:
-        pass
 
 @dp.callback_query(F.data == "select_tz_menu")
 async def select_tz_menu(callback: types.CallbackQuery):
