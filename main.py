@@ -33,7 +33,7 @@ SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 WEB_PORT = int(os.getenv("PORT", "10000"))
 
-BOT_USERNAME = "QwertyGuard_Bot"
+BOT_USERNAME = "Qwitty_bot"
 ADD_URL = (
     f"https://t.me/{BOT_USERNAME}?startgroup=true&admin="
     "restrict_members+delete_messages+ban_users+invite_users+pin_messages"
