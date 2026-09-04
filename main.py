@@ -90,10 +90,17 @@ def is_admin(user: types.User):
     return False
 
 TIMEZONE_NAMES = {
+    -5: "New York UTC-5",
+    -4: "Santiago UTC-4",
+    -3: "Brasilia UTC-3",
+    -2: "Mid-Atlantic UTC-2",
+    -1: "Azores UTC-1",
+    0: "London UTC+0",
+    1: "Paris/Berlin UTC+1",
     2: "Athens/Cairo UTC+2",
     3: "Moscow/Istanbul UTC+3",
     4: "Baku/Tbilisi UTC+4",
-    5: "Tashkent/Almaty UTC+5",
+    5: "Tashkent/Shymkent UTC+5",
     6: "Astana/Dhaka UTC+6",
     7: "Bangkok/Jakarta UTC+7",
     8: "Beijing/Singapore UTC+8",
@@ -163,16 +170,16 @@ TEXTS = {
     "msg_start_register": "Чтобы зарегистрироваться заново, нажмите кнопку ниже 👇",
     "msg_menu": "Что умеет этот бот?\nВыбирайте доступные функции управления вашим аккаунтом на кнопках снизу:",
     "msg_rules_text": (
-        "🛡 **Главные правила бота**\n\n"
-        "1. Бот работает через юзербота на основе Telegram MTProto. Для работы необходимо подключение аккаунта.\n"
-        "2. Для авторизации используются номер телефона и код подтверждения Telegram.\n"
-        "3. Все действия выполняются автоматически через подключенный аккаунт после выбора соответствующей функции пользователем.\n"
-        "4. Бот не изменяет пароль аккаунта и не запускает функции самостоятельно без действий пользователя.\n"
-        "5. Используйте только свой аккаунт и соблюдайте правила платформы Telegram.\n\n"
-        "⚠️ **Строго запрещено:**\n\n"
-        "1. Использовать чужие аккаунты без разрешения владельца.\n"
-        "2. Монетизировать доступ к боту или его функциям для третьих лиц.\n"
-        "3. Использовать бота для спама или флуда."
+        "**🛡 Главные правила бота**\n\n"
+        "**1. Бот работает через юзербота на основе Telegram MTProto. Для работы необходимо подключение аккаунта.**\n"
+        "**2. Для авторизации используются номер телефона и код подтверждения Telegram.**\n"
+        "**3. Все действия выполняются автоматически через подключенный аккаунт после выбора соответствующей функции пользователем.**\n"
+        "**4. Бот не изменяет пароль аккаунта и не запускает функции самостоятельно без действий пользователя.**\n"
+        "**5. Используйте только свой аккаунт и соблюдайте правила платформы Telegram.**\n\n"
+        "**⚠️ Строго запрещено:**\n\n"
+        "**1. Использовать чужие аккаунты без разрешения владельца.**\n"
+        "**2. Монетизировать доступ к боту или его функциям для третьих лиц.**\n"
+        "**3. Использовать бота для спама или флуда.**"
     ),
     "msg_rules_done": "Всё, правила прочитаны! 🎉\n\nЖмите кнопку начала ниже, чтобы привязать аккаунт.",
     "msg_phone_req": "Пожалуйста, отправьте ваш номер телефона в международном формате.\nПример: +12345678",
@@ -197,9 +204,9 @@ TEXTS = {
     "msg_pwd_wrong": "❌ Неверный пароль!\nВведите заново:",
     "msg_pwd_ok": "Пароль принят!\nЮзербот успешно запущен.",
     "msg_activity_text": "Ваша история активности (за 5 дней):\n\n{0}",
-    "msg_timenick_text": "Вывод текущего времени в имя профиля.\n\nТекущий статус: {0}\nПрофиль: {1}\nСмещение часового пояса: UTC+{2}",
+    "msg_timenick_text": "Вывод текущего времени в имя профиля.\n\nТекущий статус: {0}\nПрофиль: {1}\nСмещение часового пояса: UTC{2}",
     "msg_tz_select": "Выберите ваш часовой пояс🌐", 
-    "msg_tz_saved": "Часовой пояс изменен на UTC+{0}!",
+    "msg_tz_saved": "Часовой пояс изменен на UTC{0}!",
     "msg_autoresp_text": "🤖 **Автоответчик**\n\nСтатус: {1}\nТекст приветствия:\n💬 \"{0}\"",
     "msg_autoresp_req": "Напишите новый текст приветствия в чат ✏️", 
     "msg_autoresp_saved": "Приветствие успешно сохранено! 🎉",
@@ -1857,7 +1864,8 @@ async def menu_timenick(callback: types.CallbackQuery):
         base_last,
         offset
     )
-    text = get_text(user_id, "msg_timenick_text", status, profile_preview, offset)
+    offset_formatted = f"+{offset}" if offset >= 0 else f"{offset}"
+    text = get_text(user_id, "msg_timenick_text", status, profile_preview, offset_formatted)
 
     builder = InlineKeyboardBuilder()
     if is_active:
@@ -1903,8 +1911,11 @@ async def select_tz_menu(callback: types.CallbackQuery):
     builder = InlineKeyboardBuilder()
     for tz, name in TIMEZONE_NAMES.items():
         builder.button(text=name, callback_data=f"set_tz_{tz}")
-    builder.button(text=get_text(user_id, "btn_back"), callback_data="menu_timenick")
-    builder.adjust(1)
+    
+    # Режим 2 колонки (по 2 кнопки в ряду)
+    builder.adjust(2)
+    builder.row(types.InlineKeyboardButton(text=get_text(user_id, "btn_back"), callback_data="menu_timenick"))
+
     await edit_or_send(user_id, get_text(user_id, "msg_tz_select"), reply_markup=builder.as_markup())
     try: await callback.answer()
     except Exception: pass
