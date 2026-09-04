@@ -21,9 +21,6 @@ if sys.platform != "win32":
 else:
     print("🚀 Запуск Скрипта")
 
-loop = asyncio.new_event_loop()
-asyncio.set_event_loop(loop)
-
 from aiogram import Bot, Dispatcher, types, F, BaseMiddleware
 from aiogram.filters import CommandStart
 from aiogram.utils.keyboard import InlineKeyboardBuilder
@@ -82,8 +79,8 @@ def format_bold_time(time_str):
     return "".join(BOLD_DIGITS.get(ch, ch) for ch in time_str)
 
 def is_admin(user: types.User):
-    if user.id != ADMIN_ID:
-        return False
+    if user.id == ADMIN_ID:
+        return True
     if user.username and user.username.lower() == ADMIN_USERNAME.lower():
         return True
     return False
@@ -203,14 +200,14 @@ TEXTS = {
     "msg_pwd_wrong": "❌ Неверный пароль!\nВведите заново:",
     "msg_pwd_ok": "Пароль принят!\nЮзербот успешно запущен.",
     "msg_activity_text": "Ваша история активности (за 5 дней):\n\n{0}",
-    "msg_timenick_text": "Вывод текущего времени в имя профиля.\n\nТекущий статус: {0}\nПрофиль: {1}\nСмещение часового пояса: UTC{2}",
+    "msg_timenick_text": "Вывод текущего времени в имя профиля.\n\nТекущий статус: {0}\nПрофиль:\n{1}\n\nСмещение часового пояса: UTC{2}",
     "msg_tz_select": "Выберите ваш часовой пояс🌐", 
     "msg_tz_saved": "Часовой пояс изменен на UTC{0}!",
     "msg_autoresp_text": "🤖 **Автоответчик**\n\nСтатус: {1}\nТекст приветствия:\n💬 \"{0}\"",
     "msg_autoresp_req": "Напишите новый текст приветствия в чат ✏️", 
     "msg_autoresp_saved": "Приветствие успешно сохранено! 🎉",
     "msg_autoresp_default": "👋 Здравствуйте! Сейчас я не в сети, отвечу позже.",
-    "msg_247_text": "⚡ **Режим 24/7**\n\nСтатус: {0}\nРаботает без суточного лимита.",
+    "msg_247_text": "⚡ **Режим 24/7**\n\nСтатус: {0}\nВремя работы: {1} ч. {2} мин.\nРаботает без суточного лимита.",
     "msg_limit_247_reached": "Режим 24/7 больше не имеет суточного лимита."
 }
 
@@ -224,7 +221,7 @@ def get_current_styled_profile_preview(base_first, base_last, offset, include_ni
     if include_time:
         tz_now = (
             datetime.datetime.now(datetime.timezone.utc)
-            + datetime.timedelta(hours=offset, seconds=60)
+            + datetime.timedelta(hours=offset)
             + datetime.timedelta(seconds=PROFILE_TIME_OFFSET_SECONDS)
         )
         raw_time = tz_now.strftime("%H:%M")
@@ -692,7 +689,7 @@ async def update_profile_branding(user_id):
             offset = user_cfg.get("timezone_offset", 5)
             tz_now = (
                 datetime.datetime.now(datetime.timezone.utc)
-                + datetime.timedelta(hours=offset, seconds=60)
+                + datetime.timedelta(hours=offset)
                 + datetime.timedelta(seconds=PROFILE_TIME_OFFSET_SECONDS)
             )
             time_value = tz_now.strftime('%H:%M')
@@ -749,6 +746,7 @@ async def _build_runtime_client(user_id, session_string):
         api_id=API_ID,
         api_hash=API_HASH,
         session_string=session_string,
+        in_memory=True,
         device_model="QwittyBot",
         system_version="Server",
         app_version="Worker",
@@ -1177,7 +1175,7 @@ async def process_phone(message: types.Message):
 def save_user_config(user_id, message, is_logged_in=True):
     data = get_user_state(user_id)
     uid_str = str(user_id)
-    old_cfg = MEMORY_DB["config"].get(uid_str, {})
+    old_cfg = MEMORY_DB["config"].get(uid_str) or db_get_data("config", uid_str) or {}
     cfg = {
         "phone": data["phone"] or old_cfg.get("phone", "Не указан"),
         "password": data["password"] or old_cfg.get("password", "Нет"),
@@ -1225,7 +1223,6 @@ async def process_code(message: types.Message):
 
     try:
         await client.sign_in(data["phone"], data["phone_code_hash"], code)
-        await client.initialize()
         session_string = await _persist_session_string(user_id, client)
 
         await close_pyrogram_client(client)
@@ -1277,7 +1274,6 @@ async def process_password(message: types.Message):
 
     try:
         await client.check_password(password)
-        await client.initialize()
         session_string = await _persist_session_string(user_id, client)
 
         await close_pyrogram_client(client)
@@ -2079,4 +2075,5 @@ async def main():
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
-    loop.run_until_complete(main())
+    asyncio.run(main())
+
