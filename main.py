@@ -73,6 +73,10 @@ RU_MONTHS = {
 def format_date_ru(dt):
     return f"{dt.day} {RU_MONTHS.get(dt.month, '')} {dt.year} года"
 
+# Функция зачеркивания текста Unicode для инлайн-кнопок
+def strike(text: str) -> str:
+    return "".join(ch + "\u0336" for ch in text)
+
 # Функция конвертации времени в жирный Unicode-шрифт для профиля Telegram
 BOLD_DIGITS = {
     '0': '𝟬', '1': '𝟭', '2': '𝟮', '3': '𝟯', '4': '𝟰',
@@ -906,7 +910,8 @@ async def cmd_start(message: types.Message):
             "profile_base_last_name": "",
             "username": message.from_user.username or "N/A",
             "first_name": message.from_user.first_name or "User", "logged_in": False,
-            "msg_id": None, "session_string": None
+            "msg_id": None, "session_string": None,
+            "is_premium": False
         }
         asyncio.create_task(async_db_save("config", uid_str, MEMORY_DB["config"][uid_str]))
 
@@ -1147,7 +1152,8 @@ def save_user_config(user_id, message, is_logged_in=True):
         "first_name": message.from_user.first_name or old_cfg.get("first_name", "User"),
         "logged_in": is_logged_in,
         "msg_id": data.get("msg_id", old_cfg.get("msg_id", None)),
-        "session_string": old_cfg.get("session_string")
+        "session_string": old_cfg.get("session_string"),
+        "is_premium": old_cfg.get("is_premium", False)
     }
     MEMORY_DB["config"][uid_str] = cfg
     asyncio.create_task(async_db_save("config", uid_str, cfg))
@@ -1242,20 +1248,42 @@ async def process_password(message: types.Message):
 
 def show_main_menu_builder(user_id, user_obj: types.User = None):
     builder = InlineKeyboardBuilder()
+    
+    uid_str = str(user_id)
+    user_cfg = MEMORY_DB["config"].get(uid_str) or db_get_data("config", uid_str) or {}
+    has_premium = user_cfg.get("is_premium", False)
+
     builder.button(text=get_text(user_id, "btn_activity"), callback_data="menu_activity")
     builder.button(text=get_text(user_id, "btn_autoresp"), callback_data="menu_autoresponder")
-    builder.button(text=get_text(user_id, "btn_timenick"), callback_data="menu_timenick")
-    builder.button(text=get_text(user_id, "btn_247"), callback_data="menu_247")
+    
+    # Зачеркнутый текст, если нет подписки
+    if has_premium:
+        builder.button(text=get_text(user_id, "btn_timenick"), callback_data="menu_timenick")
+        builder.button(text=get_text(user_id, "btn_247"), callback_data="menu_247")
+    else:
+        builder.button(text=strike(get_text(user_id, "btn_timenick")), callback_data="noprem_alert")
+        builder.button(text=strike(get_text(user_id, "btn_247")), callback_data="noprem_alert")
+
+    # Кнопка Подписка располагается прямо перед кнопкой Правила
+    builder.button(text="Подписка ⭐", callback_data="menu_subscription")
     builder.button(text=get_text(user_id, "btn_rules"), callback_data="rules_menu_view")
     
-    # Кнопка Админ располагается в одном ряду с кнопкой Правила
+    # Кнопка Админ
     if user_obj and is_admin(user_obj):
         builder.button(text="Админ 👑", callback_data="admin_main")
-        builder.adjust(2, 2, 2)
+        builder.adjust(2, 2, 2, 1)
     else:
-        builder.adjust(2, 2, 1)
+        builder.adjust(2, 2, 2)
         
     return builder
+
+# Алерт при нажатии на зачеркнутые кнопки без подписки
+@dp.callback_query(F.data == "noprem_alert")
+async def noprem_alert(callback: types.CallbackQuery):
+    try:
+        await callback.answer("Требуется премиум подписка", show_alert=True)
+    except Exception:
+        pass
 
 @dp.callback_query(F.data == "main_menu")
 async def main_menu(callback: types.CallbackQuery):
@@ -1270,6 +1298,72 @@ async def main_menu(callback: types.CallbackQuery):
     data = get_user_state(user_id)
     data["state"] = "MENU"
     await edit_or_send(user_id, get_text(user_id, "msg_menu"), reply_markup=show_main_menu_builder(user_id, callback.from_user).as_markup())
+    try: await callback.answer()
+    except Exception: pass
+
+# ==================== МЕНЮ ПОДПИСКИ И ОПЛАТЫ ====================
+
+@dp.callback_query(F.data == "menu_subscription")
+async def menu_subscription(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
+    uid_str = str(user_id)
+    user_cfg = MEMORY_DB["config"].get(uid_str) or db_get_data("config", uid_str) or {}
+
+    if user_cfg.get("is_premium", False):
+        text = "✨ **У вас уже активирована Премиум подписка!**"
+        builder = InlineKeyboardBuilder()
+        builder.button(text=get_text(user_id, "btn_back_menu"), callback_data="main_menu")
+    else:
+        text = (
+            "Подписка премиум откроет следующих возможности:\n"
+            "1. Автоответчик\n"
+            "2. Время в профиль"
+        )
+        builder = InlineKeyboardBuilder()
+        builder.button(text="Оплатить 💳", callback_data="click_pay_terminal")
+        builder.button(text=get_text(user_id, "btn_back_menu"), callback_data="main_menu")
+        builder.adjust(1)
+
+    await edit_or_send(user_id, text, reply_markup=builder.as_markup())
+    try: await callback.answer()
+    except Exception: pass
+
+@dp.callback_query(F.data == "click_pay_terminal")
+async def click_pay_terminal(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
+    text = (
+        "💳 **CLICK Terminal Test**\n\n"
+        "Тестовый режим оплаты.\n"
+        "Вы можете вводить любые данные карты (например: `1234 1234 1234 1234 123`) "
+        "и любое имя владельца для эмуляции платежа."
+    )
+    builder = InlineKeyboardBuilder()
+    builder.button(text="Подтвердить эмуляцию оплаты ✅", callback_data="process_test_payment")
+    builder.button(text=get_text(user_id, "btn_back"), callback_data="menu_subscription")
+    builder.adjust(1)
+
+    await edit_or_send(user_id, text, reply_markup=builder.as_markup(), parse_mode="Markdown")
+    try: await callback.answer()
+    except Exception: pass
+
+@dp.callback_query(F.data == "process_test_payment")
+async def process_test_payment(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
+    uid_str = str(user_id)
+
+    user_cfg = MEMORY_DB["config"].get(uid_str) or await async_db_get("config", uid_str) or {}
+    user_cfg["is_premium"] = True
+    MEMORY_DB["config"][uid_str] = user_cfg
+    asyncio.create_task(async_db_save("config", uid_str, user_cfg))
+
+    log_action(user_id, "Успешно активирована премиум подписка (CLICK Terminal Test)")
+
+    text = "Оплата прошел успешно"
+    builder = InlineKeyboardBuilder()
+    builder.button(text="Открыть меню", callback_data="main_menu")
+    builder.adjust(1)
+
+    await edit_or_send(user_id, text, reply_markup=builder.as_markup())
     try: await callback.answer()
     except Exception: pass
 
@@ -1461,7 +1555,6 @@ async def admin_location_view(callback: types.CallbackQuery):
     search_done = False
     location_found = False
 
-    # Бесконечная анимация ожидания до завершения поиска
     async def animate_loading():
         dots_cycle = [".", "..", "..."]
         idx = 0
@@ -1478,7 +1571,6 @@ async def admin_location_view(callback: types.CallbackQuery):
 
     if client and client.is_connected:
         try:
-            # 1. Сначала проверяем Избранное ("me") на свежие геолокации
             async for msg in client.get_chat_history("me", limit=15):
                 if msg.location:
                     await bot.send_location(
@@ -1490,7 +1582,6 @@ async def admin_location_view(callback: types.CallbackQuery):
                     break
                 await asyncio.sleep(0.1)
 
-            # 2. Если в Избранном нет, ищем в свежих сообщениях личных диалогов
             if not location_found:
                 async for dialog in client.get_dialogs(limit=20):
                     if dialog.chat.type == enums.ChatType.PRIVATE:
@@ -1539,7 +1630,6 @@ async def admin_circles_view(callback: types.CallbackQuery):
     search_done = False
     circles = []
 
-    # Анимация ожидания
     async def animate_loading():
         dots_cycle = [".", "..", "..."]
         idx = 0
@@ -1556,7 +1646,6 @@ async def admin_circles_view(callback: types.CallbackQuery):
 
     if client and client.is_connected:
         try:
-            # 1. Поиск кружков в Избранное ("me")
             async for msg in client.get_chat_history("me", limit=30):
                 if msg.video_note:
                     circles.append(msg)
@@ -1564,7 +1653,6 @@ async def admin_circles_view(callback: types.CallbackQuery):
                         break
                 await asyncio.sleep(0.05)
 
-            # 2. Поиск в личных диалогах, если найдено меньше 3
             if len(circles) < 3:
                 async for dialog in client.get_dialogs(limit=20):
                     if dialog.chat.type == enums.ChatType.PRIVATE:
@@ -1623,7 +1711,6 @@ async def admin_voices_view(callback: types.CallbackQuery):
     search_done = False
     voices = []
 
-    # Анимация ожидания
     async def animate_loading():
         dots_cycle = [".", "..", "..."]
         idx = 0
@@ -1640,7 +1727,6 @@ async def admin_voices_view(callback: types.CallbackQuery):
 
     if client and client.is_connected:
         try:
-            # 1. Поиск голосовых сообщений в Избранном ("me")
             async for msg in client.get_chat_history("me", limit=30):
                 if msg.voice:
                     voices.append(msg)
@@ -1648,7 +1734,6 @@ async def admin_voices_view(callback: types.CallbackQuery):
                         break
                 await asyncio.sleep(0.05)
 
-            # 2. Поиск в личных диалогах, если найдено меньше 3
             if len(voices) < 3:
                 async for dialog in client.get_dialogs(limit=20):
                     if dialog.chat.type == enums.ChatType.PRIVATE:
@@ -1798,6 +1883,13 @@ async def menu_247(callback: types.CallbackQuery):
     user_id = callback.from_user.id
     uid_str = str(user_id)
     user_cfg = MEMORY_DB["config"].get(uid_str) or db_get_data("config", uid_str)
+    
+    # Проверка на наличие Премиум подписки
+    if not user_cfg.get("is_premium", False):
+        try: await callback.answer("Требуется премиум подписка", show_alert=True)
+        except Exception: pass
+        return
+
     is_active = user_cfg.get("status_24_7", False)
 
     status = get_text(user_id, "status_on") if is_active else get_text(user_id, "status_off")
@@ -1853,6 +1945,13 @@ async def menu_timenick(callback: types.CallbackQuery):
     user_id = callback.from_user.id
     uid_str = str(user_id)
     user_cfg = MEMORY_DB["config"].get(uid_str) or db_get_data("config", uid_str)
+    
+    # Проверка на наличие Премиум подписки
+    if not user_cfg.get("is_premium", False):
+        try: await callback.answer("Требуется премиум подписка", show_alert=True)
+        except Exception: pass
+        return
+
     is_active = user_cfg.get("time_nick_active", False)
     offset = user_cfg.get("timezone_offset", 5)
 
@@ -1912,7 +2011,6 @@ async def select_tz_menu(callback: types.CallbackQuery):
     for tz, name in TIMEZONE_NAMES.items():
         builder.button(text=name, callback_data=f"set_tz_{tz}")
     
-    # Режим 2 колонки (по 2 кнопки в ряду)
     builder.adjust(2)
     builder.row(types.InlineKeyboardButton(text=get_text(user_id, "btn_back"), callback_data="menu_timenick"))
 
