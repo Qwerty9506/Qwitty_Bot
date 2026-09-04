@@ -17,7 +17,7 @@ if sys.platform != "win32":
         uvloop.install()
         print("⚡ [Движок]: uvloop успешно активирован (Linux/macOS)")
     except ImportError:
-        print("⚙️ [Движок]: uvloop не установлен, используется стандартный asyncio")
+        print("⚙️ [Движок]: uvloop не установлен, используется стандартный asyncio.")
 else:
     print("🚀 Запуск Скрипта")
 
