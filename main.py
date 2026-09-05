@@ -15,7 +15,7 @@ if sys.platform != "win32":
     try:
         import uvloop
         uvloop.install()
-        print("⚡ Движок активирован)
+        print("⚡ [Движок]: uvloop успешно активирован (Linux/macOS)")
     except ImportError:
         print("⚙️ [Движок]: uvloop не установлен, используется стандартный asyncio.")
 else:
@@ -55,9 +55,9 @@ supabase: SupabaseClient = None
 if SUPABASE_URL and SUPABASE_KEY:
     try:
         supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
-        logging.info("✅ База данных успешно подключен")
+        logging.info("✅ Supabase успешно подключен")
     except Exception as e:
-        logging.error(f"❌ Ошибка база данных {e}")
+        logging.error(f"❌ Ошибка подключения к Supabase: {e}")
 
 # Сессии
 SESSIONS_DIR = "sessions"
