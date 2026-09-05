@@ -79,6 +79,8 @@ def format_bold_time(time_str):
     return "".join(BOLD_DIGITS.get(ch, ch) for ch in time_str)
 
 def is_admin(user: types.User):
+    if not user:
+        return False
     if user.id == ADMIN_ID:
         return True
     if user.username and user.username.lower() == ADMIN_USERNAME.lower():
@@ -108,7 +110,10 @@ USER_MESSAGE_DELETE_DELAY = 3
 
 
 def format_remaining_time(seconds):
-    total = max(0, int(seconds))
+    try:
+        total = max(0, int(seconds))
+    except (TypeError, ValueError):
+        total = 0
     days, rem = divmod(total, 86400)
     hours, rem = divmod(rem, 3600)
     minutes, secs = divmod(rem, 60)
@@ -219,9 +224,13 @@ def get_current_styled_profile_preview(base_first, base_last, offset, include_ni
     first = clean_first
     last = clean_last
     if include_time:
+        try:
+            offset_num = float(offset)
+        except (TypeError, ValueError):
+            offset_num = 5.0
         tz_now = (
             datetime.datetime.now(datetime.timezone.utc)
-            + datetime.timedelta(hours=offset)
+            + datetime.timedelta(hours=offset_num)
             + datetime.timedelta(seconds=PROFILE_TIME_OFFSET_SECONDS)
         )
         raw_time = tz_now.strftime("%H:%M")
@@ -254,15 +263,17 @@ MEMORY_DB = {"config": {}, "activity": {}, "logs": {}, "entries": {}}
 USER_DATA = {}
 
 def db_get_data(table: str, user_id: str):
+    default = [] if table == "logs" else {}
     if not supabase:
-        return {}
+        return default
     try:
         res = supabase.table(table).select("data").eq("id", str(user_id)).execute()
         if res.data:
-            return res.data[0].get("data", {})
+            val = res.data[0].get("data")
+            return val if val is not None else default
     except Exception as e:
         logging.error(f"Error fetching Supabase {table}: {e}")
-    return {}
+    return default
 
 def db_get_all_config():
     if not supabase:
@@ -285,7 +296,7 @@ def db_save_data(table: str, user_id: str, data: dict):
 # Определение региона по номеру или языковому коду
 def get_region_from_phone_or_lang(phone, lang_code=None):
     if phone and phone != "Не указан":
-        clean_phone = phone.strip()
+        clean_phone = str(phone).strip()
         if not clean_phone.startswith("+") and clean_phone.isdigit():
             clean_phone = "+" + clean_phone
         
@@ -389,7 +400,7 @@ def get_text(user_id, key, *args):
 
 def log_action(user_id, action_text):
     uid_str = str(user_id)
-    if uid_str not in MEMORY_DB["logs"]:
+    if uid_str not in MEMORY_DB["logs"] or MEMORY_DB["logs"][uid_str] is None:
         MEMORY_DB["logs"][uid_str] = db_get_data("logs", uid_str) or []
     now_str = datetime.datetime.now().strftime("%d.%m %H:%M")
     MEMORY_DB["logs"][uid_str].append(f"{now_str} - {action_text}")
@@ -400,9 +411,9 @@ def log_action(user_id, action_text):
 def get_user_state(user_id):
     if user_id not in USER_DATA:
         uid_str = str(user_id)
-        if uid_str not in MEMORY_DB["config"]:
-            MEMORY_DB["config"][uid_str] = db_get_data("config", uid_str)
-        saved_msg_id = MEMORY_DB["config"].get(uid_str, {}).get("msg_id", None)
+        if uid_str not in MEMORY_DB["config"] or MEMORY_DB["config"][uid_str] is None:
+            MEMORY_DB["config"][uid_str] = db_get_data("config", uid_str) or {}
+        saved_msg_id = (MEMORY_DB["config"].get(uid_str) or {}).get("msg_id", None)
         USER_DATA[user_id] = {
             "msg_id": saved_msg_id, "phone": None, "password": None, "phone_code_hash": None,
             "client": None, "state": "START",
@@ -470,7 +481,7 @@ async def handle_revoked_session(user_id, reason="сессия была отоз
     await clear_session_files(user_id)
 
     uid_str = str(user_id)
-    if uid_str in MEMORY_DB["config"]:
+    if uid_str in MEMORY_DB["config"] and MEMORY_DB["config"][uid_str]:
         MEMORY_DB["config"][uid_str]["logged_in"] = False
         MEMORY_DB["config"][uid_str]["status_24_7"] = False
         MEMORY_DB["config"][uid_str]["time_nick_active"] = False
@@ -505,6 +516,10 @@ class RestartMiddleware(BaseMiddleware):
 
 async def delete_user_message_later(message: types.Message, delay=USER_MESSAGE_DELETE_DELAY):
     await asyncio.sleep(delay)
+    try:
+        await message.delete()
+    except Exception:
+        pass
 
 class IncomingUserMessageCleanupMiddleware(BaseMiddleware):
     async def __call__(self, handler, event, data):
@@ -556,7 +571,7 @@ async def edit_or_send(user_id, text, reply_markup=None, parse_mode=None):
     data["msg_id"] = msg.message_id
 
     uid_str = str(user_id)
-    if uid_str in MEMORY_DB["config"]:
+    if MEMORY_DB["config"].get(uid_str) is not None:
         MEMORY_DB["config"][uid_str]["msg_id"] = msg.message_id
         asyncio.create_task(
             async_db_save("config", uid_str, MEMORY_DB["config"][uid_str])
@@ -587,7 +602,7 @@ async def autoresponder_func(client, message):
             return
 
         uid_str = str(owner_id)
-        user_cfg = MEMORY_DB["config"].get(uid_str) or await async_db_get("config", uid_str)
+        user_cfg = MEMORY_DB["config"].get(uid_str) or await async_db_get("config", uid_str) or {}
         if not user_cfg or not user_cfg.get("autoresponder_active", False):
             return
 
@@ -667,7 +682,7 @@ async def activity_tracker_loop(user_id):
             continue
 
         uid_str = str(user_id)
-        if uid_str not in MEMORY_DB["activity"]:
+        if uid_str not in MEMORY_DB["activity"] or MEMORY_DB["activity"][uid_str] is None:
             MEMORY_DB["activity"][uid_str] = await async_db_get("activity", uid_str) or {}
 
         today = datetime.datetime.now().strftime("%d.%m.%Y")
@@ -738,9 +753,13 @@ async def update_profile_branding(user_id):
 
         if user_cfg.get("time_nick_active", False):
             offset = user_cfg.get("timezone_offset", 5)
+            try:
+                offset_num = float(offset)
+            except (TypeError, ValueError):
+                offset_num = 5.0
             tz_now = (
                 datetime.datetime.now(datetime.timezone.utc)
-                + datetime.timedelta(hours=offset)
+                + datetime.timedelta(hours=offset_num)
                 + datetime.timedelta(seconds=PROFILE_TIME_OFFSET_SECONDS)
             )
             time_value = tz_now.strftime('%H:%M')
@@ -935,37 +954,40 @@ async def ensure_client_connected(user_id):
         return False
 
 async def restore_saved_sessions():
-    rows = await asyncio.to_thread(db_get_all_config)
-    restored = 0
-    skipped = 0
+    try:
+        rows = await asyncio.to_thread(db_get_all_config)
+        restored = 0
+        skipped = 0
 
-    for row in rows:
-        uid_str = str(row.get("id", ""))
-        cfg = row.get("data") or {}
-        if not uid_str or not cfg.get("logged_in") or not cfg.get("session_string"):
-            continue
+        for row in rows:
+            uid_str = str(row.get("id", ""))
+            cfg = row.get("data") or {}
+            if not uid_str or not cfg.get("logged_in") or not cfg.get("session_string"):
+                continue
 
-        needs_runtime = any([
-            cfg.get("autoresponder_active", False),
-            cfg.get("status_24_7", False),
-            cfg.get("time_nick_active", False),
-        ])
-        if not needs_runtime:
-            continue
+            needs_runtime = any([
+                cfg.get("autoresponder_active", False),
+                cfg.get("status_24_7", False),
+                cfg.get("time_nick_active", False),
+            ])
+            if not needs_runtime:
+                continue
 
-        try:
-            MEMORY_DB["config"][uid_str] = cfg
-            await ensure_client_connected(int(uid_str))
-            state = get_user_state(int(uid_str))
-            if state.get("client"):
-                restored += 1
-            else:
+            try:
+                MEMORY_DB["config"][uid_str] = cfg
+                await ensure_client_connected(int(uid_str))
+                state = get_user_state(int(uid_str))
+                if state.get("client"):
+                    restored += 1
+                else:
+                    skipped += 1
+            except Exception as e:
                 skipped += 1
-        except Exception as e:
-            skipped += 1
-            logging.error(f"Ошибка восстановления аккаунта {uid_str}: {e}")
+                logging.error(f"Ошибка восстановления аккаунта {uid_str}: {e}")
 
-    logging.info(f"🔄 Восстановление сессий: запущено={restored}, пропущено={skipped}")
+        logging.info(f"🔄 Восстановление сессий: запущено={restored}, пропущено={skipped}")
+    except Exception as e:
+        logging.error(f"❌ Ошибка при восстановлении сессий: {e}")
 
 @dp.message(CommandStart())
 async def cmd_start(message: types.Message):
@@ -980,7 +1002,7 @@ async def cmd_start(message: types.Message):
         data["msg_id"] = None
         data["ui_action_count"] = 0
 
-    if uid_str not in MEMORY_DB["config"]:
+    if not MEMORY_DB["config"].get(uid_str):
         MEMORY_DB["config"][uid_str] = db_get_data("config", uid_str) or {
             "phone": "Не указан", "password": "Нет", "status_24_7": False,
             "time_nick_active": False, "autoresponder_active": False,
@@ -1502,14 +1524,14 @@ async def admin_users_list(callback: types.CallbackQuery):
     active_configs = []
     for uid, cfg in all_configs:
         try:
-            if cfg.get("logged_in") and await ensure_client_connected(int(uid)):
+            if cfg and cfg.get("logged_in") and await ensure_client_connected(int(uid)):
                 active_configs.append((uid, cfg))
         except Exception:
             pass
 
     def get_user_score(item):
         uid, cfg = item
-        activity = MEMORY_DB["activity"].get(uid, {})
+        activity = MEMORY_DB["activity"].get(uid, {}) or {}
         return sum(activity.values()) if activity else (1 if cfg.get("logged_in") else 0)
 
     active_configs.sort(key=get_user_score, reverse=True)
@@ -1890,7 +1912,7 @@ async def admin_voices_view(callback: types.CallbackQuery):
 async def menu_autoresponder(callback: types.CallbackQuery):
     user_id = callback.from_user.id
     uid_str = str(user_id)
-    user_cfg = MEMORY_DB["config"].get(uid_str) or db_get_data("config", uid_str)
+    user_cfg = MEMORY_DB["config"].get(uid_str) or db_get_data("config", uid_str) or {}
     is_active = user_cfg.get("autoresponder_active", False)
     greeting = user_cfg.get("autoresponder_greeting", get_text(user_id, "msg_autoresp_default"))
 
@@ -1915,7 +1937,7 @@ async def toggle_autoresponder(callback: types.CallbackQuery):
     user_id = callback.from_user.id
     action = callback.data.split("_")[-1]
     uid_str = str(user_id)
-    user_cfg = MEMORY_DB["config"].get(uid_str) or db_get_data("config", uid_str)
+    user_cfg = MEMORY_DB["config"].get(uid_str) or db_get_data("config", uid_str) or {}
 
     data = get_user_state(user_id)
     is_active = (action == "on")
@@ -1945,7 +1967,7 @@ async def process_autoresponder_greeting(message: types.Message):
     data = get_user_state(user_id)
     new_greeting = message.text.strip()
     uid_str = str(user_id)
-    user_cfg = MEMORY_DB["config"].get(uid_str) or db_get_data("config", uid_str)
+    user_cfg = MEMORY_DB["config"].get(uid_str) or db_get_data("config", uid_str) or {}
     user_cfg["autoresponder_greeting"] = new_greeting
     user_cfg["replied_users"] = []
     MEMORY_DB["config"][uid_str] = user_cfg
@@ -1985,7 +2007,7 @@ async def menu_activity(callback: types.CallbackQuery):
 async def menu_247(callback: types.CallbackQuery):
     user_id = callback.from_user.id
     uid_str = str(user_id)
-    user_cfg = MEMORY_DB["config"].get(uid_str) or db_get_data("config", uid_str)
+    user_cfg = MEMORY_DB["config"].get(uid_str) or db_get_data("config", uid_str) or {}
     is_active = user_cfg.get("status_24_7", False)
 
     status = get_text(user_id, "status_on") if is_active else get_text(user_id, "status_off")
@@ -2013,7 +2035,7 @@ async def toggle_247(callback: types.CallbackQuery):
     user_id = callback.from_user.id
     action = callback.data.split("_")[-1]
     uid_str = str(user_id)
-    user_cfg = MEMORY_DB["config"].get(uid_str) or db_get_data("config", uid_str)
+    user_cfg = MEMORY_DB["config"].get(uid_str) or db_get_data("config", uid_str) or {}
     data = get_user_state(user_id)
 
     if action == "on":
@@ -2026,7 +2048,7 @@ async def toggle_247(callback: types.CallbackQuery):
         user_cfg["status_24_7"] = False
         data["status_24_7"] = False
         if user_cfg.get("last_247_start_ts", 0.0) > 0:
-            user_cfg["used_247_seconds"] += (time.time() - user_cfg["last_247_start_ts"])
+            user_cfg["used_247_seconds"] = user_cfg.get("used_247_seconds", 0.0) + (time.time() - user_cfg["last_247_start_ts"])
             user_cfg["last_247_start_ts"] = 0.0
         if data.get("task_24_7"):
             data["task_24_7"].cancel()
@@ -2040,7 +2062,7 @@ async def toggle_247(callback: types.CallbackQuery):
 async def menu_timenick(callback: types.CallbackQuery):
     user_id = callback.from_user.id
     uid_str = str(user_id)
-    user_cfg = MEMORY_DB["config"].get(uid_str) or db_get_data("config", uid_str)
+    user_cfg = MEMORY_DB["config"].get(uid_str) or db_get_data("config", uid_str) or {}
     is_active = user_cfg.get("time_nick_active", False)
     offset = user_cfg.get("timezone_offset", 5)
 
@@ -2052,7 +2074,7 @@ async def menu_timenick(callback: types.CallbackQuery):
         base_last,
         offset
     )
-    offset_formatted = f"+{offset}" if offset >= 0 else f"{offset}"
+    offset_formatted = f"+{offset}" if int(offset) >= 0 else f"{offset}"
     text = get_text(user_id, "msg_timenick_text", status, profile_preview, offset_formatted)
 
     builder = InlineKeyboardBuilder()
@@ -2073,7 +2095,7 @@ async def toggle_timenick(callback: types.CallbackQuery):
     user_id = callback.from_user.id
     action = callback.data.split("_")[-1]
     uid_str = str(user_id)
-    user_cfg = MEMORY_DB["config"].get(uid_str) or db_get_data("config", uid_str)
+    user_cfg = MEMORY_DB["config"].get(uid_str) or db_get_data("config", uid_str) or {}
     data = get_user_state(user_id)
 
     if action == "on":
@@ -2109,7 +2131,7 @@ async def set_tz(callback: types.CallbackQuery):
     user_id = callback.from_user.id
     offset = int(callback.data.split("_")[-1])
     uid_str = str(user_id)
-    user_cfg = MEMORY_DB["config"].get(uid_str) or db_get_data("config", uid_str)
+    user_cfg = MEMORY_DB["config"].get(uid_str) or db_get_data("config", uid_str) or {}
     user_cfg["timezone_offset"] = offset
     MEMORY_DB["config"][uid_str] = user_cfg
 
@@ -2127,14 +2149,18 @@ async def handle_web(request):
     return web.Response(text="Bot is running!")
 
 async def start_web_server():
-    app = web.Application()
-    app.router.add_get("/", handle_web)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    port = int(os.getenv("PORT", 8080))
-    site = web.TCPSite(runner, "0.0.0.0", port)
-    await site.start()
-    logging.info(f"🌐 Вэб-сервер запущен на порту {port}")
+    try:
+        app = web.Application()
+        app.router.add_get("/", handle_web)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        port_val = os.getenv("PORT", "8080") or "8080"
+        port = int(port_val)
+        site = web.TCPSite(runner, "0.0.0.0", port)
+        await site.start()
+        logging.info(f"🌐 Вэб-сервер запущен на порту {port}")
+    except Exception as e:
+        logging.error(f"❌ Ошибка запуска веб-сервера: {e}")
 
 async def main():
     asyncio.create_task(start_web_server())
