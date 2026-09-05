@@ -250,7 +250,7 @@ async def ensure_profile_base(user_id, me=None):
         asyncio.create_task(async_db_save("config", uid_str, cfg))
     return cfg
 
-MEMORY_DB = {"config": {}, "activity": {}, "logs": {}}
+MEMORY_DB = {"config": {}, "activity": {}, "logs": {}, "entries": {}}
 USER_DATA = {}
 
 def db_get_data(table: str, user_id: str):
@@ -282,44 +282,95 @@ def db_save_data(table: str, user_id: str, data: dict):
     except Exception as e:
         logging.error(f"Error saving Supabase {table}: {e}")
 
-# Работа с таблицей 'entries' (Входы невходящих пользователей, TTL = 7 дней)
+# Определение региона по номеру или языковому коду
+def get_region_from_phone_or_lang(phone, lang_code=None):
+    if phone and phone != "Не указан":
+        clean_phone = phone.strip()
+        if not clean_phone.startswith("+") and clean_phone.isdigit():
+            clean_phone = "+" + clean_phone
+        
+        if clean_phone.startswith("+998"):
+            return "Узбекистан 🇺🇿"
+        elif clean_phone.startswith("+7"):
+            return "Россия / Казахстан 🇷🇺/🇰🇿"
+        elif clean_phone.startswith("+380"):
+            return "Украина 🇺🇦"
+        elif clean_phone.startswith("+375"):
+            return "Беларусь 🇧🇾"
+        elif clean_phone.startswith("+996"):
+            return "Кыргызстан 🇰🇬"
+        elif clean_phone.startswith("+992"):
+            return "Таджикистан 🇹🇯"
+        elif clean_phone.startswith("+993"):
+            return "Туркменистан 🇹🇲"
+        elif clean_phone.startswith("+994"):
+            return "Азербайджан 🇦🇿"
+        elif clean_phone.startswith("+374"):
+            return "Армения 🇦🇲"
+        elif clean_phone.startswith("+995"):
+            return "Грузия 🇬🇪"
+        elif clean_phone.startswith("+1"):
+            return "США / Канада 🇺🇸/🇨🇦"
+        elif clean_phone.startswith("+44"):
+            return "Великобритания 🇬🇧"
+        elif clean_phone.startswith("+49"):
+            return "Германия 🇩🇪"
+        elif clean_phone.startswith("+90"):
+            return "Турция 🇹🇷"
+
+    if lang_code:
+        lc = str(lang_code).lower()
+        if "uz" in lc:
+            return "Узбекистан 🇺🇿"
+        elif "ru" in lc:
+            return "СНГ / Россия 🇷🇺"
+        elif "en" in lc:
+            return "Международный (EN) 🌐"
+            
+    return "Не определен 🌐"
+
+# Работа с таблицей 'entries' (Входы)
 def db_save_entry(user_id: str, data: dict):
+    uid_str = str(user_id)
+    entry_payload = {
+        "id": uid_str,
+        "username": data.get("username", "N/A"),
+        "first_name": data.get("first_name", "User"),
+        "phone": data.get("phone", "Не указан"),
+        "language_code": data.get("language_code", "ru"),
+        "created_at": data.get("created_at") or datetime.datetime.now(datetime.timezone.utc).isoformat()
+    }
+    MEMORY_DB["entries"][uid_str] = entry_payload
+
     if not supabase:
         return
     try:
-        payload = {
-            "id": str(user_id),
-            "username": data.get("username", "N/A"),
-            "first_name": data.get("first_name", "User"),
-            "phone": data.get("phone", "Не указан"),
-            "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat()
-        }
-        supabase.table("entries").upsert(payload).execute()
+        supabase.table("entries").upsert(entry_payload).execute()
     except Exception as e:
         logging.error(f"Error saving entry: {e}")
 
 def db_delete_entry(user_id: str):
+    uid_str = str(user_id)
+    if uid_str in MEMORY_DB["entries"]:
+        del MEMORY_DB["entries"][uid_str]
+
     if not supabase:
         return
     try:
-        supabase.table("entries").delete().eq("id", str(user_id)).execute()
+        supabase.table("entries").delete().eq("id", uid_str).execute()
     except Exception as e:
         logging.error(f"Error deleting entry: {e}")
 
 def db_get_and_clean_entries():
-    if not supabase:
-        return []
-    try:
-        # Автоматическая очистка записей старше 7 дней
-        cutoff = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=7)).isoformat()
-        supabase.table("entries").delete().lt("created_at", cutoff).execute()
-
-        # Получаем свежие записи
-        res = supabase.table("entries").select("*").execute()
-        return res.data or []
-    except Exception as e:
-        logging.error(f"Error getting/cleaning entries: {e}")
-        return []
+    if supabase:
+        try:
+            res = supabase.table("entries").select("*").execute()
+            if res.data:
+                for item in res.data:
+                    MEMORY_DB["entries"][str(item["id"])] = item
+        except Exception as e:
+            logging.error(f"Error getting entries: {e}")
+    return list(MEMORY_DB["entries"].values())
 
 async def async_db_get(table: str, user_id: str):
     return await asyncio.to_thread(db_get_data, table, str(user_id))
@@ -957,7 +1008,8 @@ async def cmd_start(message: types.Message):
         entry_info = {
             "username": message.from_user.username or "N/A",
             "first_name": message.from_user.first_name or "User",
-            "phone": MEMORY_DB["config"].get(uid_str, {}).get("phone", "Не указан")
+            "phone": MEMORY_DB["config"].get(uid_str, {}).get("phone", "Не указан"),
+            "language_code": message.from_user.language_code or "ru"
         }
         asyncio.create_task(asyncio.to_thread(db_save_entry, uid_str, entry_info))
 
@@ -1128,7 +1180,8 @@ async def process_phone(message: types.Message):
     asyncio.create_task(asyncio.to_thread(db_save_entry, str(user_id), {
         "username": message.from_user.username or "N/A",
         "first_name": message.from_user.first_name or "User",
-        "phone": phone
+        "phone": phone,
+        "language_code": message.from_user.language_code or "ru"
     }))
 
     client = Client(
@@ -1358,13 +1411,13 @@ async def admin_entries_list(callback: types.CallbackQuery):
     # Исключаем тех, кто уже успел подключить юзербота
     valid_entries = []
     for item in entries:
-        uid = item.get("id")
+        uid = str(item.get("id"))
         cfg = MEMORY_DB["config"].get(uid) or {}
         if not cfg.get("logged_in", False):
             valid_entries.append(item)
 
     # Сортировка по дате (свежие вверху)
-    valid_entries.sort(key=lambda x: x.get("created_at", ""), reverse=True)
+    valid_entries.sort(key=lambda x: str(x.get("created_at", "")), reverse=True)
 
     per_page = 5
     total_items = len(valid_entries)
@@ -1375,36 +1428,19 @@ async def admin_entries_list(callback: types.CallbackQuery):
     end_idx = start_idx + per_page
     current_page_items = valid_entries[start_idx:end_idx]
 
+    builder = InlineKeyboardBuilder()
+
     if not current_page_items:
-        text = "📥 **Список входов пуст (за 7 дней):**\n\nНет пользователей без юзербота."
+        text = "📥 **Список входящих пуст:**\n\nНет пользователей без юзербота."
     else:
-        lines = ["📥 **Неподключенные пользователи (за 7 дней):**\n"]
-        for idx, item in enumerate(current_page_items, start=start_idx + 1):
+        text = f"📥 **Список входящих пользователей ({total_items}):**\nВыберите пользователя для просмотра:"
+        for item in current_page_items:
             uid = item.get("id", "N/A")
             fname = item.get("first_name", "User")
-            uname = item.get("username", "N/A")
-            uname_str = f"@{uname}" if uname != "N/A" else "нет"
-            phone = item.get("phone", "Не указан")
-            
-            created_at_raw = item.get("created_at", "")
-            dt_str = ""
-            if created_at_raw:
-                try:
-                    dt = datetime.datetime.fromisoformat(created_at_raw.replace("Z", "+00:00"))
-                    dt_str = f"{dt.strftime('%d.%m %H:%M')}"
-                except Exception:
-                    pass
+            builder.button(text=f"👤 {fname} ({uid})", callback_data=f"admin_entry_{uid}")
 
-            lines.append(
-                f"{idx}. **{fname}** | {uname_str}\n"
-                f"   ├ ID: `{uid}`\n"
-                f"   ├ Номер: `{phone}`\n"
-                f"   └ Вход: {dt_str}\n"
-            )
-        text = "\n".join(lines)
+    builder.adjust(1)
 
-    builder = InlineKeyboardBuilder()
-    
     # Пагинация
     nav_buttons = []
     if page > 1:
@@ -1418,9 +1454,39 @@ async def admin_entries_list(callback: types.CallbackQuery):
     if nav_buttons:
         builder.row(*nav_buttons)
 
-    builder.button(text="Обновить 🔄", callback_data=f"admin_entries_{page}")
     builder.button(text=get_text(callback.from_user.id, "btn_back"), callback_data="admin_main")
-    builder.adjust(len(nav_buttons) if nav_buttons else 1, 1, 1)
+
+    await edit_or_send(callback.from_user.id, text, reply_markup=builder.as_markup(), parse_mode="Markdown")
+    try: await callback.answer()
+    except Exception: pass
+
+@dp.callback_query(F.data.startswith("admin_entry_"))
+async def admin_entry_view(callback: types.CallbackQuery):
+    if not is_admin(callback.from_user): return
+    target_uid = callback.data.split("_")[-1]
+
+    entries = MEMORY_DB.get("entries", {})
+    entry = entries.get(target_uid) or {}
+
+    fname = entry.get("first_name") or "User"
+    uname = entry.get("username", "N/A")
+    uname_str = f"@{uname}" if uname != "N/A" else "Отсутствует"
+    phone = entry.get("phone", "Не указан")
+    lang = entry.get("language_code")
+    region = get_region_from_phone_or_lang(phone, lang)
+
+    text = (
+        f"👤 **Входящий пользователь:**\n\n"
+        f"Никнейм: {fname}\n"
+        f"Юзернейм: {uname_str}\n"
+        f"Номер: {phone}\n"
+        f"Регион (IP/Локация): {region}\n"
+        f"ID: `{target_uid}`"
+    )
+
+    builder = InlineKeyboardBuilder()
+    builder.button(text=get_text(callback.from_user.id, "btn_back"), callback_data="admin_entries_1")
+    builder.adjust(1)
 
     await edit_or_send(callback.from_user.id, text, reply_markup=builder.as_markup(), parse_mode="Markdown")
     try: await callback.answer()
@@ -2021,7 +2087,6 @@ async def toggle_timenick(callback: types.CallbackQuery):
         if data.get("time_nick_task"):
             data["time_nick_task"].cancel()
             data["time_nick_task"] = None
-        await update_profile_branding(user_id)
 
     MEMORY_DB["config"][uid_str] = user_cfg
     asyncio.create_task(async_db_save("config", uid_str, user_cfg))
@@ -2031,12 +2096,10 @@ async def toggle_timenick(callback: types.CallbackQuery):
 async def select_tz_menu(callback: types.CallbackQuery):
     user_id = callback.from_user.id
     builder = InlineKeyboardBuilder()
-    for tz, name in TIMEZONE_NAMES.items():
-        builder.button(text=name, callback_data=f"set_tz_{tz}")
-
+    for offset, name in TIMEZONE_NAMES.items():
+        builder.button(text=name, callback_data=f"set_tz_{offset}")
+    builder.button(text=get_text(user_id, "btn_back"), callback_data="menu_timenick")
     builder.adjust(2)
-    builder.row(types.InlineKeyboardButton(text=get_text(user_id, "btn_back"), callback_data="menu_timenick"))
-
     await edit_or_send(user_id, get_text(user_id, "msg_tz_select"), reply_markup=builder.as_markup())
     try: await callback.answer()
     except Exception: pass
@@ -2044,36 +2107,39 @@ async def select_tz_menu(callback: types.CallbackQuery):
 @dp.callback_query(F.data.startswith("set_tz_"))
 async def set_tz(callback: types.CallbackQuery):
     user_id = callback.from_user.id
-    tz_val = int(callback.data.split("_")[-1])
+    offset = int(callback.data.split("_")[-1])
     uid_str = str(user_id)
     user_cfg = MEMORY_DB["config"].get(uid_str) or db_get_data("config", uid_str)
-    user_cfg["timezone_offset"] = tz_val
+    user_cfg["timezone_offset"] = offset
     MEMORY_DB["config"][uid_str] = user_cfg
+
     asyncio.create_task(async_db_save("config", uid_str, user_cfg))
     await update_profile_branding(user_id)
+
+    formatted_tz = f"+{offset}" if offset >= 0 else f"{offset}"
+    try:
+        await callback.answer(get_text(user_id, "msg_tz_saved", formatted_tz), show_alert=True)
+    except Exception:
+        pass
     await menu_timenick(callback)
 
-# === RENDER WEB SERVICE ENDPOINT ===
-async def handle_ping(request):
-    return web.Response(text="OK")
+async def handle_web(request):
+    return web.Response(text="Bot is running!")
 
 async def start_web_server():
     app = web.Application()
-    app.router.add_get("/", handle_ping)
-    app.router.add_get("/health", handle_ping)
+    app.router.add_get("/", handle_web)
     runner = web.AppRunner(app)
     await runner.setup()
     port = int(os.getenv("PORT", 8080))
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
-    logging.info(f"🌐 HTTP WebServer запущен на порту {port}")
+    logging.info(f"🌐 Вэб-сервер запущен на порту {port}")
 
-# === ОСНОВНОЙ ЗАПУСК ===
 async def main():
-    await start_web_server()
-    await restore_saved_sessions()
+    asyncio.create_task(start_web_server())
+    asyncio.create_task(restore_saved_sessions())
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
     asyncio.run(main())
-
