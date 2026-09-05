@@ -9,6 +9,7 @@ import re
 import json
 import random
 import psutil
+import ntplib
 from aiohttp import web
 
 if sys.platform != "win32":
@@ -50,6 +51,21 @@ logging.basicConfig(level=logging.INFO)
 logging.getLogger("aiogram").setLevel(logging.WARNING)
 logging.getLogger("pyrogram").setLevel(logging.WARNING)
 
+# Получение точного мирового времени через NTP (ntplib)
+def get_ntp_utc_datetime_sync():
+    client = ntplib.NTPClient()
+    servers = ["pool.ntp.org", "time.google.com", "time.cloudflare.com"]
+    for server in servers:
+        try:
+            response = client.request(server, version=3, timeout=2)
+            return datetime.datetime.fromtimestamp(response.tx_time, datetime.timezone.utc)
+        except Exception:
+            continue
+    return datetime.datetime.now(datetime.timezone.utc)
+
+async def get_ntp_utc_datetime():
+    return await asyncio.to_thread(get_ntp_utc_datetime_sync)
+
 # Инициализация Supabase
 supabase: SupabaseClient = None
 if SUPABASE_URL and SUPABASE_KEY:
@@ -90,6 +106,12 @@ def is_admin(user: types.User):
     return False
 
 TIMEZONE_NAMES = {
+    -11: "Samoa UTC-11",
+    -10: "Honolulu UTC-10",
+    -9: "Anchorage UTC-9",
+    -8: "Los Angeles UTC-8",
+    -7: "Denver UTC-7",
+    -6: "Chicago UTC-6",
     -5: "New York UTC-5",
     -4: "Santiago UTC-4",
     -3: "Brasilia UTC-3",
@@ -104,7 +126,13 @@ TIMEZONE_NAMES = {
     6: "Astana/Dhaka UTC+6",
     7: "Bangkok/Jakarta UTC+7",
     8: "Beijing/Singapore UTC+8",
-    9: "Tokyo/Seoul UTC+9"
+    9: "Tokyo/Seoul UTC+9",
+    10: "Sydney UTC+10",
+    11: "Solomon Islands UTC+11",
+    12: "Auckland UTC+12",
+    13: "Samoa/Tonga UTC+13",
+    14: "Line Islands UTC+14",
+    15: "Kiritimati/Custom UTC+15"
 }
 
 REGISTRATION_FLOOD_SECONDS_DEFAULT = 0
@@ -223,8 +251,9 @@ def get_current_styled_profile_preview(base_first, base_last, offset, include_ni
     first = clean_first
     last = clean_last
     if include_time:
+        utc_now = get_ntp_utc_datetime_sync()
         tz_now = (
-            datetime.datetime.now(datetime.timezone.utc)
+            utc_now
             + datetime.timedelta(hours=offset)
             + datetime.timedelta(seconds=PROFILE_TIME_OFFSET_SECONDS)
         )
@@ -652,8 +681,9 @@ async def update_profile_branding(user_id):
 
         if user_cfg.get("time_nick_active", False):
             offset = user_cfg.get("timezone_offset", 5)
+            utc_now = await get_ntp_utc_datetime()
             tz_now = (
-                datetime.datetime.now(datetime.timezone.utc)
+                utc_now
                 + datetime.timedelta(hours=offset)
                 + datetime.timedelta(seconds=PROFILE_TIME_OFFSET_SECONDS)
             )
