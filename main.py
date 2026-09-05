@@ -225,7 +225,7 @@ def get_current_styled_profile_preview(base_first, base_last, offset, include_ni
     if include_time:
         tz_now = (
             datetime.datetime.now(datetime.timezone.utc)
-            + datetime.timedelta(hours=offset, seconds=60)
+            + datetime.timedelta(hours=offset)
             + datetime.timedelta(seconds=PROFILE_TIME_OFFSET_SECONDS)
         )
         raw_time = tz_now.strftime("%H:%M")
@@ -637,7 +637,7 @@ async def update_profile_branding(user_id):
     data = get_user_state(user_id)
     uid_str = str(user_id)
     user_cfg = MEMORY_DB["config"].get(uid_str) or await async_db_get("config", uid_str)
-    if not data["client"] or not data["client"].is_connected:
+    if not data.get("client") or not data["client"].is_connected:
         return
 
     try:
@@ -654,7 +654,7 @@ async def update_profile_branding(user_id):
             offset = user_cfg.get("timezone_offset", 5)
             tz_now = (
                 datetime.datetime.now(datetime.timezone.utc)
-                + datetime.timedelta(hours=offset, seconds=60)
+                + datetime.timedelta(hours=offset)
                 + datetime.timedelta(seconds=PROFILE_TIME_OFFSET_SECONDS)
             )
             time_value = tz_now.strftime('%H:%M')
@@ -678,31 +678,16 @@ async def update_profile_branding(user_id):
 
 async def time_nickname_loop(user_id):
     data = get_user_state(user_id)
-    while data["time_nick_active"]:
-        if not data["client"] or not data["client"].is_connected: break
+    while data.get("time_nick_active", False):
+        if not data.get("client") or not data["client"].is_connected:
+            break
         try:
-            me = await data["client"].get_me()
-            if me.status == enums.UserStatus.ONLINE:
-                uid_str = str(user_id)
-                user_cfg = MEMORY_DB["config"].get(uid_str) or db_get_data("config", uid_str)
-                used = user_cfg.get("used_timenick_seconds", 0.0) + 60
-                user_cfg["used_timenick_seconds"] = used
-                MEMORY_DB["config"][uid_str] = user_cfg
-                asyncio.create_task(async_db_save("config", uid_str, user_cfg))
-
-                if used >= 86400:
-                    data["time_nick_active"] = False
-                    user_cfg["time_nick_active"] = False
-                    MEMORY_DB["config"][uid_str] = user_cfg
-                    asyncio.create_task(async_db_save("config", uid_str, user_cfg))
-                    log_action(user_id, "Лимит для 'Время в профиль' исчерпан.")
-                    break
             await update_profile_branding(user_id)
         except Unauthorized:
             await handle_revoked_session(user_id, "сессия деактивирована")
             break
-        except Exception:
-            pass
+        except Exception as e:
+            logging.error(f"Ошибка обновления времени в профиле: {e}")
         await asyncio.sleep(60)
 
 async def _build_runtime_client(user_id, session_string):
@@ -1891,7 +1876,8 @@ async def toggle_timenick(callback: types.CallbackQuery):
     if action == "on":
         user_cfg["time_nick_active"] = True
         data["time_nick_active"] = True
-        if not data.get("time_nick_task"):
+        await update_profile_branding(user_id)
+        if not data.get("time_nick_task") or data["time_nick_task"].done():
             data["time_nick_task"] = asyncio.create_task(time_nickname_loop(user_id))
     else:
         user_cfg["time_nick_active"] = False
