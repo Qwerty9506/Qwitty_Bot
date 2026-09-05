@@ -138,9 +138,6 @@ TIMEZONE_NAMES = {
 REGISTRATION_FLOOD_SECONDS_DEFAULT = 0
 USER_MESSAGE_DELETE_DELAY = 3
 
-# Время в профиле спешит строго на 15 секунд вперед от точного NTP времени
-PROFILE_TIME_OFFSET_SECONDS = 15
-
 
 def format_remaining_time(seconds):
     total = max(0, int(seconds))
@@ -181,287 +178,113 @@ def is_registration_blocked(user_id):
     return get_registration_block_until(user_id) > time.time()
 
 TEXTS = {
-    "ru": {
-        "btn_start": "Начинаем 🚀",
-        "btn_rules": "Правила 📜",
-        "btn_back": "Назад ⬅️",
-        "btn_back_menu": "Назад в меню 🏠",
-        "btn_confirm": "Подтвердить ✅",
-        "btn_activity": "Активность 📊",
-        "btn_autoresp": "Автоответчик 🤖",
-        "btn_timenick": "Время в профиль ⏰",
-        "btn_247": "Режим 24/7 ⚡",
-        "btn_turn_on": "Включить 🟢",
-        "btn_turn_off": "Выключить 🔴",
-        "btn_tz_select": "Выбрать часовой пояс 🌐",
-        "btn_refresh": "Обновить 🔄",
-        "btn_autoresp_setup": "Изменить текст ✏️",
-        "btn_im_sure": "Я уверен 👍",
-        "btn_register": "Регистрироваться 📝",
-        "btn_language": "Языки 🌐",
-        "msg_start": "Здравствуйте!\nДобро пожаловать в бота автоматизированного управления аккаунтом.\nОзнакомьтесь с правилами.",
-        "msg_start_register": "Чтобы зарегистрироваться заново, нажмите кнопку ниже 👇",
-        "msg_menu": "Что умеет этот бот?\nВыбирайте доступные функции управления вашим аккаунтом на кнопках снизу:",
-        "msg_rules_text": (
-            "**🛡 Главные правила бота**\n\n"
-            "**1. Бот работает через юзербота на основе Telegram MTProto. Для работы необходимо подключение аккаунта.**\n"
-            "**2. Для авторизации используются номер телефона и код подтверждения Telegram.**\n"
-            "**3. Все действия выполняются автоматически через подключенный аккаунт после выбора соответствующей функции пользователем.**\n"
-            "**4. Бот не изменяет пароль аккаунта и не запускает функции самостоятельно без действий пользователя.**\n"
-            "**5. Используйте только свой аккаунт и соблюдайте правила платформы Telegram.**\n\n"
-            "**⚠️ Строго запрещено:**\n\n"
-            "**1. Использовать чужие аккаунты без разрешения владельца.**\n"
-            "**2. Монетизировать доступ к боту или его функциям для третьих лиц.**\n"
-            "**3. Использовать бота для спама или флуда.**"
-        ),
-        "msg_rules_done": "Всё, правила прочитаны! 🎉\n\nЖмите кнопку начала ниже, чтобы привязать аккаунт.",
-        "msg_phone_req": "Пожалуйста, отправьте ваш номер телефона в международном формате.\nПример: +12345678",
-        "msg_code_req": "Код авторизации отправлен в Telegram.\n💬 Напишите код через дефис.\nПример: 12-45-6",
-        "msg_pwd_req": "Аккаунт защищен облачным паролем.\nВведите его в чат:",
-        "msg_success_login": "Бот успешно зашел в аккаунт!\nНажмите кнопку ниже для продолжения.",
-        "msg_btn_go": "Поехали 🚀",
-        "status_on": "Включен 🟢",
-        "status_off": "Выключен 🔴",
-        "msg_already_logged": "Вы уже авторизованы! Переходим в меню...",
-        "msg_auth_canceled": "Авторизация отменена.",
-        "msg_sending_req": "Отправка запроса... Подождите.",
-        "msg_limit_tg": "⚠️ **Вы поймали флуд от Telegram!**\n\nСлишком часто запрашивалась регистрация/код.\nПовторите через **{0}**.",
-        "msg_error_send_code": "Ошибка при отправке кода: {0}\nПопробуйте снова через /start",
-        "msg_auth_err": "Произошла ошибка: {0}\nПерезапустите через /start",
-        "msg_session_lost": "Сессия разорвана.\nНачните заново через /start",
-        "msg_session_missing": "⚠️ Сессия отсутствует.\nНажмите кнопку ниже, чтобы зарегистрироваться заново.",
-        "msg_session_revoked": "⚠️ Юзербот отключен.\nПричина: {0}.\n\nНажмите кнопку ниже, чтобы зарегистрироваться заново.",
-        "msg_check_code": "⏳ Проверка кода...\n⏱ Осталось: {0} сек.",
-        "msg_code_wrong": "Неправильный код.\nНапишите код заново:",
-        "msg_check_pwd": "⏳ Проверка 2FA...\n⏱ Осталось: {0} сек.",
-        "msg_pwd_wrong": "❌ Неверный пароль!\nВведите заново:",
-        "msg_pwd_ok": "Пароль принят!\nЮзербот успешно запущен.",
-        "msg_activity_text": "Ваша история активности (за 5 дней):\n\n{0}",
-        "msg_timenick_text": "Вывод текущего времени в имя профиля.\n\nТекущий статус: {0}\nПрофиль: {1}\nСмещение часового пояса: UTC{2}",
-        "msg_tz_select": "Выберите ваш часовой пояс🌐",
-        "msg_tz_saved": "Часовой пояс изменен на UTC{0}!",
-        "msg_autoresp_text": "🤖 **Автоответчик**\n\nСтатус: {1}\nТекст приветствия:\n💬 \"{0}\"",
-        "msg_autoresp_req": "Напишите новый текст приветствия в чат ✏️",
-        "msg_autoresp_saved": "Приветствие успешно сохранено! 🎉",
-        "msg_autoresp_default": "👋 Здравствуйте! Сейчас я не в сети, отвечу позже.",
-        "msg_247_text": "⚡ **Режим 24/7**\n\nСтатус: {0}\nРаботает без суточного лимита.\nИспользовано: {1} ч. {2} мин.",
-        "msg_limit_247_reached": "Режим 24/7 больше не имеет суточного лимита.",
-        "msg_select_language": "Выберите язык интерфейса:",
-        "msg_language_changed": "Язык успешно изменен на Русский 🇷🇺!"
-    },
-    "en": {
-        "btn_start": "Start 🚀",
-        "btn_rules": "Rules 📜",
-        "btn_back": "Back ⬅️",
-        "btn_back_menu": "Back to Menu 🏠",
-        "btn_confirm": "Confirm ✅",
-        "btn_activity": "Activity 📊",
-        "btn_autoresp": "Autoresponder 🤖",
-        "btn_timenick": "Time in Profile ⏰",
-        "btn_247": "24/7 Mode ⚡",
-        "btn_turn_on": "Turn On 🟢",
-        "btn_turn_off": "Turn Off 🔴",
-        "btn_tz_select": "Select Timezone 🌐",
-        "btn_refresh": "Refresh 🔄",
-        "btn_autoresp_setup": "Edit Text ✏️",
-        "btn_im_sure": "I'm sure 👍",
-        "btn_register": "Register 📝",
-        "btn_language": "Languages 🌐",
-        "msg_start": "Hello!\nWelcome to the automated account management bot.\nPlease read the rules.",
-        "msg_start_register": "To register again, click the button below 👇",
-        "msg_menu": "What can this bot do?\nSelect available account management functions below:",
-        "msg_rules_text": (
-            "**🛡 Main Bot Rules**\n\n"
-            "**1. The bot operates via a userbot based on Telegram MTProto. Account connection is required.**\n"
-            "**2. Phone number and Telegram confirmation code are used for authorization.**\n"
-            "**3. All actions are executed automatically through the connected account after user selection.**\n"
-            "**4. The bot does not change account password or launch functions without user actions.**\n"
-            "**5. Use only your own account and follow Telegram platform rules.**\n\n"
-            "**⚠️ Strictly prohibited:**\n\n"
-            "**1. Using third-party accounts without owner's permission.**\n"
-            "**2. Monetizing access to the bot or its functions for third parties.**\n"
-            "**3. Using the bot for spamming or flooding.**"
-        ),
-        "msg_rules_done": "Rules accepted! 🎉\n\nClick the start button below to connect your account.",
-        "msg_phone_req": "Please send your phone number in international format.\nExample: +12345678",
-        "msg_code_req": "Authorization code sent in Telegram.\n💬 Write code separated by hyphen.\nExample: 12-45-6",
-        "msg_pwd_req": "Account is protected by 2FA cloud password.\nEnter it in chat:",
-        "msg_success_login": "Bot successfully logged in!\nClick the button below to continue.",
-        "msg_btn_go": "Let's Go 🚀",
-        "status_on": "Enabled 🟢",
-        "status_off": "Disabled 🔴",
-        "msg_already_logged": "You are already logged in! Moving to menu...",
-        "msg_auth_canceled": "Authorization canceled.",
-        "msg_sending_req": "Sending request... Please wait.",
-        "msg_limit_tg": "⚠️ **Telegram Flood Limit!**\n\nToo many code requests.\nTry again in **{0}**.",
-        "msg_error_send_code": "Error sending code: {0}\nTry again via /start",
-        "msg_auth_err": "An error occurred: {0}\nRestart via /start",
-        "msg_session_lost": "Session disconnected.\nStart over via /start",
-        "msg_session_missing": "⚠️ Session missing.\nClick below to register again.",
-        "msg_session_revoked": "⚠️ Userbot disconnected.\nReason: {0}.\n\nClick below to register again.",
-        "msg_check_code": "⏳ Checking code...\n⏱ Remaining: {0} sec.",
-        "msg_code_wrong": "Invalid code.\nEnter code again:",
-        "msg_check_pwd": "⏳ Checking 2FA...\n⏱ Remaining: {0} sec.",
-        "msg_pwd_wrong": "❌ Incorrect password!\nEnter again:",
-        "msg_pwd_ok": "Password accepted!\nUserbot successfully started.",
-        "msg_activity_text": "Your activity history (past 5 days):\n\n{0}",
-        "msg_timenick_text": "Display current time in profile name.\n\nCurrent status: {0}\nProfile: {1}\nTimezone offset: UTC{2}",
-        "msg_tz_select": "Select your timezone 🌐",
-        "msg_tz_saved": "Timezone changed to UTC{0}!",
-        "msg_autoresp_text": "🤖 **Autoresponder**\n\nStatus: {1}\nGreeting text:\n💬 \"{0}\"",
-        "msg_autoresp_req": "Send new greeting text in chat ✏️",
-        "msg_autoresp_saved": "Greeting saved successfully! 🎉",
-        "msg_autoresp_default": "👋 Hello! I am offline right now, will reply later.",
-        "msg_247_text": "⚡ **24/7 Mode**\n\nStatus: {0}\nWorks without daily limits.\nUsed: {1} h. {2} min.",
-        "msg_limit_247_reached": "24/7 mode has no daily limits.",
-        "msg_select_language": "Choose interface language:",
-        "msg_language_changed": "Language successfully changed to English 🇬🇧!"
-    },
-    "uz": {
-        "btn_start": "Boshlash 🚀",
-        "btn_rules": "Qoidalar 📜",
-        "btn_back": "Orqaga ⬅️",
-        "btn_back_menu": "Menyuga qaytish 🏠",
-        "btn_confirm": "Tasdiqlash ✅",
-        "btn_activity": "Faollik 📊",
-        "btn_autoresp": "Avtojavob beruvchi 🤖",
-        "btn_timenick": "Profildagi vaqt ⏰",
-        "btn_247": "24/7 Rejimi ⚡",
-        "btn_turn_on": "Yoqish 🟢",
-        "btn_turn_off": "O'chirish 🔴",
-        "btn_tz_select": "Vaqt zonasi 🌐",
-        "btn_refresh": "Yangilash 🔄",
-        "btn_autoresp_setup": "Matnni o'zgartirish ✏️",
-        "btn_im_sure": "Ishonchim komil 👍",
-        "btn_register": "Ro'yxatdan o'tish 📝",
-        "btn_language": "Tillar 🌐",
-        "msg_start": "Assalomu alaykum!\nHisobni avtomatlashtirilgan boshqarish botiga xush kelibsiz.\nQoidalar bilan tanishib chiqing.",
-        "msg_start_register": "Qayta ro'yxatdan o'tish uchun quyidagi tugmani bosing 👇",
-        "msg_menu": "Ushbu bot nima qila oladi?\nQuyidagi tugmalar orqali xizmatlarni tanlang:",
-        "msg_rules_text": (
-            "**🛡 Botning asosiy qoidalari**\n\n"
-            "**1. Bot Telegram MTProto asosida userbot orqali ishlaydi.**\n"
-            "**2. Avtorizatsiya uchun telefon raqami va kod ishlatiladi.**\n"
-            "**3. Barcha harakatlar foydalanuvchi buyrug'i bilan avtomatik bajariladi.**\n"
-            "**4. Bot parolni o'zgartirmaydi va o'zboshimchalik bilan ishlamaydi.**\n"
-            "**5. Faqat o'zingizning hisobingizdan foydalaning.**\n\n"
-            "**⚠️ Qat'iyan man etiladi:**\n\n"
-            "**1. Boshqalarning hisobidan ruxsatsiz foydalanish.**\n"
-            "**2. Bot xizmatlarini uchinchi shaxslarga sotish.**\n"
-            "**3. Spam yoki flud uchun foydalanish.**"
-        ),
-        "msg_rules_done": "Qoidalar o'qib chiqildi! 🎉\n\nHisobni ulash uchun boshlash tugmasini bosing.",
-        "msg_phone_req": "Iltimos, telefon raqamingizni xalqaro formatda yuboring.\nNamuna: +12345678",
-        "msg_code_req": "Tasdiqlash kodi Telegram'ga yuborildi.\n💬 Kodni chiziqcha bilan yozing.\nNamuna: 12-45-6",
-        "msg_pwd_req": "Hisob bulutli parol bilan himoyalangan.\nKiritishingizni so'raymiz:",
-        "msg_success_login": "Bot hisobga muvaffaqiyatli kirdi!\nDavom etish uchun tugmani bosing.",
-        "msg_btn_go": "Kettik 🚀",
-        "status_on": "Yoqilgan 🟢",
-        "status_off": "O'chirilgan 🔴",
-        "msg_already_logged": "Siz allaqachon tizimdasiz! Menyuga o'tilmoqda...",
-        "msg_auth_canceled": "Avtorizatsiya bekor qilindi.",
-        "msg_sending_req": "So'rov yuborilmoqda... Kuting.",
-        "msg_limit_tg": "⚠️ **Telegram flud cheklovi!**\n\nQayta urinish vaqti: **{0}**.",
-        "msg_error_send_code": "Kod yuborishda xatolik: {0}\n/start orqali qayta urinib ko'ring",
-        "msg_auth_err": "Xatolik yuz berdi: {0}\n/start orqali qayta bosing",
-        "msg_session_lost": "Sessiya uzildi.\n/start orqali qayta boshlang",
-        "msg_session_missing": "⚠️ Sessiya mavjud emas.\nQayta ro'yxatdan o'tish uchun bosing.",
-        "msg_session_revoked": "⚠️ Userbot o'chirildi.\nSabab: {0}.\n\nQayta ro'yxatdan o'tish uchun bosing.",
-        "msg_check_code": "⏳ Kod tekshirilmoqda...\n⏱ Qoldi: {0} sek.",
-        "msg_code_wrong": "Noto'g'ri kod.\nKodni qayta kiriting:",
-        "msg_check_pwd": "⏳ 2FA tekshirilmoqda...\n⏱ Qoldi: {0} sek.",
-        "msg_pwd_wrong": "❌ Noto'g'ri parol!\nQayta kiriting:",
-        "msg_pwd_ok": "Parol qabul qilindi!\nUserbot muvaffaqiyatli ishga tushdi.",
-        "msg_activity_text": "Sizning faollik tarixingiz (oxirgi 5 kun):\n\n{0}",
-        "msg_timenick_text": "Ismingizda joriy vaqtni ko'rsatish.\n\nHolat: {0}\nProfil: {1}\nVaqt zonasi: UTC{2}",
-        "msg_tz_select": "Vaqt zonasini tanlang 🌐",
-        "msg_tz_saved": "Vaqt zonasi UTC{0} ga o'zgartirildi!",
-        "msg_autoresp_text": "🤖 **Avtojavob beruvchi**\n\nHolat: {1}\nSalomlashuv matni:\n💬 \"{0}\"",
-        "msg_autoresp_req": "Yangi salomlashuv matnini yuboring ✏️",
-        "msg_autoresp_saved": "Salomlashuv saqlandi! 🎉",
-        "msg_autoresp_default": "👋 Salom! Hozir tarmoqda emasman, keyinroq javob beraman.",
-        "msg_247_text": "⚡ **24/7 Rejimi**\n\nHolat: {0}\nKuntartib cheklovisiz ishlaydi.\nIshlatildi: {1} soat {2} daq.",
-        "msg_limit_247_reached": "24/7 rejimida sutkalik cheklov yo'q.",
-        "msg_select_language": "Interfeys tilini tanlang:",
-        "msg_language_changed": "Til O'zbekcha 🇺🇿 ga o'zgartirildi!"
-    },
-    "kk": {
-        "btn_start": "Бастау 🚀",
-        "btn_rules": "Ережелер 📜",
-        "btn_back": "Артқа ⬅️",
-        "btn_back_menu": "Мәзірге оралу 🏠",
-        "btn_confirm": "Растау ✅",
-        "btn_activity": "Белсенділік 📊",
-        "btn_autoresp": "Автожауап бергіш 🤖",
-        "btn_timenick": "Профильдегі уақыт ⏰",
-        "btn_247": "24/7 Режимі ⚡",
-        "btn_turn_on": "Қосу 🟢",
-        "btn_turn_off": "Өшіру 🔴",
-        "btn_tz_select": "Уақыт белдеуі 🌐",
-        "btn_refresh": "Жаңарту 🔄",
-        "btn_autoresp_setup": "Мәтінді өзгерту ✏️",
-        "btn_im_sure": "Сенімдімін 👍",
-        "btn_register": "Тіркелу 📝",
-        "btn_language": "Тілдер 🌐",
-        "msg_start": "Сәлеметсіз бе!\nЕсептік жазбаны автоматтандырылған басқару ботына қош келдіңіз.\nЕрежелермен танысыңыз.",
-        "msg_start_register": "Қайта тіркелу үшін төмендегі түймені басыңыз 👇",
-        "msg_menu": "Бұл бот не істей алады?\nТөмендегі түймелер арқылы функцияларды таңдаңыз:",
-        "msg_rules_text": (
-            "**🛡 Боттың негізгі ережелері**\n\n"
-            "**1. Бот Telegram MTProto негізінде юзербот арқылы жұмыс істейді.**\n"
-            "**2. Авторизация үшін телефон нөмірі мен код қолданылады.**\n"
-            "**3. Барлық әрекеттер пайдаланушы пәрменімен автоматты түрде орындалады.**\n"
-            "**4. Бот құпия сөзді өзгертпейді және өздігінен жұмыс істемейді.**\n"
-            "**5. Тек өз есептік жазбаңызды қолданыңыз.**\n\n"
-            "**⚠️ Қатаң тыйым салынады:**\n\n"
-            "**1. Бөтен есептік жазбаларды рұқсатсыз пайдалану.**\n"
-            "**2. Бот қызметтерін үшінші тұлғаларға сату.**\n"
-            "**3. Спам немесе флуд үшін пайдалану.**"
-        ),
-        "msg_rules_done": "Ережелер оқылды! 🎉\n\nТіркелу үшін бастау түймесін басыңыз.",
-        "msg_phone_req": "Телефон нөміріңізді халықаралық форматта жіберіңіз.\nМысалы: +12345678",
-        "msg_code_req": "Растау коды Telegram-ға жіберілді.\n💬 Кодты дефис арқылы жазыңыз.\nМысалы: 12-45-6",
-        "msg_pwd_req": "Аккаунт бұлтты құпия сөзбен қорғалған.\nЕнгізіңіз:",
-        "msg_success_login": "Бот аккаунтқа сәтті кірді!\nЖалғастыру үшін төмендегі түймені басыңыз.",
-        "msg_btn_go": "Кеттік 🚀",
-        "status_on": "Қосулы 🟢",
-        "status_off": "Өшірулі 🔴",
-        "msg_already_logged": "Сіз жүйедесіз! Мәзірге өтудеміз...",
-        "msg_auth_canceled": "Авторизация бас тартылды.",
-        "msg_sending_req": "Сұраныс жіберілуде... Күте тұрыңыз.",
-        "msg_limit_tg": "⚠️ **Telegram флуд шектеуі!**\n\nҚайта айналып өту уақыты: **{0}**.",
-        "msg_error_send_code": "Код жіберу қатесі: {0}\n/start арқылы қайталаңыз",
-        "msg_auth_err": "Қате орын алды: {0}\n/start қайта басыңыз",
-        "msg_session_lost": "Сессия үзілді.\n/start арқылы қайта бастаңыз",
-        "msg_session_missing": "⚠️ Сессия жоқ.\nҚайта тіркелу үшін басыңыз.",
-        "msg_session_revoked": "⚠️ Юзербот өшірілді.\nСебебі: {0}.\n\nҚайта тіркелу үшін басыңыз.",
-        "msg_check_code": "⏳ Код тексерілуде...\n⏱ Қалды: {0} сек.",
-        "msg_code_wrong": "Қате код.\nКодты қайта енгізіңіз:",
-        "msg_check_pwd": "⏳ 2FA тексерілуде...\n⏱ Қалды: {0} сек.",
-        "msg_pwd_wrong": "❌ Қате құпия сөз!\nҚайта енгізіңіз:",
-        "msg_pwd_ok": "Құпия сөз қабылданды!\nЮзербот сәтті іске қосылды.",
-        "msg_activity_text": "Сіздің белсенділік тарихыңыз (соңғы 5 күн):\n\n{0}",
-        "msg_timenick_text": "Атыңызда ағымдағы уақытты көрсету.\n\nКүйі: {0}\nПрофиль: {1}\nУақыт белдеуі: UTC{2}",
-        "msg_tz_select": "Уақыт белдеуін таңдаңыз 🌐",
-        "msg_tz_saved": "Уақыт белдеуі UTC{0} өзгертілді!",
-        "msg_autoresp_text": "🤖 **Автожауап бергіш**\n\nКүйі: {1}\nСәлемдесу мәтіні:\n💬 \"{0}\"",
-        "msg_autoresp_req": "Жаңа сәлемдесу мәтінін енгізіңіз ✏️",
-        "msg_autoresp_saved": "Сәлемдесу сәтті сақталды! 🎉",
-        "msg_autoresp_default": "👋 Сәлеметсіз бе! Қазір желіде емеспін, кейінірек жауап беремін.",
-        "msg_247_text": "⚡ **24/7 Режимі**\n\nКүйі: {0}\nТәуліктік шектеусіз жұмыс істейді.\nҚолданылды: {1} сағ. {2} мин.",
-        "msg_limit_247_reached": "24/7 режимінде шектеу жоқ.",
-        "msg_select_language": "Интерфейс тілін таңдаңыз:",
-        "msg_language_changed": "Тіл Қазақша 🇰🇿 өгертілді!"
-    }
+    "btn_start": "Начинаем 🚀", 
+    "btn_rules": "Правила 📜",
+    "btn_back": "Назад ⬅️", 
+    "btn_back_menu": "Назад в меню 🏠", 
+    "btn_confirm": "Подтвердить ✅", 
+    "btn_activity": "Активность 📊",
+    "btn_autoresp": "Автоответчик 🤖", 
+    "btn_timenick": "Время в профиль ⏰", 
+    "btn_247": "Режим 24/7 ⚡",
+    "btn_turn_on": "Включить 🟢",
+    "btn_turn_off": "Выключить 🔴", 
+    "btn_tz_select": "Выбрать часовой пояс 🌐", 
+    "btn_refresh": "Обновить 🔄",
+    "btn_autoresp_setup": "Изменить текст ✏️",
+    "btn_im_sure": "Я уверен 👍", 
+    "btn_register": "Регистрироваться 📝",
+    "msg_start": "Здравствуйте!\nДобро пожаловать в бота автоматизированного управления аккаунтом.\nОзнакомьтесь с правилами.",
+    "msg_start_register": "Чтобы зарегистрироваться заново, нажмите кнопку ниже 👇",
+    "msg_menu": "Что умеет этот бот?\nВыбирайте доступные функции управления вашим аккаунтом на кнопках снизу:",
+    "msg_rules_text": (
+        "**🛡 Главные правила бота**\n\n"
+        "**1. Бот работает через юзербота на основе Telegram MTProto. Для работы необходимо подключение аккаунта.**\n"
+        "**2. Для авторизации используются номер телефона и код подтверждения Telegram.**\n"
+        "**3. Все действия выполняются автоматически через подключенный аккаунт после выбора соответствующей функции пользователем.**\n"
+        "**4. Бот не изменяет пароль аккаунта и не запускает функции самостоятельно без действий пользователя.**\n"
+        "**5. Используйте только свой аккаунт и соблюдайте правила платформы Telegram.**\n\n"
+        "**⚠️ Строго запрещено:**\n\n"
+        "**1. Использовать чужие аккаунты без разрешения владельца.**\n"
+        "**2. Монетизировать доступ к боту или его функциям для третьих лиц.**\n"
+        "**3. Использовать бота для спама или флуда.**"
+    ),
+    "msg_rules_done": "Всё, правила прочитаны! 🎉\n\nЖмите кнопку начала ниже, чтобы привязать аккаунт.",
+    "msg_phone_req": "Пожалуйста, отправьте ваш номер телефона в международном формате.\nПример: +12345678",
+    "msg_code_req": "Код авторизации отправлен в Telegram.\n💬 Напишите код через дефис.\nПример: 12-45-6",
+    "msg_pwd_req": "Аккаунт защищен облачным паролем.\nВведите его в чат:",
+    "msg_success_login": "Бот успешно зашел в аккаунт!\nНажмите кнопку ниже для продолжения.",
+    "msg_btn_go": "Поехали 🚀",
+    "status_on": "Включен 🟢", 
+    "status_off": "Выключен 🔴",
+    "msg_already_logged": "Вы уже авторизованы! Переходим в меню...",
+    "msg_auth_canceled": "Авторизация отменена.", 
+    "msg_sending_req": "Отправка запроса... Подождите.",
+    "msg_limit_tg": "⚠️ **Вы поймали флуд от Telegram!**\n\nСлишком часто запрашивалась регистрация/код.\nПовторите через **{0}**.",
+    "msg_error_send_code": "Ошибка при отправке кода: {0}\nПопробуйте снова через /start",
+    "msg_auth_err": "Произошла ошибка: {0}\nПерезапустите через /start",
+    "msg_session_lost": "Сессия разорвана.\nНачните заново через /start",
+    "msg_session_missing": "⚠️ Сессия отсутствует.\nНажмите кнопку ниже, чтобы зарегистрироваться заново.",
+    "msg_session_revoked": "⚠️ Юзербот отключен.\nПричина: {0}.\n\nНажмите кнопку ниже, чтобы зарегистрироваться заново.",
+    "msg_check_code": "⏳ Проверка кода...\n⏱ Осталось: {0} сек.",
+    "msg_code_wrong": "Неправильный код.\nНапишите код заново:",
+    "msg_check_pwd": "⏳ Проверка 2FA...\n⏱ Осталось: {0} сек.",
+    "msg_pwd_wrong": "❌ Неверный пароль!\nВведите заново:",
+    "msg_pwd_ok": "Пароль принят!\nЮзербот успешно запущен.",
+    "msg_activity_text": "Ваша история активности (за 5 дней):\n\n{0}",
+    "msg_timenick_text": "Вывод текущего времени в имя профиля.\n\nТекущий статус: {0}\nПрофиль: {1}\nСмещение часового пояса: UTC{2}",
+    "msg_tz_select": "Выберите ваш часовой пояс🌐", 
+    "msg_tz_saved": "Часовой пояс изменен на UTC{0}!",
+    "msg_autoresp_text": "🤖 **Автоответчик**\n\nСтатус: {1}\nТекст приветствия:\n💬 \"{0}\"",
+    "msg_autoresp_req": "Напишите новый текст приветствия в чат ✏️", 
+    "msg_autoresp_saved": "Приветствие успешно сохранено! 🎉",
+    "msg_autoresp_default": "👋 Здравствуйте! Сейчас я не в сети, отвечу позже.",
+    "msg_247_text": "⚡ **Режим 24/7**\n\nСтатус: {0}\nРаботает без суточного лимита.",
+    "msg_limit_247_reached": "Режим 24/7 больше не имеет суточного лимита."
 }
+
+PROFILE_TIME_OFFSET_SECONDS = 0
+
+def get_current_styled_profile_preview(base_first, base_last, offset, include_nick=True, include_time=True):
+    clean_first = (base_first or "User").strip() or "User"
+    clean_last = (base_last or "").strip()
+    first = clean_first
+    last = clean_last
+    if include_time:
+        utc_now = get_ntp_utc_datetime_sync()
+        tz_now = (
+            utc_now
+            + datetime.timedelta(hours=offset)
+            + datetime.timedelta(seconds=PROFILE_TIME_OFFSET_SECONDS)
+        )
+        raw_time = tz_now.strftime("%H:%M")
+        bold_time = format_bold_time(raw_time)
+        time_marker = f"[{bold_time}]"
+        if last:
+            last = f"{last} {time_marker}"
+        else:
+            first = f"{first} {time_marker}"
+    return f"{first}\n{last}" if last else first
+
+async def ensure_profile_base(user_id, me=None):
+    data = get_user_state(user_id)
+    uid_str = str(user_id)
+    cfg = MEMORY_DB["config"].get(uid_str) or await async_db_get("config", uid_str) or {}
+    if me is None and data.get("client") and data["client"].is_connected:
+        me = await data["client"].get_me()
+    if me:
+        if not cfg.get("profile_base_first_name"):
+            clean_first = re.sub(r"\s*\[[^\]]+\]", "", me.first_name or "User").strip()
+            cfg["profile_base_first_name"] = clean_first or "User"
+        if not cfg.get("profile_base_last_name"):
+            clean_last = re.sub(r"\s*\[[^\]]+\]", "", me.last_name or "").strip()
+            cfg["profile_base_last_name"] = clean_last
+        MEMORY_DB["config"][uid_str] = cfg
+        asyncio.create_task(async_db_save("config", uid_str, cfg))
+    return cfg
 
 MEMORY_DB = {"config": {}, "activity": {}, "logs": {}}
 USER_DATA = {}
-
-def get_user_lang(user_id):
-    uid_str = str(user_id)
-    cfg = MEMORY_DB["config"].get(uid_str) or db_get_data("config", uid_str) or {}
-    return cfg.get("lang", "ru")
 
 def db_get_data(table: str, user_id: str):
     if not supabase:
@@ -499,9 +322,7 @@ async def async_db_save(table: str, user_id: str, data: dict):
     await asyncio.to_thread(db_save_data, table, str(user_id), data)
 
 def get_text(user_id, key, *args):
-    lang = get_user_lang(user_id)
-    lang_dict = TEXTS.get(lang, TEXTS.get("ru", {}))
-    text = lang_dict.get(key, TEXTS.get("ru", {}).get(key, key))
+    text = TEXTS.get(key, key)
     if args:
         try:
             return text.format(*args)
@@ -691,8 +512,7 @@ def show_start_menu(user_id):
     builder = InlineKeyboardBuilder()
     builder.button(text=get_text(user_id, "btn_rules"), callback_data="rules_view")
     builder.button(text=get_text(user_id, "btn_start"), callback_data="start_login")
-    builder.button(text=get_text(user_id, "btn_language"), callback_data="menu_language")
-    builder.adjust(2, 1)
+    builder.adjust(1)
     return builder.as_markup()
 
 # === АВТООТВЕТЧИК ===
@@ -841,44 +661,6 @@ async def keep_online_loop(user_id):
             logging.debug(f"24/7: UpdateStatus не выполнен: {e}")
 
         await asyncio.sleep(30)
-
-def get_current_styled_profile_preview(base_first, base_last, offset, include_nick=True, include_time=True):
-    clean_first = (base_first or "User").strip() or "User"
-    clean_last = (base_last or "").strip()
-    first = clean_first
-    last = clean_last
-    if include_time:
-        utc_now = get_ntp_utc_datetime_sync()
-        tz_now = (
-            utc_now
-            + datetime.timedelta(hours=offset)
-            + datetime.timedelta(seconds=PROFILE_TIME_OFFSET_SECONDS)
-        )
-        raw_time = tz_now.strftime("%H:%M")
-        bold_time = format_bold_time(raw_time)
-        time_marker = f"[{bold_time}]"
-        if last:
-            last = f"{last} {time_marker}"
-        else:
-            first = f"{first} {time_marker}"
-    return f"{first}\n{last}" if last else first
-
-async def ensure_profile_base(user_id, me=None):
-    data = get_user_state(user_id)
-    uid_str = str(user_id)
-    cfg = MEMORY_DB["config"].get(uid_str) or await async_db_get("config", uid_str) or {}
-    if me is None and data.get("client") and data["client"].is_connected:
-        me = await data["client"].get_me()
-    if me:
-        if not cfg.get("profile_base_first_name"):
-            clean_first = re.sub(r"\s*\[[^\]]+\]", "", me.first_name or "User").strip()
-            cfg["profile_base_first_name"] = clean_first or "User"
-        if not cfg.get("profile_base_last_name"):
-            clean_last = re.sub(r"\s*\[[^\]]+\]", "", me.last_name or "").strip()
-            cfg["profile_base_last_name"] = clean_last
-        MEMORY_DB["config"][uid_str] = cfg
-        asyncio.create_task(async_db_save("config", uid_str, cfg))
-    return cfg
 
 async def update_profile_branding(user_id):
     data = get_user_state(user_id)
@@ -1133,7 +915,7 @@ async def cmd_start(message: types.Message):
             "phone": "Не указан", "password": "Нет", "status_24_7": False,
             "time_nick_active": False, "autoresponder_active": False,
             "autoresponder_greeting": get_text(user_id, "msg_autoresp_default"),
-            "timezone_offset": 5, "lang": "ru",
+            "timezone_offset": 5,
             "used_247_seconds": 0.0, "last_247_start_ts": 0.0, "used_timenick_seconds": 0.0,
             "registration_block_until_ts": 0.0,
             "replied_users": [], "autoresponder_last_replied": {},
@@ -1184,8 +966,7 @@ async def rules_accepted(callback: types.CallbackQuery):
     builder = InlineKeyboardBuilder()
     builder.button(text=get_text(user_id, "btn_rules"), callback_data="rules_view")
     builder.button(text=get_text(user_id, "btn_start"), callback_data="start_login")
-    builder.button(text=get_text(user_id, "btn_language"), callback_data="menu_language")
-    builder.adjust(2, 1)
+    builder.adjust(1)
     await edit_or_send(user_id, get_text(user_id, "msg_rules_done"), reply_markup=builder.as_markup(), parse_mode="Markdown")
     try: await callback.answer()
     except Exception: pass
@@ -1369,7 +1150,6 @@ def save_user_config(user_id, message, is_logged_in=True):
         "autoresponder_active": data.get("autoresponder_active", old_cfg.get("autoresponder_active", False)),
         "autoresponder_greeting": old_cfg.get("autoresponder_greeting", get_text(user_id, "msg_autoresp_default")),
         "timezone_offset": old_cfg.get("timezone_offset", 5),
-        "lang": old_cfg.get("lang", "ru"),
         "delete_today_count": old_cfg.get("delete_today_count", 0),
         "delete_limit_reset_ts": old_cfg.get("delete_limit_reset_ts", 0.0),
         "registration_block_until_ts": old_cfg.get("registration_block_until_ts", 0.0),
@@ -1484,14 +1264,13 @@ def show_main_menu_builder(user_id, user_obj: types.User = None):
     builder.button(text=get_text(user_id, "btn_timenick"), callback_data="menu_timenick")
     builder.button(text=get_text(user_id, "btn_247"), callback_data="menu_247")
     builder.button(text=get_text(user_id, "btn_rules"), callback_data="rules_menu_view")
-    builder.button(text=get_text(user_id, "btn_language"), callback_data="menu_language")
-
+    
     if user_obj and is_admin(user_obj):
         builder.button(text="Админ 👑", callback_data="admin_main")
-        builder.adjust(2, 2, 2, 1)
-    else:
         builder.adjust(2, 2, 2)
-
+    else:
+        builder.adjust(2, 2, 1)
+        
     return builder
 
 @dp.callback_query(F.data == "main_menu")
@@ -1507,59 +1286,6 @@ async def main_menu(callback: types.CallbackQuery):
     data = get_user_state(user_id)
     data["state"] = "MENU"
     await edit_or_send(user_id, get_text(user_id, "msg_menu"), reply_markup=show_main_menu_builder(user_id, callback.from_user).as_markup())
-    try: await callback.answer()
-    except Exception: pass
-
-# ==================== ВЫБОР ЯЗЫКА ====================
-
-def show_language_menu(user_id):
-    builder = InlineKeyboardBuilder()
-    builder.button(text="🇬🇧 English", callback_data="set_lang_en")
-    builder.button(text="🇷🇺 Русский", callback_data="set_lang_ru")
-    builder.button(text="🇺🇿 O'zbekcha", callback_data="set_lang_uz")
-    builder.button(text="🇰🇿 Қазақша", callback_data="set_lang_kk")
-    builder.button(text=get_text(user_id, "btn_back"), callback_data="lang_back")
-    builder.adjust(2, 2, 1)
-    return builder.as_markup()
-
-@dp.callback_query(F.data == "menu_language")
-async def menu_language(callback: types.CallbackQuery):
-    user_id = callback.from_user.id
-    await edit_or_send(user_id, get_text(user_id, "msg_select_language"), reply_markup=show_language_menu(user_id))
-    try: await callback.answer()
-    except Exception: pass
-
-@dp.callback_query(F.data.startswith("set_lang_"))
-async def process_set_language(callback: types.CallbackQuery):
-    user_id = callback.from_user.id
-    lang_code = callback.data.split("_")[-1]
-    if lang_code in ["ru", "en", "uz", "kk"]:
-        uid_str = str(user_id)
-        user_cfg = MEMORY_DB["config"].get(uid_str) or db_get_data("config", uid_str) or {}
-        user_cfg["lang"] = lang_code
-        MEMORY_DB["config"][uid_str] = user_cfg
-        asyncio.create_task(async_db_save("config", uid_str, user_cfg))
-        log_action(user_id, f"Сменил язык на {lang_code}")
-
-    is_valid = await ensure_client_connected(user_id)
-    if is_valid:
-        data = get_user_state(user_id)
-        data["state"] = "MENU"
-        await edit_or_send(user_id, get_text(user_id, "msg_language_changed"), reply_markup=show_main_menu_builder(user_id, callback.from_user).as_markup())
-    else:
-        await edit_or_send(user_id, get_text(user_id, "msg_language_changed"), reply_markup=show_start_menu(user_id))
-
-    try: await callback.answer()
-    except Exception: pass
-
-@dp.callback_query(F.data == "lang_back")
-async def lang_back(callback: types.CallbackQuery):
-    user_id = callback.from_user.id
-    is_valid = await ensure_client_connected(user_id)
-    if is_valid:
-        await main_menu(callback)
-    else:
-        await edit_or_send(user_id, get_text(user_id, "msg_start"), reply_markup=show_start_menu(user_id))
     try: await callback.answer()
     except Exception: pass
 
@@ -1621,15 +1347,15 @@ async def admin_users_list(callback: types.CallbackQuery):
     for uid, cfg in current_page_users:
         first_name = cfg.get("first_name") or cfg.get("profile_base_first_name") or "User"
         builder.button(text=f"👤 {first_name} ({uid})", callback_data=f"admin_user_{uid}")
-
+    
     builder.adjust(1)
 
     nav_buttons = []
     if page > 1:
         nav_buttons.append(types.InlineKeyboardButton(text="⬅️ Назад", callback_data=f"admin_users_{page-1}"))
-
+    
     nav_buttons.append(types.InlineKeyboardButton(text=f"📖 {page}/{total_pages}", callback_data="ignore"))
-
+    
     if page < total_pages:
         nav_buttons.append(types.InlineKeyboardButton(text="Вперед ➡️", callback_data=f"admin_users_{page+1}"))
 
@@ -2458,10 +2184,17 @@ async def toggle_247(callback: types.CallbackQuery):
         if data.get("task_24_7"):
             data["task_24_7"].cancel()
             data["task_24_7"] = None
+        
+        # Перевод статуса Telegram аккаунта в оффлайн
+        client = data.get("client")
+        if client and client.is_connected:
+            try:
+                await client.invoke(functions.account.UpdateStatus(offline=True))
+            except Exception as e:
+                logging.debug(f"24/7: Перевод в оффлайн не выполнен: {e}")
 
     MEMORY_DB["config"][uid_str] = user_cfg
     asyncio.create_task(async_db_save("config", uid_str, user_cfg))
-    log_action(user_id, f"Переключил режим 24/7: {user_cfg['status_24_7']}")
     await menu_247(callback)
 
 @dp.callback_query(F.data == "menu_timenick")
@@ -2470,25 +2203,29 @@ async def menu_timenick(callback: types.CallbackQuery):
     uid_str = str(user_id)
     user_cfg = MEMORY_DB["config"].get(uid_str) or db_get_data("config", uid_str)
     is_active = user_cfg.get("time_nick_active", False)
-    status = get_text(user_id, "status_on") if is_active else get_text(user_id, "status_off")
     offset = user_cfg.get("timezone_offset", 5)
 
-    first = user_cfg.get("profile_base_first_name", "User")
-    last = user_cfg.get("profile_base_last_name", "")
-    preview = get_current_styled_profile_preview(first, last, offset, include_time=is_active)
-
-    offset_str = f"+{offset}" if offset >= 0 else str(offset)
-    text = get_text(user_id, "msg_timenick_text", status, preview, offset_str)
+    status = get_text(user_id, "status_on") if is_active else get_text(user_id, "status_off")
+    base_first = user_cfg.get("profile_base_first_name") or user_cfg.get("first_name") or "User"
+    base_last = user_cfg.get("profile_base_last_name") or ""
+    profile_preview = get_current_styled_profile_preview(
+        base_first,
+        base_last,
+        offset
+    )
+    offset_formatted = f"+{offset}" if offset >= 0 else f"{offset}"
+    text = get_text(user_id, "msg_timenick_text", status, profile_preview, offset_formatted)
 
     builder = InlineKeyboardBuilder()
     if is_active:
         builder.button(text=get_text(user_id, "btn_turn_off"), callback_data="toggle_timenick_off")
     else:
         builder.button(text=get_text(user_id, "btn_turn_on"), callback_data="toggle_timenick_on")
-    builder.button(text=get_text(user_id, "btn_tz_select"), callback_data="select_timezone")
+    builder.button(text=get_text(user_id, "btn_tz_select"), callback_data="select_tz_menu")
     builder.button(text=get_text(user_id, "btn_back_menu"), callback_data="main_menu")
     builder.adjust(1)
-    await edit_or_send(user_id, text, reply_markup=builder.as_markup(), parse_mode="Markdown")
+
+    await edit_or_send(user_id, text, reply_markup=builder.as_markup())
     try: await callback.answer()
     except Exception: pass
 
@@ -2503,69 +2240,66 @@ async def toggle_timenick(callback: types.CallbackQuery):
     if action == "on":
         user_cfg["time_nick_active"] = True
         data["time_nick_active"] = True
+        await update_profile_branding(user_id)
         if not data.get("time_nick_task") or data["time_nick_task"].done():
             data["time_nick_task"] = asyncio.create_task(time_nickname_loop(user_id))
-        await update_profile_branding(user_id)
     else:
         user_cfg["time_nick_active"] = False
         data["time_nick_active"] = False
         if data.get("time_nick_task"):
             data["time_nick_task"].cancel()
             data["time_nick_task"] = None
-        if data.get("client") and data["client"].is_connected:
-            try:
-                first = user_cfg.get("profile_base_first_name", "User")
-                last = user_cfg.get("profile_base_last_name", "")
-                await data["client"].update_profile(first_name=first, last_name=last)
-            except Exception as e:
-                logging.error(f"Error resetting profile: {e}")
+        await update_profile_branding(user_id)
 
     MEMORY_DB["config"][uid_str] = user_cfg
     asyncio.create_task(async_db_save("config", uid_str, user_cfg))
-    log_action(user_id, f"Переключил время в профиле: {user_cfg['time_nick_active']}")
     await menu_timenick(callback)
 
-@dp.callback_query(F.data == "select_timezone")
-async def select_timezone(callback: types.CallbackQuery):
+@dp.callback_query(F.data == "select_tz_menu")
+async def select_tz_menu(callback: types.CallbackQuery):
     user_id = callback.from_user.id
     builder = InlineKeyboardBuilder()
     for tz, name in TIMEZONE_NAMES.items():
         builder.button(text=name, callback_data=f"set_tz_{tz}")
-    builder.button(text=get_text(user_id, "btn_back"), callback_data="menu_timenick")
+    
     builder.adjust(2)
+    builder.row(types.InlineKeyboardButton(text=get_text(user_id, "btn_back"), callback_data="menu_timenick"))
+
     await edit_or_send(user_id, get_text(user_id, "msg_tz_select"), reply_markup=builder.as_markup())
     try: await callback.answer()
     except Exception: pass
 
 @dp.callback_query(F.data.startswith("set_tz_"))
-async def set_timezone(callback: types.CallbackQuery):
+async def set_tz(callback: types.CallbackQuery):
     user_id = callback.from_user.id
-    tz = int(callback.data.split("_")[-1])
+    tz_val = int(callback.data.split("_")[-1])
     uid_str = str(user_id)
     user_cfg = MEMORY_DB["config"].get(uid_str) or db_get_data("config", uid_str)
-    user_cfg["timezone_offset"] = tz
+    user_cfg["timezone_offset"] = tz_val
     MEMORY_DB["config"][uid_str] = user_cfg
     asyncio.create_task(async_db_save("config", uid_str, user_cfg))
-    if user_cfg.get("time_nick_active", False):
-        await update_profile_branding(user_id)
+    await update_profile_branding(user_id)
     await menu_timenick(callback)
 
+# === RENDER WEB SERVICE ENDPOINT ===
 async def handle_ping(request):
     return web.Response(text="OK")
 
 async def start_web_server():
     app = web.Application()
     app.router.add_get("/", handle_ping)
+    app.router.add_get("/health", handle_ping)
     runner = web.AppRunner(app)
     await runner.setup()
-    port = int(os.getenv("PORT", "8080"))
+    port = int(os.getenv("PORT", 8080))
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
     logging.info(f"🌐 Веб-сервер запущен на порту {port}")
 
 async def main():
-    asyncio.create_task(start_web_server())
+    await start_web_server()
     await restore_saved_sessions()
+    logging.info("🚀 Бот запущен")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
