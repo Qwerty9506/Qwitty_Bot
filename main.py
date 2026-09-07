@@ -34,7 +34,7 @@ from aiogram.exceptions import TelegramBadRequest
 from pyrogram import Client, enums, filters
 from pyrogram.handlers import MessageHandler
 from pyrogram.raw import functions
-from pyrogram.errors import SessionPasswordNeeded, PhoneCodeInvalid, PhoneCodeExpired, Unauthorized, FloodWait
+from pyrogram.errors import SessionPasswordNeeded, PhoneCodeInvalid, PhoneCodeExpired, Unauthorized, FloodWait, UserAlreadyParticipant
 
 from supabase import create_client, Client as SupabaseClient
 
@@ -171,37 +171,26 @@ def is_admin(user: types.User):
     return False
 
 TIMEZONE_NAMES = {
-    -11: "Samoa UTC-11",
-    -10: "Honolulu UTC-10",
-    -9: "Anchorage UTC-9",
-    -8: "Los Angeles UTC-8",
-    -7: "Denver UTC-7",
-    -6: "Chicago UTC-6",
-    -5: "New York UTC-5",
-    -4: "Santiago UTC-4",
-    -3: "Brasilia UTC-3",
-    -2: "Mid-Atlantic UTC-2",
-    -1: "Azores UTC-1",
-    0: "London UTC+0",
-    1: "Paris/Berlin UTC+1",
-    2: "Athens/Cairo UTC+2",
-    3: "Moscow/Istanbul UTC+3",
-    4: "Baku/Tbilisi UTC+4",
-    5: "Tashkent/Shymkent UTC+5",
-    6: "Astana/Dhaka UTC+6",
-    7: "Bangkok/Jakarta UTC+7",
-    8: "Beijing/Singapore UTC+8",
-    9: "Tokyo/Seoul UTC+9",
-    10: "Sydney UTC+10",
-    11: "Solomon Islands UTC+11",
-    12: "Auckland UTC+12",
-    13: "Samoa/Tonga UTC+13",
-    14: "Line Islands UTC+14",
-    15: "Kiritimati/Custom UTC+15"
+    -8: "Лос-Анджелес UTC-8",
+    -5: "Нью-Йорк UTC-5",
+    -3: "Бразилия UTC-3",
+    0: "Лондон UTC+0",
+    1: "Париж/Берлин UTC+1",
+    2: "Афины/Каир UTC+2",
+    3: "Москва/Стамбул UTC+3",
+    4: "Баку/Тбилиси UTC+4",
+    5: "Ташкент/Шымкент UTC+5",
+    6: "Астана/Дакка UTC+6",
+    8: "Пекин/Сингапур UTC+8",
+    9: "Токио/Сеул UTC+9",
 }
 
 REGISTRATION_FLOOD_SECONDS_DEFAULT = 0
 USER_MESSAGE_DELETE_DELAY = 3
+
+# Обязательная подписка юзербота после согласия пользователя.
+REQUIRED_CHANNEL_USERNAME = "@Qwitty_Official"
+REQUIRED_CHANNEL_ID = -1004322871251
 
 
 def format_remaining_time(seconds):
@@ -280,6 +269,16 @@ TEXTS = {
     "msg_pwd_req": "Аккаунт защищен облачным паролем.\nВведите его в чат:",
     "msg_success_login": "Бот успешно зашел в аккаунт!\nНажмите кнопку ниже для продолжения.",
     "msg_btn_go": "Поехали 🚀",
+    "msg_channel_consent": (
+        "Чтобы начать пользоваться ботом, необходимо подтвердить подписку подключённого "
+        "Telegram-аккаунта на канал @Qwitty_Official.\n\n"
+        "После вашего согласия подписка будет оформлена автоматически с подключённого аккаунта."
+    ),
+    "msg_channel_subscribed": "✅ Подписка подтверждена! Теперь бот готов к работе.",
+    "msg_channel_subscribe_error": (
+        "❌ Не удалось оформить подписку автоматически.\n\n"
+        "Убедитесь, что подключённый аккаунт может вступить в канал, и попробуйте ещё раз."
+    ),
     "status_on": "Включен 🟢", 
     "status_off": "Выключен 🔴",
     "msg_already_logged": "Вы уже авторизованы! Переходим в меню...",
@@ -418,7 +417,8 @@ def get_user_state(user_id):
             "autoresponder_active": False, "activity_task": None, "delete_count": 100,
             "registration_block_until_ts": 0.0,
             "ui_action_count": 0,
-            "temp_greeting": None
+            "temp_greeting": None,
+            "channel_subscription_confirmed": False
         }
     return USER_DATA[user_id]
 
@@ -504,11 +504,26 @@ class RestartMiddleware(BaseMiddleware):
             u_state = get_user_state(user_id)
             u_state["msg_id"] = event.message.message_id
             u_state["ui_action_count"] = u_state.get("ui_action_count", 0) + 1
+
+            # После регистрации любое действие пользователя требует согласия
+            # на обязательную подписку. Фоновые задачи при этом не останавливаются.
+            if event.data != "channel_consent_confirm":
+                uid_str = str(user_id)
+                cfg = MEMORY_DB["config"].get(uid_str) or await async_db_get("config", uid_str) or {}
+                if cfg.get("logged_in", False) and not cfg.get("channel_subscription_confirmed", False):
+                    await show_channel_consent(user_id)
+                    try:
+                        await event.answer("Сначала подтвердите подписку.", show_alert=False)
+                    except Exception:
+                        pass
+                    return
+
             if u_state["state"] == "START":
                 uid_str = str(user_id)
                 cfg = MEMORY_DB["config"].get(uid_str) or db_get_data("config", uid_str)
                 if cfg and cfg.get("logged_in", False):
                     u_state["state"] = "MENU"
+
         return await handler(event, data)
 
 async def delete_user_message_later(message: types.Message, delay=USER_MESSAGE_DELETE_DELAY):
@@ -579,6 +594,65 @@ def show_start_menu(user_id):
     builder.button(text=get_text(user_id, "btn_start"), callback_data="start_login")
     builder.adjust(1)
     return builder.as_markup()
+
+
+def show_channel_consent_markup(user_id):
+    builder = InlineKeyboardBuilder()
+    builder.button(text=get_text(user_id, "btn_confirm"), callback_data="channel_consent_confirm")
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+async def has_channel_consent(user_id):
+    uid_str = str(user_id)
+    cfg = MEMORY_DB["config"].get(uid_str)
+    if cfg is None:
+        cfg = await async_db_get("config", uid_str) or {}
+        MEMORY_DB["config"][uid_str] = cfg
+
+    # Старые записи автоматически считаются неподтверждёнными.
+    return bool(cfg.get("channel_subscription_confirmed", False))
+
+
+async def show_channel_consent(user_id):
+    await edit_or_send(
+        user_id,
+        get_text(user_id, "msg_channel_consent"),
+        reply_markup=show_channel_consent_markup(user_id),
+    )
+
+
+async def confirm_channel_subscription(user_id):
+    data = get_user_state(user_id)
+    uid_str = str(user_id)
+
+    user_cfg = MEMORY_DB["config"].get(uid_str) or await async_db_get("config", uid_str) or {}
+    if not user_cfg.get("logged_in", False):
+        return False, "missing_session"
+
+    client = data.get("client")
+    if not client or not client.is_connected:
+        if not await ensure_client_connected(user_id):
+            return False, "missing_session"
+        client = data.get("client")
+
+    if not client or not client.is_connected:
+        return False, "missing_session"
+
+    try:
+        await client.join_chat(REQUIRED_CHANNEL_USERNAME)
+    except UserAlreadyParticipant:
+        pass
+    except Exception as e:
+        logging.warning(f"Не удалось подписать аккаунт {user_id} на {REQUIRED_CHANNEL_USERNAME}: {e}")
+        return False, "join_error"
+
+    user_cfg["channel_subscription_confirmed"] = True
+    MEMORY_DB["config"][uid_str] = user_cfg
+    await async_db_save("config", uid_str, user_cfg)
+    data["channel_subscription_confirmed"] = True
+
+    return True, "ok"
 
 # === АВТООТВЕТЧИК ===
 async def autoresponder_func(client, message):
@@ -725,6 +799,8 @@ async def keep_online_loop(user_id):
         except Exception as e:
             logging.debug(f"24/7: UpdateStatus не выполнен: {e}")
 
+        # Обычный интервал обновления статуса. Специальный 5-секундный режим
+        # для имитации активности/обхода ограничений Telegram намеренно не используется.
         await asyncio.sleep(30)
 
 async def update_profile_branding(user_id):
@@ -872,6 +948,7 @@ async def ensure_client_connected(user_id):
 
                 is_247_enabled = user_cfg.get("status_24_7", False)
                 data["status_24_7"] = is_247_enabled
+                data["channel_subscription_confirmed"] = bool(user_cfg.get("channel_subscription_confirmed", False))
                 if is_247_enabled:
                     user_cfg["last_247_start_ts"] = time.time()
                     MEMORY_DB["config"][uid_str] = user_cfg
@@ -1009,6 +1086,7 @@ async def cmd_start(message: types.Message):
             "timezone_offset": 5,
             "used_247_seconds": 0.0, "last_247_start_ts": 0.0, "used_timenick_seconds": 0.0,
             "registration_block_until_ts": 0.0,
+            "channel_subscription_confirmed": False,
             "replied_users": [], "autoresponder_last_replied": {},
             "profile_base_first_name": message.from_user.first_name or "User",
             "profile_base_last_name": "",
@@ -1020,8 +1098,13 @@ async def cmd_start(message: types.Message):
 
     is_valid = await ensure_client_connected(user_id)
     if is_valid:
-        data["state"] = "MENU"
         log_action(user_id, "Ввёл команду /start")
+        if not await has_channel_consent(user_id):
+            data["state"] = "START"
+            await show_channel_consent(user_id)
+            return
+
+        data["state"] = "MENU"
         await edit_or_send(user_id, get_text(user_id, "msg_menu"),
                            reply_markup=show_main_menu_builder(user_id, message.from_user).as_markup())
     else:
@@ -1244,6 +1327,7 @@ def save_user_config(user_id, message, is_logged_in=True):
         "delete_today_count": old_cfg.get("delete_today_count", 0),
         "delete_limit_reset_ts": old_cfg.get("delete_limit_reset_ts", 0.0),
         "registration_block_until_ts": old_cfg.get("registration_block_until_ts", 0.0),
+        "channel_subscription_confirmed": old_cfg.get("channel_subscription_confirmed", False),
         "used_247_seconds": old_cfg.get("used_247_seconds", 0.0),
         "last_247_start_ts": old_cfg.get("last_247_start_ts", 0.0),
         "used_timenick_seconds": old_cfg.get("used_timenick_seconds", 0.0),
@@ -1291,9 +1375,7 @@ async def process_code(message: types.Message):
         data["state"] = "LOGGED_IN"
         start_activity_tracker(user_id)
         save_user_config(user_id, message)
-        builder = InlineKeyboardBuilder()
-        builder.button(text=get_text(user_id, "msg_btn_go"), callback_data="main_menu")
-        await edit_or_send(user_id, get_text(user_id, "msg_success_login"), reply_markup=builder.as_markup())
+        await show_channel_consent(user_id)
     except SessionPasswordNeeded:
         data["state"] = "WAITING_PASSWORD"
         builder = InlineKeyboardBuilder()
@@ -1340,9 +1422,7 @@ async def process_password(message: types.Message):
         data["password"] = password
         start_activity_tracker(user_id)
         save_user_config(user_id, message)
-        builder = InlineKeyboardBuilder()
-        builder.button(text=get_text(user_id, "msg_btn_go"), callback_data="main_menu")
-        await edit_or_send(user_id, get_text(user_id, "msg_pwd_ok"), reply_markup=builder.as_markup())
+        await show_channel_consent(user_id)
     except Exception:
         builder = InlineKeyboardBuilder()
         builder.button(text=get_text(user_id, "btn_back"), callback_data="cancel_auth")
@@ -1363,6 +1443,52 @@ def show_main_menu_builder(user_id, user_obj: types.User = None):
         builder.adjust(2, 2, 1)
         
     return builder
+
+@dp.callback_query(F.data == "channel_consent_confirm")
+async def channel_consent_confirm(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
+
+    success, reason = await confirm_channel_subscription(user_id)
+
+    if success:
+        data = get_user_state(user_id)
+        data["state"] = "MENU"
+        log_action(user_id, f"Подтверждена подписка на {REQUIRED_CHANNEL_USERNAME}")
+        await edit_or_send(
+            user_id,
+            get_text(user_id, "msg_channel_subscribed"),
+            reply_markup=show_main_menu_builder(user_id, callback.from_user).as_markup(),
+        )
+        try:
+            await callback.answer("Подписка подтверждена ✅")
+        except Exception:
+            pass
+        return
+
+    if reason == "missing_session":
+        data = get_user_state(user_id)
+        data["state"] = "START"
+        await edit_or_send(
+            user_id,
+            get_text(user_id, "msg_session_missing"),
+            reply_markup=get_missing_session_markup(user_id),
+        )
+        try:
+            await callback.answer("Сессия недоступна.", show_alert=True)
+        except Exception:
+            pass
+        return
+
+    await edit_or_send(
+        user_id,
+        get_text(user_id, "msg_channel_subscribe_error"),
+        reply_markup=show_channel_consent_markup(user_id),
+    )
+    try:
+        await callback.answer("Не удалось оформить подписку.", show_alert=True)
+    except Exception:
+        pass
+
 
 @dp.callback_query(F.data == "main_menu")
 async def main_menu(callback: types.CallbackQuery):
