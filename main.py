@@ -8,6 +8,7 @@ import logging
 import re
 import json
 import random
+import math
 import psutil
 import ntplib
 from aiohttp import web
@@ -51,20 +52,84 @@ logging.basicConfig(level=logging.INFO)
 logging.getLogger("aiogram").setLevel(logging.WARNING)
 logging.getLogger("pyrogram").setLevel(logging.WARNING)
 
-# Получение точного мирового времени через NTP (ntplib)
-def get_ntp_utc_datetime_sync():
+# Синхронизация мирового времени через NTP.
+# ВАЖНО: NTP не вызывается внутри минутного цикла. Мы один раз
+# вычисляем поправку к системным часам и дальше используем её в памяти.
+NTP_OFFSET_SECONDS = 0.0
+NTP_LAST_SYNC_MONOTONIC = 0.0
+NTP_SYNC_INTERVAL_SECONDS = 900.0  # повторная калибровка раз в 15 минут
+NTP_SYNC_LOCK = asyncio.Lock()
+
+def _get_ntp_offset_sync():
     client = ntplib.NTPClient()
     servers = ["pool.ntp.org", "time.google.com", "time.cloudflare.com"]
+    local_before = time.time()
     for server in servers:
         try:
             response = client.request(server, version=3, timeout=2)
-            return datetime.datetime.fromtimestamp(response.tx_time, datetime.timezone.utc)
+            local_after = time.time()
+            # Берём середину интервала запроса, чтобы уменьшить влияние RTT.
+            local_mid = (local_before + local_after) / 2.0
+            return float(response.tx_time) - local_mid
         except Exception:
+            local_before = time.time()
             continue
-    return datetime.datetime.now(datetime.timezone.utc)
+    return None
 
-async def get_ntp_utc_datetime():
-    return await asyncio.to_thread(get_ntp_utc_datetime_sync)
+async def sync_world_clock(force=False):
+    global NTP_OFFSET_SECONDS, NTP_LAST_SYNC_MONOTONIC
+
+    now_mono = time.monotonic()
+    if not force and now_mono - NTP_LAST_SYNC_MONOTONIC < NTP_SYNC_INTERVAL_SECONDS:
+        return NTP_OFFSET_SECONDS
+
+    async with NTP_SYNC_LOCK:
+        now_mono = time.monotonic()
+        if not force and now_mono - NTP_LAST_SYNC_MONOTONIC < NTP_SYNC_INTERVAL_SECONDS:
+            return NTP_OFFSET_SECONDS
+
+        offset = await asyncio.to_thread(_get_ntp_offset_sync)
+        if offset is not None:
+            NTP_OFFSET_SECONDS = offset
+            NTP_LAST_SYNC_MONOTONIC = time.monotonic()
+            logging.info(f"🌐 Мировое время синхронизировано, поправка: {offset:+.3f} сек.")
+        else:
+            # Даже при недоступном NTP приложение продолжает работать
+            # по системным UTC-часам, без задержки минутного цикла.
+            NTP_LAST_SYNC_MONOTONIC = time.monotonic()
+            logging.warning("⚠️ NTP недоступен, используется системное UTC-время.")
+
+    return NTP_OFFSET_SECONDS
+
+
+def get_world_utc_datetime():
+    return datetime.datetime.fromtimestamp(
+        time.time() + NTP_OFFSET_SECONDS,
+        datetime.timezone.utc,
+    )
+
+
+def get_world_utc_timestamp():
+    return time.time() + NTP_OFFSET_SECONDS
+
+
+async def ntp_sync_loop():
+    while True:
+        try:
+            await sync_world_clock(force=False)
+        except Exception as e:
+            logging.warning(f"Ошибка фоновой синхронизации NTP: {e}")
+        await asyncio.sleep(NTP_SYNC_INTERVAL_SECONDS)
+
+
+async def sleep_until_next_world_minute():
+    # Все пользовательские циклы ждут одну и ту же мировую минуту.
+    # Никакого дрейфа вида 60 + время запроса больше нет.
+    now_ts = get_world_utc_timestamp()
+    delay = 60.0 - (now_ts % 60.0)
+    if delay < 0.01:
+        delay = 0.01
+    await asyncio.sleep(delay)
 
 # Инициализация Supabase
 supabase: SupabaseClient = None
@@ -251,7 +316,7 @@ def get_current_styled_profile_preview(base_first, base_last, offset, include_ni
     first = clean_first
     last = clean_last
     if include_time:
-        utc_now = get_ntp_utc_datetime_sync()
+        utc_now = get_world_utc_datetime()
         tz_now = (
             utc_now
             + datetime.timedelta(hours=offset)
@@ -665,52 +730,74 @@ async def keep_online_loop(user_id):
 async def update_profile_branding(user_id):
     data = get_user_state(user_id)
     uid_str = str(user_id)
-    user_cfg = MEMORY_DB["config"].get(uid_str) or await async_db_get("config", uid_str)
+
     if not data.get("client") or not data["client"].is_connected:
         return
 
     try:
-        me = await data["client"].get_me()
-        user_cfg = await ensure_profile_base(user_id, me)
+        # Во время минутного обновления НЕ читаем Supabase и НЕ делаем NTP-запрос.
+        user_cfg = MEMORY_DB["config"].get(uid_str)
+        if not user_cfg:
+            user_cfg = await async_db_get("config", uid_str) or {}
+            MEMORY_DB["config"][uid_str] = user_cfg
 
-        base_first = (user_cfg.get("profile_base_first_name") or me.first_name or "User").strip() or "User"
-        base_last = (user_cfg.get("profile_base_last_name") or me.last_name or "").strip()
+        base_first = (user_cfg.get("profile_base_first_name") or "User").strip() or "User"
+        base_last = (user_cfg.get("profile_base_last_name") or "").strip()
+
+        # Если базовое имя ещё не зафиксировано, получаем его ОДИН раз.
+        if "profile_base_first_name" not in user_cfg or "profile_base_last_name" not in user_cfg:
+            me = await data["client"].get_me()
+            user_cfg = await ensure_profile_base(user_id, me)
+            base_first = (user_cfg.get("profile_base_first_name") or me.first_name or "User").strip() or "User"
+            base_last = (user_cfg.get("profile_base_last_name") or me.last_name or "").strip()
+
+        if not user_cfg.get("time_nick_active", False):
+            return
+
+        offset = int(user_cfg.get("timezone_offset", 5))
+        utc_now = get_world_utc_datetime()
+        tz_now = (
+            utc_now
+            + datetime.timedelta(hours=offset)
+            + datetime.timedelta(seconds=PROFILE_TIME_OFFSET_SECONDS)
+        )
+        time_value = tz_now.strftime('%H:%M')
+        bold_time = format_bold_time(time_value)
+        time_marker = f"[{bold_time}]"
 
         new_first = base_first
-        new_last = base_last
+        new_last = f"{base_last} {time_marker}" if base_last else base_last
+        if not base_last:
+            new_first = f"{base_first} {time_marker}"
 
-        if user_cfg.get("time_nick_active", False):
-            offset = user_cfg.get("timezone_offset", 5)
-            utc_now = await get_ntp_utc_datetime()
-            tz_now = (
-                utc_now
-                + datetime.timedelta(hours=offset)
-                + datetime.timedelta(seconds=PROFILE_TIME_OFFSET_SECONDS)
-            )
-            time_value = tz_now.strftime('%H:%M')
-            bold_time = format_bold_time(time_value)
-            time_marker = f"[{bold_time}]"
+        # Ключевой момент: не вызываем get_me() каждую минуту.
+        # Храним последнее отправленное имя в runtime и не дублируем запросы.
+        profile_key = (new_first, new_last)
+        if data.get("last_profile_key") == profile_key:
+            return
 
-            if base_last:
-                new_last = f"{base_last} {time_marker}"
-            else:
-                new_first = f"{base_first} {time_marker}"
+        await data["client"].update_profile(first_name=new_first, last_name=new_last)
+        data["last_profile_key"] = profile_key
 
-        if new_first != (me.first_name or "") or new_last != (me.last_name or ""):
-            await data["client"].update_profile(first_name=new_first, last_name=new_last)
-
-        user_cfg["profile_base_first_name"] = base_first
-        user_cfg["profile_base_last_name"] = base_last
-        MEMORY_DB["config"][uid_str] = user_cfg
-        asyncio.create_task(async_db_save("config", uid_str, user_cfg))
+        # НИКАКОГО сохранения в Supabase здесь. Настройки уже сохранены
+        # в момент изменения пользователем.
     except Exception as e:
         logging.error(f"Ошибка брендинга профиля: {e}")
 
 async def time_nickname_loop(user_id):
     data = get_user_state(user_id)
+
     while data.get("time_nick_active", False):
+        try:
+            await sleep_until_next_world_minute()
+        except asyncio.CancelledError:
+            raise
+
+        if not data.get("time_nick_active", False):
+            break
         if not data.get("client") or not data["client"].is_connected:
             break
+
         try:
             await update_profile_branding(user_id)
         except Unauthorized:
@@ -718,7 +805,6 @@ async def time_nickname_loop(user_id):
             break
         except Exception as e:
             logging.error(f"Ошибка обновления времени в профиле: {e}")
-        await asyncio.sleep(60)
 
 async def _build_runtime_client(user_id, session_string):
     client = Client(
@@ -797,6 +883,9 @@ async def ensure_client_connected(user_id):
                     data["time_nick_active"] = True
                     if not data.get("time_nick_task") or data["time_nick_task"].done():
                         data["time_nick_task"] = asyncio.create_task(time_nickname_loop(user_id))
+                    # После восстановления сразу показываем актуальную минуту,
+                    # а дальнейшие обновления идут строго по мировой минуте.
+                    asyncio.create_task(update_profile_branding(user_id))
 
                 data["autoresponder_active"] = user_cfg.get("autoresponder_active", False)
                 return True
@@ -853,6 +942,8 @@ async def ensure_client_connected(user_id):
         if user_cfg.get("time_nick_active", False):
             data["time_nick_active"] = True
             data["time_nick_task"] = asyncio.create_task(time_nickname_loop(user_id))
+            # Сразу синхронизируем профиль после запуска, без ожидания минуты.
+            asyncio.create_task(update_profile_branding(user_id))
         data["autoresponder_active"] = user_cfg.get("autoresponder_active", False)
         return True
     except Unauthorized:
@@ -2314,6 +2405,12 @@ async def start_web_server():
 
 async def main():
     await start_web_server()
+
+    # Один NTP-запрос при старте. Дальше поправка хранится в RAM,
+    # а фоновой задачей обновляется раз в 15 минут.
+    await sync_world_clock(force=True)
+    asyncio.create_task(ntp_sync_loop())
+
     await restore_saved_sessions()
     logging.info("🚀 Бот успешно запущен!")
     await dp.start_polling(bot)
