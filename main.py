@@ -1289,6 +1289,264 @@ async def main_menu(callback: types.CallbackQuery):
     try: await callback.answer()
     except Exception: pass
 
+# ==================== ПОЛЬЗОВАТЕЛЬСКОЕ МЕНЮ ====================
+
+@dp.callback_query(F.data == "menu_activity")
+async def menu_activity(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
+    is_valid = await ensure_client_connected(user_id)
+    if not is_valid:
+        await edit_or_send(user_id, get_text(user_id, "msg_session_missing"), reply_markup=get_missing_session_markup(user_id))
+        try: await callback.answer()
+        except Exception: pass
+        return
+
+    uid_str = str(user_id)
+    activity_data = MEMORY_DB["activity"].get(uid_str) or await async_db_get("activity", uid_str) or {}
+    
+    lines = []
+    today_date = datetime.datetime.now().date()
+    for i in range(4, -1, -1):
+        d = today_date - datetime.timedelta(days=i)
+        date_str = d.strftime("%d.%m.%Y")
+        seconds = activity_data.get(date_str, 0)
+        formatted_time = format_remaining_time(seconds) if seconds > 0 else "0 сек."
+        lines.append(f"📅 {date_str}: {formatted_time}")
+
+    text = get_text(user_id, "msg_activity_text", "\n".join(lines))
+    builder = InlineKeyboardBuilder()
+    builder.button(text=get_text(user_id, "btn_back_menu"), callback_data="main_menu")
+    await edit_or_send(user_id, text, reply_markup=builder.as_markup())
+    try: await callback.answer()
+    except Exception: pass
+
+@dp.callback_query(F.data == "menu_autoresponder")
+async def menu_autoresponder(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
+    is_valid = await ensure_client_connected(user_id)
+    if not is_valid:
+        await edit_or_send(user_id, get_text(user_id, "msg_session_missing"), reply_markup=get_missing_session_markup(user_id))
+        try: await callback.answer()
+        except Exception: pass
+        return
+
+    uid_str = str(user_id)
+    cfg = MEMORY_DB["config"].get(uid_str) or await async_db_get("config", uid_str) or {}
+    is_active = cfg.get("autoresponder_active", False)
+    status_str = get_text(user_id, "status_on") if is_active else get_text(user_id, "status_off")
+    greeting = cfg.get("autoresponder_greeting", get_text(user_id, "msg_autoresp_default"))
+
+    text = get_text(user_id, "msg_autoresp_text", greeting, status_str)
+
+    builder = InlineKeyboardBuilder()
+    btn_toggle_text = get_text(user_id, "btn_turn_off") if is_active else get_text(user_id, "btn_turn_on")
+    builder.button(text=btn_toggle_text, callback_data="toggle_autoresponder")
+    builder.button(text=get_text(user_id, "btn_autoresp_setup"), callback_data="autoresp_setup")
+    builder.button(text=get_text(user_id, "btn_back_menu"), callback_data="main_menu")
+    builder.adjust(2, 1)
+
+    await edit_or_send(user_id, text, reply_markup=builder.as_markup(), parse_mode="Markdown")
+    try: await callback.answer()
+    except Exception: pass
+
+@dp.callback_query(F.data == "toggle_autoresponder")
+async def toggle_autoresponder(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
+    data = get_user_state(user_id)
+    uid_str = str(user_id)
+    cfg = MEMORY_DB["config"].get(uid_str) or await async_db_get("config", uid_str) or {}
+    
+    new_status = not cfg.get("autoresponder_active", False)
+    cfg["autoresponder_active"] = new_status
+    data["autoresponder_active"] = new_status
+    MEMORY_DB["config"][uid_str] = cfg
+    asyncio.create_task(async_db_save("config", uid_str, cfg))
+
+    log_action(user_id, f"Автоответчик: {'Включен' if new_status else 'Выключен'}")
+    await menu_autoresponder(callback)
+
+@dp.callback_query(F.data == "autoresp_setup")
+async def autoresp_setup(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
+    data = get_user_state(user_id)
+    data["state"] = "WAITING_AUTORESP_TEXT"
+
+    builder = InlineKeyboardBuilder()
+    builder.button(text=get_text(user_id, "btn_back"), callback_data="menu_autoresponder")
+    await edit_or_send(user_id, get_text(user_id, "msg_autoresp_req"), reply_markup=builder.as_markup())
+    try: await callback.answer()
+    except Exception: pass
+
+@dp.message(lambda msg: get_user_state(msg.from_user.id)["state"] == "WAITING_AUTORESP_TEXT")
+async def process_autoresp_text(message: types.Message):
+    user_id = message.from_user.id
+    data = get_user_state(user_id)
+    new_text = message.text.strip() if message.text else ""
+
+    if new_text:
+        uid_str = str(user_id)
+        cfg = MEMORY_DB["config"].get(uid_str) or await async_db_get("config", uid_str) or {}
+        cfg["autoresponder_greeting"] = new_text
+        MEMORY_DB["config"][uid_str] = cfg
+        asyncio.create_task(async_db_save("config", uid_str, cfg))
+        log_action(user_id, "Изменён текст автоответчика")
+
+    data["state"] = "MENU"
+    builder = InlineKeyboardBuilder()
+    builder.button(text=get_text(user_id, "btn_back"), callback_data="menu_autoresponder")
+    await edit_or_send(user_id, get_text(user_id, "msg_autoresp_saved"), reply_markup=builder.as_markup())
+
+@dp.callback_query(F.data == "menu_timenick")
+async def menu_timenick(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
+    is_valid = await ensure_client_connected(user_id)
+    if not is_valid:
+        await edit_or_send(user_id, get_text(user_id, "msg_session_missing"), reply_markup=get_missing_session_markup(user_id))
+        try: await callback.answer()
+        except Exception: pass
+        return
+
+    uid_str = str(user_id)
+    cfg = MEMORY_DB["config"].get(uid_str) or await async_db_get("config", uid_str) or {}
+    is_active = cfg.get("time_nick_active", False)
+    status_str = get_text(user_id, "status_on") if is_active else get_text(user_id, "status_off")
+    offset = cfg.get("timezone_offset", 5)
+
+    base_first = cfg.get("profile_base_first_name", "User")
+    base_last = cfg.get("profile_base_last_name", "")
+
+    profile_preview = get_current_styled_profile_preview(base_first, base_last, offset, include_time=is_active)
+    sign_str = f"+{offset}" if offset >= 0 else str(offset)
+
+    text = get_text(user_id, "msg_timenick_text", status_str, profile_preview, sign_str)
+
+    builder = InlineKeyboardBuilder()
+    btn_toggle_text = get_text(user_id, "btn_turn_off") if is_active else get_text(user_id, "btn_turn_on")
+    builder.button(text=btn_toggle_text, callback_data="toggle_timenick")
+    builder.button(text=get_text(user_id, "btn_tz_select"), callback_data="tz_select")
+    builder.button(text=get_text(user_id, "btn_back_menu"), callback_data="main_menu")
+    builder.adjust(2, 1)
+
+    await edit_or_send(user_id, text, reply_markup=builder.as_markup())
+    try: await callback.answer()
+    except Exception: pass
+
+@dp.callback_query(F.data == "toggle_timenick")
+async def toggle_timenick(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
+    data = get_user_state(user_id)
+    uid_str = str(user_id)
+    cfg = MEMORY_DB["config"].get(uid_str) or await async_db_get("config", uid_str) or {}
+
+    new_status = not cfg.get("time_nick_active", False)
+    cfg["time_nick_active"] = new_status
+    data["time_nick_active"] = new_status
+    MEMORY_DB["config"][uid_str] = cfg
+    asyncio.create_task(async_db_save("config", uid_str, cfg))
+
+    if new_status:
+        if not data.get("time_nick_task") or data["time_nick_task"].done():
+            data["time_nick_task"] = asyncio.create_task(time_nickname_loop(user_id))
+        asyncio.create_task(update_profile_branding(user_id))
+    else:
+        if data.get("time_nick_task"):
+            data["time_nick_task"].cancel()
+            data["time_nick_task"] = None
+        if data.get("client") and data["client"].is_connected:
+            try:
+                base_first = cfg.get("profile_base_first_name", "User")
+                base_last = cfg.get("profile_base_last_name", "")
+                await data["client"].update_profile(first_name=base_first, last_name=base_last)
+            except Exception as e:
+                logging.error(f"Ошибка сброса имени профиля: {e}")
+
+    log_action(user_id, f"Время в профиле: {'Включено' if new_status else 'Выключено'}")
+    await menu_timenick(callback)
+
+@dp.callback_query(F.data == "tz_select")
+async def tz_select(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
+    builder = InlineKeyboardBuilder()
+    for tz_val, tz_name in TIMEZONE_NAMES.items():
+        builder.button(text=tz_name, callback_data=f"set_tz_{tz_val}")
+    builder.button(text=get_text(user_id, "btn_back"), callback_data="menu_timenick")
+    builder.adjust(2)
+
+    await edit_or_send(user_id, get_text(user_id, "msg_tz_select"), reply_markup=builder.as_markup())
+    try: await callback.answer()
+    except Exception: pass
+
+@dp.callback_query(F.data.startswith("set_tz_"))
+async def set_timezone(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
+    tz_val = int(callback.data.split("_")[-1])
+    uid_str = str(user_id)
+    cfg = MEMORY_DB["config"].get(uid_str) or await async_db_get("config", uid_str) or {}
+    cfg["timezone_offset"] = tz_val
+    MEMORY_DB["config"][uid_str] = cfg
+    asyncio.create_task(async_db_save("config", uid_str, cfg))
+
+    sign_str = f"+{tz_val}" if tz_val >= 0 else str(tz_val)
+    log_action(user_id, f"Изменён часовой пояс: UTC{sign_str}")
+
+    if cfg.get("time_nick_active", False):
+        asyncio.create_task(update_profile_branding(user_id))
+
+    await menu_timenick(callback)
+
+@dp.callback_query(F.data == "menu_247")
+async def menu_247(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
+    is_valid = await ensure_client_connected(user_id)
+    if not is_valid:
+        await edit_or_send(user_id, get_text(user_id, "msg_session_missing"), reply_markup=get_missing_session_markup(user_id))
+        try: await callback.answer()
+        except Exception: pass
+        return
+
+    uid_str = str(user_id)
+    cfg = MEMORY_DB["config"].get(uid_str) or await async_db_get("config", uid_str) or {}
+    is_active = cfg.get("status_24_7", False)
+    status_str = get_text(user_id, "status_on") if is_active else get_text(user_id, "status_off")
+
+    text = get_text(user_id, "msg_247_text", status_str)
+
+    builder = InlineKeyboardBuilder()
+    btn_toggle_text = get_text(user_id, "btn_turn_off") if is_active else get_text(user_id, "btn_turn_on")
+    builder.button(text=btn_toggle_text, callback_data="toggle_247")
+    builder.button(text=get_text(user_id, "btn_back_menu"), callback_data="main_menu")
+    builder.adjust(1)
+
+    await edit_or_send(user_id, text, reply_markup=builder.as_markup(), parse_mode="Markdown")
+    try: await callback.answer()
+    except Exception: pass
+
+@dp.callback_query(F.data == "toggle_247")
+async def toggle_247(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
+    data = get_user_state(user_id)
+    uid_str = str(user_id)
+    cfg = MEMORY_DB["config"].get(uid_str) or await async_db_get("config", uid_str) or {}
+
+    new_status = not cfg.get("status_24_7", False)
+    cfg["status_24_7"] = new_status
+    data["status_24_7"] = new_status
+
+    if new_status:
+        cfg["last_247_start_ts"] = time.time()
+        if not data.get("task_24_7") or data["task_24_7"].done():
+            data["task_24_7"] = asyncio.create_task(keep_online_loop(user_id))
+    else:
+        if data.get("task_24_7"):
+            data["task_24_7"].cancel()
+            data["task_24_7"] = None
+
+    MEMORY_DB["config"][uid_str] = cfg
+    asyncio.create_task(async_db_save("config", uid_str, cfg))
+
+    log_action(user_id, f"Режим 24/7: {'Включен' if new_status else 'Выключен'}")
+    await menu_247(callback)
+
 # ==================== АДМИН МЕНЮ ====================
 
 @dp.callback_query(F.data == "ignore")
@@ -2038,252 +2296,10 @@ async def admin_voices_view(callback: types.CallbackQuery):
     try: await callback.answer()
     except Exception: pass
 
-# ==================== МЕНЮ АВТООТВЕТЧИКА ====================
-@dp.callback_query(F.data == "menu_autoresponder")
-async def menu_autoresponder(callback: types.CallbackQuery):
-    user_id = callback.from_user.id
-    uid_str = str(user_id)
-    user_cfg = MEMORY_DB["config"].get(uid_str) or db_get_data("config", uid_str)
-    is_active = user_cfg.get("autoresponder_active", False)
-    greeting = user_cfg.get("autoresponder_greeting", get_text(user_id, "msg_autoresp_default"))
+# ==================== ЗАПУСК ВЕБ-СЕРВЕРА И БОТА ====================
 
-    status = get_text(user_id, "status_on") if is_active else get_text(user_id, "status_off")
-    text = get_text(user_id, "msg_autoresp_text", greeting, status)
-
-    builder = InlineKeyboardBuilder()
-    if is_active:
-        builder.button(text=get_text(user_id, "btn_turn_off"), callback_data="toggle_autoresponder_off")
-    else:
-        builder.button(text=get_text(user_id, "btn_turn_on"), callback_data="toggle_autoresponder_on")
-    builder.button(text=get_text(user_id, "btn_autoresp_setup"), callback_data="setup_autoresponder_greeting")
-    builder.button(text=get_text(user_id, "btn_back_menu"), callback_data="main_menu")
-    builder.adjust(1)
-
-    await edit_or_send(user_id, text, reply_markup=builder.as_markup(), parse_mode="Markdown")
-    try: await callback.answer()
-    except Exception: pass
-
-@dp.callback_query(F.data.startswith("toggle_autoresponder_"))
-async def toggle_autoresponder(callback: types.CallbackQuery):
-    user_id = callback.from_user.id
-    action = callback.data.split("_")[-1]
-    uid_str = str(user_id)
-    user_cfg = MEMORY_DB["config"].get(uid_str) or db_get_data("config", uid_str)
-
-    data = get_user_state(user_id)
-    is_active = (action == "on")
-    user_cfg["autoresponder_active"] = is_active
-    data["autoresponder_active"] = is_active
-    MEMORY_DB["config"][uid_str] = user_cfg
-
-    asyncio.create_task(async_db_save("config", uid_str, user_cfg))
-    log_action(user_id, f"Переключил автоответчик: {is_active}")
-    await menu_autoresponder(callback)
-
-@dp.callback_query(F.data == "setup_autoresponder_greeting")
-async def setup_autoresponder_greeting(callback: types.CallbackQuery):
-    user_id = callback.from_user.id
-    data = get_user_state(user_id)
-    data["state"] = "WAITING_AUTORESP_GREETING"
-
-    builder = InlineKeyboardBuilder()
-    builder.button(text=get_text(user_id, "btn_back"), callback_data="menu_autoresponder")
-    await edit_or_send(user_id, get_text(user_id, "msg_autoresp_req"), reply_markup=builder.as_markup())
-    try: await callback.answer()
-    except Exception: pass
-
-@dp.message(lambda msg: get_user_state(msg.from_user.id)["state"] == "WAITING_AUTORESP_GREETING")
-async def process_autoresponder_greeting(message: types.Message):
-    user_id = message.from_user.id
-    data = get_user_state(user_id)
-    new_greeting = message.text.strip()
-    uid_str = str(user_id)
-    user_cfg = MEMORY_DB["config"].get(uid_str) or db_get_data("config", uid_str)
-    user_cfg["autoresponder_greeting"] = new_greeting
-    user_cfg["replied_users"] = []
-    MEMORY_DB["config"][uid_str] = user_cfg
-
-    asyncio.create_task(async_db_save("config", uid_str, user_cfg))
-    data["state"] = "MENU"
-    log_action(user_id, "Обновил текст автоответчика")
-
-    builder = InlineKeyboardBuilder()
-    builder.button(text=get_text(user_id, "btn_back_menu"), callback_data="menu_autoresponder")
-    await edit_or_send(user_id, get_text(user_id, "msg_autoresp_saved"), reply_markup=builder.as_markup())
-
-# === ОСТАЛЬНЫЕ РАЗДЕЛЫ ===
-@dp.callback_query(F.data == "menu_activity")
-async def menu_activity(callback: types.CallbackQuery):
-    user_id = callback.from_user.id
-    uid_str = str(user_id)
-    log_action(user_id, "Проверил раздел 'Активность'")
-    user_activity = MEMORY_DB["activity"].get(uid_str) or db_get_data("activity", uid_str) or {}
-    lines = []
-    today_date = datetime.datetime.now().date()
-    for i in range(5):
-        d = today_date - datetime.timedelta(days=i)
-        date_str = d.strftime("%d.%m.%Y")
-        seconds = user_activity.get(date_str, 0)
-        hours = seconds // 3600
-        mins = (seconds % 3600) // 60
-        lines.append(f"📊 {date_str} -- {hours} ч. {mins} мин.")
-    text = get_text(user_id, "msg_activity_text", "\n".join(lines))
-    builder = InlineKeyboardBuilder()
-    builder.button(text=get_text(user_id, "btn_back_menu"), callback_data="main_menu")
-    await edit_or_send(user_id, text, reply_markup=builder.as_markup())
-    try: await callback.answer()
-    except Exception: pass
-
-@dp.callback_query(F.data == "menu_247")
-async def menu_247(callback: types.CallbackQuery):
-    user_id = callback.from_user.id
-    uid_str = str(user_id)
-    user_cfg = MEMORY_DB["config"].get(uid_str) or db_get_data("config", uid_str)
-    is_active = user_cfg.get("status_24_7", False)
-
-    status = get_text(user_id, "status_on") if is_active else get_text(user_id, "status_off")
-    used_seconds = user_cfg.get("used_247_seconds", 0.0)
-    if is_active and user_cfg.get("last_247_start_ts", 0.0) > 0:
-        used_seconds += (time.time() - user_cfg.get("last_247_start_ts", 0.0))
-
-    hours = int(used_seconds // 3600)
-    mins = int((used_seconds % 3600) // 60)
-
-    text = get_text(user_id, "msg_247_text", status, hours, mins)
-    builder = InlineKeyboardBuilder()
-    if is_active:
-        builder.button(text=get_text(user_id, "btn_turn_off"), callback_data="toggle_247_off")
-    else:
-        builder.button(text=get_text(user_id, "btn_turn_on"), callback_data="toggle_247_on")
-    builder.button(text=get_text(user_id, "btn_back_menu"), callback_data="main_menu")
-    builder.adjust(1)
-    await edit_or_send(user_id, text, reply_markup=builder.as_markup(), parse_mode="Markdown")
-    try: await callback.answer()
-    except Exception: pass
-
-@dp.callback_query(F.data.startswith("toggle_247_"))
-async def toggle_247(callback: types.CallbackQuery):
-    user_id = callback.from_user.id
-    action = callback.data.split("_")[-1]
-    uid_str = str(user_id)
-    user_cfg = MEMORY_DB["config"].get(uid_str) or db_get_data("config", uid_str)
-    data = get_user_state(user_id)
-
-    if action == "on":
-        user_cfg["status_24_7"] = True
-        user_cfg["last_247_start_ts"] = time.time()
-        data["status_24_7"] = True
-        if not data.get("task_24_7") or data["task_24_7"].done():
-            data["task_24_7"] = asyncio.create_task(keep_online_loop(user_id))
-    else:
-        user_cfg["status_24_7"] = False
-        data["status_24_7"] = False
-        if user_cfg.get("last_247_start_ts", 0.0) > 0:
-            user_cfg["used_247_seconds"] = user_cfg.get("used_247_seconds", 0.0) + (time.time() - user_cfg["last_247_start_ts"])
-            user_cfg["last_247_start_ts"] = 0.0
-        if data.get("task_24_7"):
-            data["task_24_7"].cancel()
-            data["task_24_7"] = None
-        
-        # Перевод статуса Telegram аккаунта в оффлайн
-        client = data.get("client")
-        if client and client.is_connected:
-            try:
-                await client.invoke(functions.account.UpdateStatus(offline=True))
-            except Exception as e:
-                logging.debug(f"24/7: Перевод в оффлайн не выполнен: {e}")
-
-    MEMORY_DB["config"][uid_str] = user_cfg
-    asyncio.create_task(async_db_save("config", uid_str, user_cfg))
-    await menu_247(callback)
-
-@dp.callback_query(F.data == "menu_timenick")
-async def menu_timenick(callback: types.CallbackQuery):
-    user_id = callback.from_user.id
-    uid_str = str(user_id)
-    user_cfg = MEMORY_DB["config"].get(uid_str) or db_get_data("config", uid_str)
-    is_active = user_cfg.get("time_nick_active", False)
-    offset = user_cfg.get("timezone_offset", 5)
-
-    status = get_text(user_id, "status_on") if is_active else get_text(user_id, "status_off")
-    base_first = user_cfg.get("profile_base_first_name") or user_cfg.get("first_name") or "User"
-    base_last = user_cfg.get("profile_base_last_name") or ""
-    profile_preview = get_current_styled_profile_preview(
-        base_first,
-        base_last,
-        offset
-    )
-    offset_formatted = f"+{offset}" if offset >= 0 else f"{offset}"
-    text = get_text(user_id, "msg_timenick_text", status, profile_preview, offset_formatted)
-
-    builder = InlineKeyboardBuilder()
-    if is_active:
-        builder.button(text=get_text(user_id, "btn_turn_off"), callback_data="toggle_timenick_off")
-    else:
-        builder.button(text=get_text(user_id, "btn_turn_on"), callback_data="toggle_timenick_on")
-    builder.button(text=get_text(user_id, "btn_tz_select"), callback_data="select_tz_menu")
-    builder.button(text=get_text(user_id, "btn_back_menu"), callback_data="main_menu")
-    builder.adjust(1)
-
-    await edit_or_send(user_id, text, reply_markup=builder.as_markup())
-    try: await callback.answer()
-    except Exception: pass
-
-@dp.callback_query(F.data.startswith("toggle_timenick_"))
-async def toggle_timenick(callback: types.CallbackQuery):
-    user_id = callback.from_user.id
-    action = callback.data.split("_")[-1]
-    uid_str = str(user_id)
-    user_cfg = MEMORY_DB["config"].get(uid_str) or db_get_data("config", uid_str)
-    data = get_user_state(user_id)
-
-    if action == "on":
-        user_cfg["time_nick_active"] = True
-        data["time_nick_active"] = True
-        await update_profile_branding(user_id)
-        if not data.get("time_nick_task") or data["time_nick_task"].done():
-            data["time_nick_task"] = asyncio.create_task(time_nickname_loop(user_id))
-    else:
-        user_cfg["time_nick_active"] = False
-        data["time_nick_active"] = False
-        if data.get("time_nick_task"):
-            data["time_nick_task"].cancel()
-            data["time_nick_task"] = None
-        await update_profile_branding(user_id)
-
-    MEMORY_DB["config"][uid_str] = user_cfg
-    asyncio.create_task(async_db_save("config", uid_str, user_cfg))
-    await menu_timenick(callback)
-
-@dp.callback_query(F.data == "select_tz_menu")
-async def select_tz_menu(callback: types.CallbackQuery):
-    user_id = callback.from_user.id
-    builder = InlineKeyboardBuilder()
-    for tz, name in TIMEZONE_NAMES.items():
-        builder.button(text=name, callback_data=f"set_tz_{tz}")
-    
-    builder.adjust(2)
-    builder.row(types.InlineKeyboardButton(text=get_text(user_id, "btn_back"), callback_data="menu_timenick"))
-
-    await edit_or_send(user_id, get_text(user_id, "msg_tz_select"), reply_markup=builder.as_markup())
-    try: await callback.answer()
-    except Exception: pass
-
-@dp.callback_query(F.data.startswith("set_tz_"))
-async def set_tz(callback: types.CallbackQuery):
-    user_id = callback.from_user.id
-    tz_val = int(callback.data.split("_")[-1])
-    uid_str = str(user_id)
-    user_cfg = MEMORY_DB["config"].get(uid_str) or db_get_data("config", uid_str)
-    user_cfg["timezone_offset"] = tz_val
-    MEMORY_DB["config"][uid_str] = user_cfg
-    asyncio.create_task(async_db_save("config", uid_str, user_cfg))
-    await update_profile_branding(user_id)
-    await menu_timenick(callback)
-
-# === RENDER WEB SERVICE ENDPOINT ===
 async def handle_ping(request):
-    return web.Response(text="OK")
+    return web.Response(text="OK", status=200)
 
 async def start_web_server():
     app = web.Application()
@@ -2291,15 +2307,15 @@ async def start_web_server():
     app.router.add_get("/health", handle_ping)
     runner = web.AppRunner(app)
     await runner.setup()
-    port = int(os.getenv("PORT", 8080))
+    port = int(os.getenv("PORT", "8080"))
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
-    logging.info(f"🌐 Веб-сервер запущен на порту {port}")
+    logging.info(f"🌐 HTTP сервер запущен на порту {port}")
 
 async def main():
     await start_web_server()
     await restore_saved_sessions()
-    logging.info("🚀 Бот запущен")
+    logging.info("🚀 Бот успешно запущен!")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
