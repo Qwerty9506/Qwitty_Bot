@@ -308,7 +308,7 @@ TEXTS = {
     "msg_limit_247_reached": "Режим 24/7 больше не имеет суточного лимита."
 }
 
-PROFILE_TIME_OFFSET_SECONDS = 0
+PROFILE_TIME_OFFSET_SECONDS = 10
 
 def get_current_styled_profile_preview(base_first, base_last, offset, include_nick=True, include_time=True):
     clean_first = (base_first or "User").strip() or "User"
