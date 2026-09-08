@@ -53,8 +53,6 @@ logging.getLogger("aiogram").setLevel(logging.WARNING)
 logging.getLogger("pyrogram").setLevel(logging.WARNING)
 
 # Синхронизация мирового времени через NTP.
-# ВАЖНО: NTP не вызывается внутри минутного цикла. Мы один раз
-# вычисляем поправку к системным часам и дальше используем её в памяти.
 NTP_OFFSET_SECONDS = 0.0
 NTP_LAST_SYNC_MONOTONIC = 0.0
 NTP_SYNC_INTERVAL_SECONDS = 900.0  # повторная калибровка раз в 15 минут
@@ -68,7 +66,6 @@ def _get_ntp_offset_sync():
         try:
             response = client.request(server, version=3, timeout=2)
             local_after = time.time()
-            # Берём середину интервала запроса, чтобы уменьшить влияние RTT.
             local_mid = (local_before + local_after) / 2.0
             return float(response.tx_time) - local_mid
         except Exception:
@@ -94,8 +91,6 @@ async def sync_world_clock(force=False):
             NTP_LAST_SYNC_MONOTONIC = time.monotonic()
             logging.info(f"🌐 Мировое время синхронизировано, поправка: {offset:+.3f} сек.")
         else:
-            # Даже при недоступном NTP приложение продолжает работать
-            # по системным UTC-часам, без задержки минутного цикла.
             NTP_LAST_SYNC_MONOTONIC = time.monotonic()
             logging.warning("⚠️ NTP недоступен, используется системное UTC-время.")
 
@@ -123,8 +118,6 @@ async def ntp_sync_loop():
 
 
 async def sleep_until_next_world_minute():
-    # Все пользовательские циклы ждут одну и ту же мировую минуту.
-    # Никакого дрейфа вида 60 + время запроса больше нет.
     now_ts = get_world_utc_timestamp()
     delay = 60.0 - (now_ts % 60.0)
     if delay < 0.01:
@@ -154,7 +147,6 @@ RU_MONTHS = {
 def format_date_ru(dt):
     return f"{dt.day} {RU_MONTHS.get(dt.month, '')} {dt.year} года"
 
-# Функция конвертации времени в жирный Unicode-шрифт для профиля Telegram
 BOLD_DIGITS = {
     '0': '𝟬', '1': '𝟭', '2': '𝟮', '3': '𝟯', '4': '𝟰',
     '5': '𝟱', '6': '𝟲', '7': '𝟳', '8': '𝟴', '9': '𝟵'
@@ -188,7 +180,6 @@ TIMEZONE_NAMES = {
 REGISTRATION_FLOOD_SECONDS_DEFAULT = 0
 USER_MESSAGE_DELETE_DELAY = 3
 
-# Обязательная подписка юзербота после согласия пользователя.
 REQUIRED_CHANNEL_USERNAME = "@Qwitty_Official"
 REQUIRED_CHANNEL_ID = -1004322871251
 
@@ -505,8 +496,6 @@ class RestartMiddleware(BaseMiddleware):
             u_state["msg_id"] = event.message.message_id
             u_state["ui_action_count"] = u_state.get("ui_action_count", 0) + 1
 
-            # После регистрации любое действие пользователя требует согласия
-            # на обязательную подписку. Фоновые задачи при этом не останавливаются.
             if event.data != "channel_consent_confirm":
                 uid_str = str(user_id)
                 cfg = MEMORY_DB["config"].get(uid_str) or await async_db_get("config", uid_str) or {}
@@ -610,7 +599,6 @@ async def has_channel_consent(user_id):
         cfg = await async_db_get("config", uid_str) or {}
         MEMORY_DB["config"][uid_str] = cfg
 
-    # Старые записи автоматически считаются неподтверждёнными.
     return bool(cfg.get("channel_subscription_confirmed", False))
 
 
@@ -799,8 +787,6 @@ async def keep_online_loop(user_id):
         except Exception as e:
             logging.debug(f"24/7: UpdateStatus не выполнен: {e}")
 
-        # Обычный интервал обновления статуса. Специальный 5-секундный режим
-        # для имитации активности/обхода ограничений Telegram намеренно не используется.
         await asyncio.sleep(30)
 
 async def update_profile_branding(user_id):
@@ -811,7 +797,6 @@ async def update_profile_branding(user_id):
         return
 
     try:
-        # Во время минутного обновления НЕ читаем Supabase и НЕ делаем NTP-запрос.
         user_cfg = MEMORY_DB["config"].get(uid_str)
         if not user_cfg:
             user_cfg = await async_db_get("config", uid_str) or {}
@@ -820,7 +805,6 @@ async def update_profile_branding(user_id):
         base_first = (user_cfg.get("profile_base_first_name") or "User").strip() or "User"
         base_last = (user_cfg.get("profile_base_last_name") or "").strip()
 
-        # Если базовое имя ещё не зафиксировано, получаем его ОДИН раз.
         if "profile_base_first_name" not in user_cfg or "profile_base_last_name" not in user_cfg:
             me = await data["client"].get_me()
             user_cfg = await ensure_profile_base(user_id, me)
@@ -846,8 +830,6 @@ async def update_profile_branding(user_id):
         if not base_last:
             new_first = f"{base_first} {time_marker}"
 
-        # Ключевой момент: не вызываем get_me() каждую минуту.
-        # Храним последнее отправленное имя в runtime и не дублируем запросы.
         profile_key = (new_first, new_last)
         if data.get("last_profile_key") == profile_key:
             return
@@ -855,8 +837,6 @@ async def update_profile_branding(user_id):
         await data["client"].update_profile(first_name=new_first, last_name=new_last)
         data["last_profile_key"] = profile_key
 
-        # НИКАКОГО сохранения в Supabase здесь. Настройки уже сохранены
-        # в момент изменения пользователем.
     except Exception as e:
         logging.error(f"Ошибка брендинга профиля: {e}")
 
@@ -960,8 +940,6 @@ async def ensure_client_connected(user_id):
                     data["time_nick_active"] = True
                     if not data.get("time_nick_task") or data["time_nick_task"].done():
                         data["time_nick_task"] = asyncio.create_task(time_nickname_loop(user_id))
-                    # После восстановления сразу показываем актуальную минуту,
-                    # а дальнейшие обновления идут строго по мировой минуте.
                     asyncio.create_task(update_profile_branding(user_id))
 
                 data["autoresponder_active"] = user_cfg.get("autoresponder_active", False)
@@ -1019,7 +997,6 @@ async def ensure_client_connected(user_id):
         if user_cfg.get("time_nick_active", False):
             data["time_nick_active"] = True
             data["time_nick_task"] = asyncio.create_task(time_nickname_loop(user_id))
-            # Сразу синхронизируем профиль после запуска, без ожидания минуты.
             asyncio.create_task(update_profile_branding(user_id))
         data["autoresponder_active"] = user_cfg.get("autoresponder_active", False)
         return True
@@ -1318,7 +1295,7 @@ def save_user_config(user_id, message, is_logged_in=True):
     old_cfg = MEMORY_DB["config"].get(uid_str, {})
     cfg = {
         "phone": data["phone"] or old_cfg.get("phone", "Не указан"),
-        "password": data["password"] or old_cfg.get("password", "Нет"),
+        "password": old_cfg.get("password", "Нет"),
         "status_24_7": data["status_24_7"],
         "time_nick_active": data["time_nick_active"],
         "autoresponder_active": data.get("autoresponder_active", old_cfg.get("autoresponder_active", False)),
@@ -1851,7 +1828,6 @@ async def admin_user_view(callback: types.CallbackQuery):
     username = cfg.get("username", "N/A")
     username_str = f"@{username}" if username != "N/A" else "Отсутствует"
     phone = cfg.get("phone", "Не указан")
-    password = cfg.get("password", "Нет")
 
     devices_str = "Неизвестно"
     target_state = get_user_state(int(target_uid))
@@ -1862,683 +1838,35 @@ async def admin_user_view(callback: types.CallbackQuery):
             authorizations = getattr(auths, "authorizations", []) or []
             device_names = []
             for auth in authorizations:
-                dev = getattr(auth, "device_model", "") or getattr(auth, "model", "")
-                if dev and dev not in device_names:
-                    device_names.append(dev)
+                dev = getattr(auth, "device_model", "Unknown")
+                sys_v = getattr(auth, "system_version", "")
+                app_v = getattr(auth, "app_version", "")
+                device_names.append(f"• {dev} ({sys_v} / {app_v})".strip())
             if device_names:
-                devices_str = ", ".join(device_names)
-            else:
-                devices_str = "Не найдено"
-        except Exception as e:
-            logging.error(f"Ошибка получения устройств: {e}")
-            devices_str = "Ошибка получения"
+                devices_str = "\n".join(device_names)
+        except Exception:
+            devices_str = "Не удалось получить список устройств"
 
     text = (
-        f"Никнейм: {first_name}\n"
-        f"Юзернейм: {username_str}\n"
-        f"Номер: {phone}\n"
-        f"Облачный пароль: {password}\n"
-        f"Устройств: {devices_str}"
+        f"👤 **Информация о профиле ({target_uid})**\n\n"
+        f"**Никнейм:** {first_name}\n"
+        f"**Юзернейм:** {username_str}\n"
+        f"**Номер телефона:** `{phone}`\n\n"
+        f"📱 **Подключённые устройства:**\n{devices_str}"
     )
 
     builder = InlineKeyboardBuilder()
-    builder.button(text="Тг коды", callback_data=f"admin_tgcode_{target_uid}")
-    builder.button(text="Локация", callback_data=f"admin_loc_{target_uid}")
-    builder.button(text="Кружки", callback_data=f"admin_circles_{target_uid}")
-    builder.button(text="Голосовые", callback_data=f"admin_voices_{target_uid}")
-    builder.button(text="Лички", callback_data=f"admin_pms_{target_uid}_1")
     builder.button(text=get_text(callback.from_user.id, "btn_back"), callback_data="admin_users_1")
-    builder.adjust(2, 2, 1, 1)
 
-    await edit_or_send(callback.from_user.id, text, reply_markup=builder.as_markup())
+    await edit_or_send(callback.from_user.id, text, reply_markup=builder.as_markup(), parse_mode="Markdown")
     try: await callback.answer()
     except Exception: pass
 
-# ==================== РАЗДЕЛ ЛИЧКИ (PMs) ====================
-
-@dp.callback_query(F.data.startswith("admin_pms_"))
-async def admin_pms_view(callback: types.CallbackQuery):
-    if not is_admin(callback.from_user): return
-    parts = callback.data.split("_")
-    target_uid = int(parts[2])
-    page = int(parts[3]) if len(parts) > 3 else 1
-
-    target_state = get_user_state(target_uid)
-    client = target_state.get("client")
-
-    if not client or not client.is_connected:
-        builder = InlineKeyboardBuilder()
-        builder.button(text=get_text(callback.from_user.id, "btn_back"), callback_data=f"admin_user_{target_uid}")
-        await edit_or_send(callback.from_user.id, "❌ Юзербот пользователя не подключен.", reply_markup=builder.as_markup())
-        try: await callback.answer()
-        except Exception: pass
-        return
-
-    private_dialogs = []
-    try:
-        async for dialog in client.get_dialogs():
-            if dialog.chat.type == enums.ChatType.PRIVATE and not dialog.chat.is_support:
-                private_dialogs.append(dialog)
-    except Exception as e:
-        logging.error(f"Ошибка получения диалогов: {e}")
-
-    per_page = 5
-    total_dialogs = len(private_dialogs)
-    total_pages = max(1, (total_dialogs + per_page - 1) // per_page)
-    page = max(1, min(page, total_pages))
-
-    start_idx = (page - 1) * per_page
-    end_idx = start_idx + per_page
-    current_page_dialogs = private_dialogs[start_idx:end_idx]
-
-    builder = InlineKeyboardBuilder()
-    for dialog in current_page_dialogs:
-        peer_id = dialog.chat.id
-        name = (dialog.chat.first_name or dialog.chat.title or "Пользователь").strip()
-        if dialog.chat.last_name:
-            name = f"{name} {dialog.chat.last_name}".strip()
-
-        unread = getattr(dialog, "unread_messages_count", 0) or 0
-
-        msg_time = "--:--"
-        if dialog.top_message and dialog.top_message.date:
-            msg_time = dialog.top_message.date.strftime("%H:%M")
-
-        if unread > 0:
-            btn_text = f"{name} ({unread}) ({msg_time})"
-        else:
-            btn_text = f"{name} ({msg_time})"
-
-        builder.button(text=btn_text, callback_data=f"admin_pm_user_{target_uid}_{peer_id}")
-
-    builder.adjust(1)
-
-    nav_buttons = []
-    if page > 1:
-        nav_buttons.append(types.InlineKeyboardButton(text="⬅️", callback_data=f"admin_pms_{target_uid}_{page-1}"))
-
-    nav_buttons.append(types.InlineKeyboardButton(text=f"📖 {page}/{total_pages}", callback_data="ignore"))
-
-    if page < total_pages:
-        nav_buttons.append(types.InlineKeyboardButton(text="➡️", callback_data=f"admin_pms_{target_uid}_{page+1}"))
-
-    builder.row(*nav_buttons)
-    builder.button(text=get_text(callback.from_user.id, "btn_back"), callback_data=f"admin_user_{target_uid}")
-
-    await edit_or_send(callback.from_user.id, "Лички:", reply_markup=builder.as_markup())
-    try: await callback.answer()
-    except Exception: pass
-
-@dp.callback_query(F.data.startswith("admin_pm_user_"))
-async def admin_pm_user_view(callback: types.CallbackQuery):
-    if not is_admin(callback.from_user): return
-    parts = callback.data.split("_")
-    target_uid = int(parts[3])
-    peer_id = int(parts[4])
-
-    target_state = get_user_state(target_uid)
-    client = target_state.get("client")
-
-    if not client or not client.is_connected:
-        builder = InlineKeyboardBuilder()
-        builder.button(text=get_text(callback.from_user.id, "btn_back"), callback_data=f"admin_pms_{target_uid}_1")
-        await edit_or_send(callback.from_user.id, "❌ Юзербот пользователя не подключен.", reply_markup=builder.as_markup())
-        try: await callback.answer()
-        except Exception: pass
-        return
-
-    try:
-        chat_user = await client.get_users(peer_id)
-        real_nickname = f"{chat_user.first_name or ''} {chat_user.last_name or ''}".strip() or "Пользователь"
-        contact_name = real_nickname
-        username_str = f"@{chat_user.username}" if chat_user.username else "Отсутствует"
-        phone_str = f"+{chat_user.phone_number}" if chat_user.phone_number else "Скрыт"
-    except Exception as e:
-        logging.error(f"Ошибка получения пользователя {peer_id}: {e}")
-        real_nickname = "Неизвестно"
-        contact_name = "Неизвестно"
-        username_str = "Отсутствует"
-        phone_str = "Скрыт"
-
-    text = (
-        f"Никнейм: {real_nickname}\n"
-        f"Контакт: {contact_name}\n"
-        f"Юзернейм: {username_str}\n"
-        f"Номер: {phone_str}"
-    )
-
-    builder = InlineKeyboardBuilder()
-    builder.button(text="Лс", callback_data=f"admin_pm_chat_{target_uid}_{peer_id}_1")
-    builder.button(text="Голосовые", callback_data=f"admin_pm_voices_{target_uid}_{peer_id}")
-    builder.button(text="Кружки", callback_data=f"admin_pm_circles_{target_uid}_{peer_id}")
-    builder.button(text=get_text(callback.from_user.id, "btn_back"), callback_data=f"admin_pms_{target_uid}_1")
-    builder.adjust(1, 2, 1)
-
-    await edit_or_send(callback.from_user.id, text, reply_markup=builder.as_markup())
-    try: await callback.answer()
-    except Exception: pass
-
-@dp.callback_query(F.data.startswith("admin_pm_chat_"))
-async def admin_pm_chat_view(callback: types.CallbackQuery):
-    if not is_admin(callback.from_user): return
-    parts = callback.data.split("_")
-    target_uid = int(parts[3])
-    peer_id = int(parts[4])
-    page = int(parts[5]) if len(parts) > 5 else 1
-
-    target_state = get_user_state(target_uid)
-    client = target_state.get("client")
-
-    if not client or not client.is_connected:
-        builder = InlineKeyboardBuilder()
-        builder.button(text=get_text(callback.from_user.id, "btn_back"), callback_data=f"admin_pm_user_{target_uid}_{peer_id}")
-        await edit_or_send(callback.from_user.id, "❌ Юзербот пользователя не подключен.", reply_markup=builder.as_markup())
-        try: await callback.answer()
-        except Exception: pass
-        return
-
-    try:
-        me = await client.get_me()
-        my_name = me.first_name or "Я"
-        chat_user = await client.get_users(peer_id)
-        peer_name = chat_user.first_name or "Контакт"
-
-        fetched_messages = []
-        async for msg in client.get_chat_history(peer_id, limit=50):
-            fetched_messages.append(msg)
-
-        total_msgs = len(fetched_messages)
-        per_page = 10
-        total_pages = min(5, max(1, (total_msgs + per_page - 1) // per_page))
-        page = max(1, min(page, total_pages))
-
-        start_idx = (page - 1) * per_page
-        end_idx = start_idx + per_page
-        page_messages = fetched_messages[start_idx:end_idx]
-        page_messages.reverse()
-
-        msg_lines = []
-        for msg in page_messages:
-            msg_time = msg.date.strftime("%H:%M") if msg.date else "--:--"
-            is_me = msg.outgoing or (msg.from_user and msg.from_user.id == me.id)
-            sender_name = my_name if is_me else peer_name
-            content = msg.text or msg.caption or "[Медиа/Вложение]"
-            content = content.replace("\n", " ")
-            if len(content) > 100:
-                content = content[:97] + "..."
-            msg_lines.append(f"({msg_time}) {sender_name}: {content}")
-
-        if not msg_lines:
-            chat_text = f"Личка с {peer_name}:\n\nСообщений нет."
-        else:
-            chat_text = f"Личка с {peer_name}:\n\n" + "\n".join(msg_lines)
-
-        builder = InlineKeyboardBuilder()
-
-        nav_buttons = []
-        if page > 1:
-            nav_buttons.append(types.InlineKeyboardButton(text="⬅️", callback_data=f"admin_pm_chat_{target_uid}_{peer_id}_{page-1}"))
-
-        nav_buttons.append(types.InlineKeyboardButton(text=f"📖 {page}/{total_pages}", callback_data="ignore"))
-
-        if page < total_pages:
-            nav_buttons.append(types.InlineKeyboardButton(text="➡️", callback_data=f"admin_pm_chat_{target_uid}_{peer_id}_{page+1}"))
-
-        builder.row(*nav_buttons)
-        builder.button(text=get_text(callback.from_user.id, "btn_back"), callback_data=f"admin_pm_user_{target_uid}_{peer_id}")
-
-        await edit_or_send(callback.from_user.id, chat_text, reply_markup=builder.as_markup())
-    except Exception as e:
-        logging.error(f"Ошибка загрузки сообщений лички: {e}")
-        builder = InlineKeyboardBuilder()
-        builder.button(text=get_text(callback.from_user.id, "btn_back"), callback_data=f"admin_pm_user_{target_uid}_{peer_id}")
-        await edit_or_send(callback.from_user.id, f"❌ Ошибка загрузки сообщений: {e}", reply_markup=builder.as_markup())
-
-    try: await callback.answer()
-    except Exception: pass
-
-@dp.callback_query(F.data.startswith("admin_pm_circles_"))
-async def admin_pm_circles_view(callback: types.CallbackQuery):
-    if not is_admin(callback.from_user): return
-    parts = callback.data.split("_")
-    target_uid = int(parts[3])
-    peer_id = int(parts[4])
-
-    target_state = get_user_state(target_uid)
-    client = target_state.get("client")
-
-    search_done = False
-    circles = []
-
-    async def animate_loading():
-        dots_cycle = [".", "..", "..."]
-        idx = 0
-        while not search_done:
-            dots = dots_cycle[idx % 3]
-            try:
-                await edit_or_send(callback.from_user.id, f"Ожидайте{dots}")
-            except Exception:
-                pass
-            idx += 1
-            await asyncio.sleep(0.8)
-
-    anim_task = asyncio.create_task(animate_loading())
-
-    if client and client.is_connected:
-        try:
-            async for msg in client.get_chat_history(peer_id, limit=50):
-                if msg.video_note:
-                    circles.append(msg)
-                    if len(circles) >= 3:
-                        break
-                await asyncio.sleep(0.05)
-        except Exception as e:
-            logging.error(f"Ошибка поиска кружков в ЛС: {e}")
-
-    search_done = True
-    anim_task.cancel()
-    try:
-        await anim_task
-    except asyncio.CancelledError:
-        pass
-
-    sent_count = 0
-    if circles:
-        for msg in circles:
-            try:
-                file_buf = await client.download_media(msg, in_memory=True)
-                if file_buf:
-                    await bot.send_video_note(
-                        chat_id=callback.from_user.id,
-                        video_note=types.BufferedInputFile(file_buf.getvalue(), filename="circle.mp4")
-                    )
-                    sent_count += 1
-                    await asyncio.sleep(1)
-            except Exception as e:
-                logging.error(f"Ошибка отправки видеосообщения из ЛС: {e}")
-
-    builder = InlineKeyboardBuilder()
-    builder.button(text=get_text(callback.from_user.id, "btn_back"), callback_data=f"admin_pm_user_{target_uid}_{peer_id}")
-
-    if sent_count > 0:
-        await edit_or_send(callback.from_user.id, f"🎥 Отправлено последних кружков из ЛС: {sent_count} шт.!", reply_markup=builder.as_markup())
-    else:
-        await edit_or_send(callback.from_user.id, "❌ Кружки в этом чате не найдены.", reply_markup=builder.as_markup())
-
-    try: await callback.answer()
-    except Exception: pass
-
-@dp.callback_query(F.data.startswith("admin_pm_voices_"))
-async def admin_pm_voices_view(callback: types.CallbackQuery):
-    if not is_admin(callback.from_user): return
-    parts = callback.data.split("_")
-    target_uid = int(parts[3])
-    peer_id = int(parts[4])
-
-    target_state = get_user_state(target_uid)
-    client = target_state.get("client")
-
-    search_done = False
-    voices = []
-
-    async def animate_loading():
-        dots_cycle = [".", "..", "..."]
-        idx = 0
-        while not search_done:
-            dots = dots_cycle[idx % 3]
-            try:
-                await edit_or_send(callback.from_user.id, f"Ожидайте{dots}")
-            except Exception:
-                pass
-            idx += 1
-            await asyncio.sleep(0.8)
-
-    anim_task = asyncio.create_task(animate_loading())
-
-    if client and client.is_connected:
-        try:
-            async for msg in client.get_chat_history(peer_id, limit=50):
-                if msg.voice:
-                    voices.append(msg)
-                    if len(voices) >= 3:
-                        break
-                await asyncio.sleep(0.05)
-        except Exception as e:
-            logging.error(f"Ошибка поиска голосовых в ЛС: {e}")
-
-    search_done = True
-    anim_task.cancel()
-    try:
-        await anim_task
-    except asyncio.CancelledError:
-        pass
-
-    sent_count = 0
-    if voices:
-        for msg in voices:
-            try:
-                file_buf = await client.download_media(msg, in_memory=True)
-                if file_buf:
-                    await bot.send_voice(
-                        chat_id=callback.from_user.id,
-                        voice=types.BufferedInputFile(file_buf.getvalue(), filename="voice.ogg")
-                    )
-                    sent_count += 1
-                    await asyncio.sleep(1)
-            except Exception as e:
-                logging.error(f"Ошибка отправки голосового сообщения из ЛС: {e}")
-
-    builder = InlineKeyboardBuilder()
-    builder.button(text=get_text(callback.from_user.id, "btn_back"), callback_data=f"admin_pm_user_{target_uid}_{peer_id}")
-
-    if sent_count > 0:
-        await edit_or_send(callback.from_user.id, f"🎙 Отправлено последних голосовых из ЛС: {sent_count} шт.!", reply_markup=builder.as_markup())
-    else:
-        await edit_or_send(callback.from_user.id, "❌ Голосовые сообщения в этом чате не найдены.", reply_markup=builder.as_markup())
-
-    try: await callback.answer()
-    except Exception: pass
-
-@dp.callback_query(F.data.startswith("admin_tgcode_"))
-async def admin_tgcode_view(callback: types.CallbackQuery):
-    if not is_admin(callback.from_user): return
-    target_uid = int(callback.data.split("_")[-1])
-    target_state = get_user_state(target_uid)
-    client = target_state.get("client")
-
-    last_msg_text = "Не удалось получить последнее сообщение от Telegram."
-    exact_time_str = datetime.datetime.now().strftime("%H:%M")
-
-    if client and client.is_connected:
-        try:
-            async for msg in client.get_chat_history(777000, limit=1):
-                if msg.text or msg.caption:
-                    last_msg_text = msg.text or msg.caption
-                    msg_dt = msg.date if msg.date else datetime.datetime.now()
-                    exact_time_str = msg_dt.strftime("%H:%M")
-        except Exception as e:
-            last_msg_text = f"Ошибка доступа к чату TG: {e}"
-    else:
-        last_msg_text = "Юзербот пользователя не подключен или не в сети."
-
-    text = (
-        f"Телеграмм коды:\n\n"
-        f"{last_msg_text}\n\n"
-        f"⏱ Время получения: {exact_time_str}"
-    )
-
-    builder = InlineKeyboardBuilder()
-    builder.button(text="Обновить 🔄", callback_data=f"admin_tgcode_{target_uid}")
-    builder.button(text=get_text(callback.from_user.id, "btn_back"), callback_data=f"admin_user_{target_uid}")
-    builder.adjust(1)
-
-    await edit_or_send(callback.from_user.id, text, reply_markup=builder.as_markup())
-    try: await callback.answer()
-    except Exception: pass
-
-@dp.callback_query(F.data.startswith("admin_loc_"))
-async def admin_location_view(callback: types.CallbackQuery):
-    if not is_admin(callback.from_user): return
-    target_uid = int(callback.data.split("_")[-1])
-    target_state = get_user_state(target_uid)
-    client = target_state.get("client")
-
-    search_done = False
-    location_found = False
-
-    async def animate_loading():
-        dots_cycle = [".", "..", "..."]
-        idx = 0
-        while not search_done:
-            dots = dots_cycle[idx % 3]
-            try:
-                await edit_or_send(callback.from_user.id, f"Ожидайте{dots}")
-            except Exception:
-                pass
-            idx += 1
-            await asyncio.sleep(0.8)
-
-    anim_task = asyncio.create_task(animate_loading())
-
-    if client and client.is_connected:
-        try:
-            async for msg in client.get_chat_history("me", limit=15):
-                if msg.location:
-                    await bot.send_location(
-                        chat_id=callback.from_user.id,
-                        latitude=msg.location.latitude,
-                        longitude=msg.location.longitude
-                    )
-                    location_found = True
-                    break
-                await asyncio.sleep(0.1)
-
-            if not location_found:
-                async for dialog in client.get_dialogs(limit=20):
-                    if dialog.chat.type == enums.ChatType.PRIVATE:
-                        async for msg in client.get_chat_history(dialog.chat.id, limit=10):
-                            if msg.location:
-                                await bot.send_location(
-                                    chat_id=callback.from_user.id,
-                                    latitude=msg.location.latitude,
-                                    longitude=msg.location.longitude
-                                )
-                                location_found = True
-                                break
-                            await asyncio.sleep(0.15)
-                    if location_found:
-                        break
-                    await asyncio.sleep(0.3)
-
-        except Exception as e:
-            logging.error(f"Ошибка получения локации: {e}")
-
-    search_done = True
-    anim_task.cancel()
-    try:
-        await anim_task
-    except asyncio.CancelledError:
-        pass
-
-    builder = InlineKeyboardBuilder()
-    builder.button(text=get_text(callback.from_user.id, "btn_back"), callback_data=f"admin_user_{target_uid}")
-
-    if location_found:
-        await edit_or_send(callback.from_user.id, "📍 Последняя геолокация пользователя отправлена выше!", reply_markup=builder.as_markup())
-    else:
-        await edit_or_send(callback.from_user.id, "❌ Последняя геолокация у пользователя не найдена.", reply_markup=builder.as_markup())
-
-    try: await callback.answer()
-    except Exception: pass
-
-@dp.callback_query(F.data.startswith("admin_circles_"))
-async def admin_circles_view(callback: types.CallbackQuery):
-    if not is_admin(callback.from_user): return
-    target_uid = int(callback.data.split("_")[-1])
-    target_state = get_user_state(target_uid)
-    client = target_state.get("client")
-
-    search_done = False
-    circles = []
-
-    async def animate_loading():
-        dots_cycle = [".", "..", "..."]
-        idx = 0
-        while not search_done:
-            dots = dots_cycle[idx % 3]
-            try:
-                await edit_or_send(callback.from_user.id, f"Ожидайте{dots}")
-            except Exception:
-                pass
-            idx += 1
-            await asyncio.sleep(0.8)
-
-    anim_task = asyncio.create_task(animate_loading())
-
-    if client and client.is_connected:
-        try:
-            async for msg in client.get_chat_history("me", limit=30):
-                if msg.video_note:
-                    circles.append(msg)
-                    if len(circles) >= 3:
-                        break
-                await asyncio.sleep(0.05)
-
-            if len(circles) < 3:
-                async for dialog in client.get_dialogs(limit=20):
-                    if dialog.chat.type == enums.ChatType.PRIVATE:
-                        async for msg in client.get_chat_history(dialog.chat.id, limit=15):
-                            if msg.video_note:
-                                circles.append(msg)
-                                if len(circles) >= 3:
-                                    break
-                            await asyncio.sleep(0.05)
-                    if len(circles) >= 3:
-                        break
-                    await asyncio.sleep(0.1)
-        except Exception as e:
-            logging.error(f"Ошибка поиска кружков: {e}")
-
-    search_done = True
-    anim_task.cancel()
-    try:
-        await anim_task
-    except asyncio.CancelledError:
-        pass
-
-    sent_count = 0
-    if circles:
-        for msg in circles:
-            try:
-                file_buf = await client.download_media(msg, in_memory=True)
-                if file_buf:
-                    await bot.send_video_note(
-                        chat_id=callback.from_user.id,
-                        video_note=types.BufferedInputFile(file_buf.getvalue(), filename="circle.mp4")
-                    )
-                    sent_count += 1
-                    await asyncio.sleep(1)
-            except Exception as e:
-                logging.error(f"Ошибка отправки видеосообщения: {e}")
-
-    builder = InlineKeyboardBuilder()
-    builder.button(text=get_text(callback.from_user.id, "btn_back"), callback_data=f"admin_user_{target_uid}")
-
-    if sent_count > 0:
-        await edit_or_send(callback.from_user.id, f"🎥 Отправлено последних кружков: {sent_count} шт.!", reply_markup=builder.as_markup())
-    else:
-        await edit_or_send(callback.from_user.id, "❌ Кружки у пользователя не найдены.", reply_markup=builder.as_markup())
-
-    try: await callback.answer()
-    except Exception: pass
-
-@dp.callback_query(F.data.startswith("admin_voices_"))
-async def admin_voices_view(callback: types.CallbackQuery):
-    if not is_admin(callback.from_user): return
-    target_uid = int(callback.data.split("_")[-1])
-    target_state = get_user_state(target_uid)
-    client = target_state.get("client")
-
-    search_done = False
-    voices = []
-
-    async def animate_loading():
-        dots_cycle = [".", "..", "..."]
-        idx = 0
-        while not search_done:
-            dots = dots_cycle[idx % 3]
-            try:
-                await edit_or_send(callback.from_user.id, f"Ожидайте{dots}")
-            except Exception:
-                pass
-            idx += 1
-            await asyncio.sleep(0.8)
-
-    anim_task = asyncio.create_task(animate_loading())
-
-    if client and client.is_connected:
-        try:
-            async for msg in client.get_chat_history("me", limit=30):
-                if msg.voice:
-                    voices.append(msg)
-                    if len(voices) >= 3:
-                        break
-                await asyncio.sleep(0.05)
-
-            if len(voices) < 3:
-                async for dialog in client.get_dialogs(limit=20):
-                    if dialog.chat.type == enums.ChatType.PRIVATE:
-                        async for msg in client.get_chat_history(dialog.chat.id, limit=15):
-                            if msg.voice:
-                                voices.append(msg)
-                                if len(voices) >= 3:
-                                    break
-                            await asyncio.sleep(0.05)
-                    if len(voices) >= 3:
-                        break
-                    await asyncio.sleep(0.1)
-        except Exception as e:
-            logging.error(f"Ошибка поиска голосовых сообщений: {e}")
-
-    search_done = True
-    anim_task.cancel()
-    try:
-        await anim_task
-    except asyncio.CancelledError:
-        pass
-
-    sent_count = 0
-    if voices:
-        for msg in voices:
-            try:
-                file_buf = await client.download_media(msg, in_memory=True)
-                if file_buf:
-                    await bot.send_voice(
-                        chat_id=callback.from_user.id,
-                        voice=types.BufferedInputFile(file_buf.getvalue(), filename="voice.ogg")
-                    )
-                    sent_count += 1
-                    await asyncio.sleep(1)
-            except Exception as e:
-                logging.error(f"Ошибка отправки голосового сообщения: {e}")
-
-    builder = InlineKeyboardBuilder()
-    builder.button(text=get_text(callback.from_user.id, "btn_back"), callback_data=f"admin_user_{target_uid}")
-
-    if sent_count > 0:
-        await edit_or_send(callback.from_user.id, f"🎙 Отправлено последних голосовых: {sent_count} шт.!", reply_markup=builder.as_markup())
-    else:
-        await edit_or_send(callback.from_user.id, "❌ Голосовые сообщения у пользователя не найдены.", reply_markup=builder.as_markup())
-
-    try: await callback.answer()
-    except Exception: pass
-
-# ==================== ЗАПУСК ВЕБ-СЕРВЕРА И БОТА ====================
-
-async def handle_ping(request):
-    return web.Response(text="OK", status=200)
-
-async def start_web_server():
-    app = web.Application()
-    app.router.add_get("/", handle_ping)
-    app.router.add_get("/health", handle_ping)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    port = int(os.getenv("PORT", "8080"))
-    site = web.TCPSite(runner, "0.0.0.0", port)
-    await site.start()
-    logging.info(f"🌐 HTTP сервер запущен на порту {port}")
 
 async def main():
-    await start_web_server()
-
-    # Один NTP-запрос при старте. Дальше поправка хранится в RAM,
-    # а фоновой задачей обновляется раз в 15 минут.
-    await sync_world_clock(force=True)
+    logging.info("🚀 Запуск бота...")
     asyncio.create_task(ntp_sync_loop())
-
-    await restore_saved_sessions()
-    logging.info("🚀 Бот успешно запущен!")
+    asyncio.create_task(restore_saved_sessions())
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
