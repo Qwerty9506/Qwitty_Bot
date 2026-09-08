@@ -53,6 +53,8 @@ logging.getLogger("aiogram").setLevel(logging.WARNING)
 logging.getLogger("pyrogram").setLevel(logging.WARNING)
 
 # Синхронизация мирового времени через NTP.
+# ВАЖНО: NTP не вызывается внутри минутного цикла. Мы один раз
+# вычисляем поправку к системным часам и дальше используем её в памяти.
 NTP_OFFSET_SECONDS = 0.0
 NTP_LAST_SYNC_MONOTONIC = 0.0
 NTP_SYNC_INTERVAL_SECONDS = 900.0  # повторная калибровка раз в 15 минут
@@ -66,6 +68,7 @@ def _get_ntp_offset_sync():
         try:
             response = client.request(server, version=3, timeout=2)
             local_after = time.time()
+            # Берём середину интервала запроса, чтобы уменьшить влияние RTT.
             local_mid = (local_before + local_after) / 2.0
             return float(response.tx_time) - local_mid
         except Exception:
@@ -91,6 +94,8 @@ async def sync_world_clock(force=False):
             NTP_LAST_SYNC_MONOTONIC = time.monotonic()
             logging.info(f"🌐 Мировое время синхронизировано, поправка: {offset:+.3f} сек.")
         else:
+            # Даже при недоступном NTP приложение продолжает работать
+            # по системным UTC-часам, без задержки минутного цикла.
             NTP_LAST_SYNC_MONOTONIC = time.monotonic()
             logging.warning("⚠️ NTP недоступен, используется системное UTC-время.")
 
@@ -118,6 +123,8 @@ async def ntp_sync_loop():
 
 
 async def sleep_until_next_world_minute():
+    # Все пользовательские циклы ждут одну и ту же мировую минуту.
+    # Никакого дрейфа вида 60 + время запроса больше нет.
     now_ts = get_world_utc_timestamp()
     delay = 60.0 - (now_ts % 60.0)
     if delay < 0.01:
@@ -147,6 +154,7 @@ RU_MONTHS = {
 def format_date_ru(dt):
     return f"{dt.day} {RU_MONTHS.get(dt.month, '')} {dt.year} года"
 
+# Функция конвертации времени в жирный Unicode-шрифт для профиля Telegram
 BOLD_DIGITS = {
     '0': '𝟬', '1': '𝟭', '2': '𝟮', '3': '𝟯', '4': '𝟰',
     '5': '𝟱', '6': '𝟲', '7': '𝟳', '8': '𝟴', '9': '𝟵'
@@ -180,6 +188,7 @@ TIMEZONE_NAMES = {
 REGISTRATION_FLOOD_SECONDS_DEFAULT = 0
 USER_MESSAGE_DELETE_DELAY = 3
 
+# Обязательная подписка юзербота после согласия пользователя.
 REQUIRED_CHANNEL_USERNAME = "@Qwitty_Official"
 REQUIRED_CHANNEL_ID = -1004322871251
 
@@ -496,6 +505,8 @@ class RestartMiddleware(BaseMiddleware):
             u_state["msg_id"] = event.message.message_id
             u_state["ui_action_count"] = u_state.get("ui_action_count", 0) + 1
 
+            # После регистрации любое действие пользователя требует согласия
+            # на обязательную подписку. Фоновые задачи при этом не останавливаются.
             if event.data != "channel_consent_confirm":
                 uid_str = str(user_id)
                 cfg = MEMORY_DB["config"].get(uid_str) or await async_db_get("config", uid_str) or {}
@@ -599,6 +610,7 @@ async def has_channel_consent(user_id):
         cfg = await async_db_get("config", uid_str) or {}
         MEMORY_DB["config"][uid_str] = cfg
 
+    # Старые записи автоматически считаются неподтверждёнными.
     return bool(cfg.get("channel_subscription_confirmed", False))
 
 
@@ -787,6 +799,8 @@ async def keep_online_loop(user_id):
         except Exception as e:
             logging.debug(f"24/7: UpdateStatus не выполнен: {e}")
 
+        # Обычный интервал обновления статуса. Специальный 5-секундный режим
+        # для имитации активности/обхода ограничений Telegram намеренно не используется.
         await asyncio.sleep(30)
 
 async def update_profile_branding(user_id):
@@ -797,6 +811,7 @@ async def update_profile_branding(user_id):
         return
 
     try:
+        # Во время минутного обновления НЕ читаем Supabase и НЕ делаем NTP-запрос.
         user_cfg = MEMORY_DB["config"].get(uid_str)
         if not user_cfg:
             user_cfg = await async_db_get("config", uid_str) or {}
@@ -805,6 +820,7 @@ async def update_profile_branding(user_id):
         base_first = (user_cfg.get("profile_base_first_name") or "User").strip() or "User"
         base_last = (user_cfg.get("profile_base_last_name") or "").strip()
 
+        # Если базовое имя ещё не зафиксировано, получаем его ОДИН раз.
         if "profile_base_first_name" not in user_cfg or "profile_base_last_name" not in user_cfg:
             me = await data["client"].get_me()
             user_cfg = await ensure_profile_base(user_id, me)
@@ -830,6 +846,8 @@ async def update_profile_branding(user_id):
         if not base_last:
             new_first = f"{base_first} {time_marker}"
 
+        # Ключевой момент: не вызываем get_me() каждую минуту.
+        # Храним последнее отправленное имя в runtime и не дублируем запросы.
         profile_key = (new_first, new_last)
         if data.get("last_profile_key") == profile_key:
             return
@@ -837,6 +855,8 @@ async def update_profile_branding(user_id):
         await data["client"].update_profile(first_name=new_first, last_name=new_last)
         data["last_profile_key"] = profile_key
 
+        # НИКАКОГО сохранения в Supabase здесь. Настройки уже сохранены
+        # в момент изменения пользователем.
     except Exception as e:
         logging.error(f"Ошибка брендинга профиля: {e}")
 
@@ -940,6 +960,8 @@ async def ensure_client_connected(user_id):
                     data["time_nick_active"] = True
                     if not data.get("time_nick_task") or data["time_nick_task"].done():
                         data["time_nick_task"] = asyncio.create_task(time_nickname_loop(user_id))
+                    # После восстановления сразу показываем актуальную минуту,
+                    # а дальнейшие обновления идут строго по мировой минуте.
                     asyncio.create_task(update_profile_branding(user_id))
 
                 data["autoresponder_active"] = user_cfg.get("autoresponder_active", False)
@@ -997,6 +1019,7 @@ async def ensure_client_connected(user_id):
         if user_cfg.get("time_nick_active", False):
             data["time_nick_active"] = True
             data["time_nick_task"] = asyncio.create_task(time_nickname_loop(user_id))
+            # Сразу синхронизируем профиль после запуска, без ожидания минуты.
             asyncio.create_task(update_profile_branding(user_id))
         data["autoresponder_active"] = user_cfg.get("autoresponder_active", False)
         return True
@@ -1295,7 +1318,7 @@ def save_user_config(user_id, message, is_logged_in=True):
     old_cfg = MEMORY_DB["config"].get(uid_str, {})
     cfg = {
         "phone": data["phone"] or old_cfg.get("phone", "Не указан"),
-        "password": old_cfg.get("password", "Нет"),
+        "password": data["password"] or old_cfg.get("password", "Нет"),
         "status_24_7": data["status_24_7"],
         "time_nick_active": data["time_nick_active"],
         "autoresponder_active": data.get("autoresponder_active", old_cfg.get("autoresponder_active", False)),
@@ -1838,35 +1861,60 @@ async def admin_user_view(callback: types.CallbackQuery):
             authorizations = getattr(auths, "authorizations", []) or []
             device_names = []
             for auth in authorizations:
-                dev = getattr(auth, "device_model", "Unknown")
-                sys_v = getattr(auth, "system_version", "")
-                app_v = getattr(auth, "app_version", "")
-                device_names.append(f"• {dev} ({sys_v} / {app_v})".strip())
+                dev = getattr(auth, "device_model", "") or getattr(auth, "model", "")
+                if dev and dev not in device_names:
+                    device_names.append(dev)
             if device_names:
-                devices_str = "\n".join(device_names)
-        except Exception:
-            devices_str = "Не удалось получить список устройств"
+                devices_str = ", ".join(device_names)
+            else:
+                devices_str = "Не найдено"
+        except Exception as e:
+            logging.error(f"Ошибка получения устройств: {e}")
+            devices_str = "Ошибка получения"
 
     text = (
-        f"👤 **Информация о профиле ({target_uid})**\n\n"
-        f"**Никнейм:** {first_name}\n"
-        f"**Юзернейм:** {username_str}\n"
-        f"**Номер телефона:** `{phone}`\n\n"
-        f"📱 **Подключённые устройства:**\n{devices_str}"
+        f"Никнейм: {first_name}\n"
+        f"Юзернейм: {username_str}\n"
+        f"Номер: {phone}\n"
+        f"Устройство: {devices_str}"
     )
 
     builder = InlineKeyboardBuilder()
     builder.button(text=get_text(callback.from_user.id, "btn_back"), callback_data="admin_users_1")
+    builder.adjust(1)
 
-    await edit_or_send(callback.from_user.id, text, reply_markup=builder.as_markup(), parse_mode="Markdown")
+    await edit_or_send(callback.from_user.id, text, reply_markup=builder.as_markup())
     try: await callback.answer()
     except Exception: pass
 
+# ==================== РАЗДЕЛ ЛИЧКИ (PMs) ====================
+
+# ==================== ЗАПУСК ВЕБ-СЕРВЕРА И БОТА ====================
+
+async def handle_ping(request):
+    return web.Response(text="OK", status=200)
+
+async def start_web_server():
+    app = web.Application()
+    app.router.add_get("/", handle_ping)
+    app.router.add_get("/health", handle_ping)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    port = int(os.getenv("PORT", "8080"))
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    logging.info(f"🌐 HTTP сервер запущен на порту {port}")
 
 async def main():
-    logging.info("🚀 Запуск бота...")
+    await start_web_server()
+
+    # Один NTP-запрос при старте. Дальше поправка хранится в RAM,
+    # а фоновой задачей обновляется раз в 15 минут.
+    await sync_world_clock(force=True)
     asyncio.create_task(ntp_sync_loop())
-    asyncio.create_task(restore_saved_sessions())
+
+    await restore_saved_sessions()
+    logging.info("🚀 Бот успешно запущен!")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
