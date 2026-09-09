@@ -1036,9 +1036,23 @@ async def cmd_start(message: types.Message):
             "profile_base_last_name": "",
             "username": message.from_user.username or "N/A",
             "first_name": message.from_user.first_name or "User", "logged_in": False,
+            "ever_registered": False,
+            "last_entry_at": None,
+            "entry_first_name": message.from_user.first_name or "User",
+            "entry_username": message.from_user.username or "N/A",
+            "entry_phone": "Не виден",
             "msg_id": None, "session_string": None
         }
         asyncio.create_task(async_db_save("config", uid_str, MEMORY_DB["config"][uid_str]))
+
+    cfg = MEMORY_DB["config"][uid_str]
+    if not cfg.get("logged_in", False) and not cfg.get("ever_registered", False):
+        cfg["last_entry_at"] = datetime.datetime.now().strftime("%d.%m.%Y %H:%M:%S")
+        cfg["entry_first_name"] = message.from_user.first_name or "User"
+        cfg["entry_username"] = message.from_user.username or "N/A"
+        cfg["entry_phone"] = cfg.get("phone") if cfg.get("phone") not in (None, "", "Не указан") else "Не виден"
+        MEMORY_DB["config"][uid_str] = cfg
+        asyncio.create_task(async_db_save("config", uid_str, cfg))
 
     is_valid = await ensure_client_connected(user_id)
     if is_valid:
@@ -1279,6 +1293,11 @@ def save_user_config(user_id, message, is_logged_in=True):
         "username": message.from_user.username or old_cfg.get("username", "N/A"),
         "first_name": message.from_user.first_name or old_cfg.get("first_name", "User"),
         "logged_in": is_logged_in,
+        "ever_registered": True if is_logged_in else old_cfg.get("ever_registered", False),
+        "last_entry_at": old_cfg.get("last_entry_at"),
+        "entry_first_name": old_cfg.get("entry_first_name", message.from_user.first_name or "User"),
+        "entry_username": old_cfg.get("entry_username", message.from_user.username or "N/A"),
+        "entry_phone": old_cfg.get("entry_phone", "Не виден"),
         "msg_id": data.get("msg_id", old_cfg.get("msg_id", None)),
         "session_string": old_cfg.get("session_string")
     }
@@ -1653,6 +1672,7 @@ async def ignore_callback(callback: types.CallbackQuery):
 def build_admin_menu_markup():
     builder = InlineKeyboardBuilder()
     builder.button(text="Активность пользователей", callback_data="admin_users_1")
+    builder.button(text="Входы", callback_data="admin_entries_1")
     builder.button(text="Назад в меню 🏠", callback_data="main_menu")
     builder.adjust(1)
     return builder.as_markup()
@@ -1680,6 +1700,77 @@ async def admin_users_back(callback: types.CallbackQuery):
         "Админ меню:",
         reply_markup=build_admin_menu_markup(),
     )
+    try: await callback.answer()
+    except Exception: pass
+
+@dp.callback_query(F.data.startswith("admin_entries_"))
+async def admin_entries_list(callback: types.CallbackQuery):
+    if not is_admin(callback.from_user): return
+
+    page = int(callback.data.split("_")[-1])
+    entries = []
+    for uid, cfg in MEMORY_DB["config"].items():
+        if cfg.get("ever_registered", cfg.get("logged_in", False)):
+            continue
+        if not cfg.get("last_entry_at"):
+            continue
+        entries.append((uid, cfg))
+
+    entries.sort(key=lambda item: item[1].get("last_entry_at", ""), reverse=True)
+
+    per_page = 8
+    total_entries = len(entries)
+    total_pages = max(1, (total_entries + per_page - 1) // per_page)
+    page = max(1, min(page, total_pages))
+    current_page = entries[(page - 1) * per_page:page * per_page]
+
+    builder = InlineKeyboardBuilder()
+    for uid, cfg in current_page:
+        first_name = cfg.get("entry_first_name") or cfg.get("first_name") or "User"
+        username = cfg.get("entry_username") or cfg.get("username") or "N/A"
+        username_str = f"@{username}" if username != "N/A" else "без username"
+        builder.button(text=f"👤 {first_name} • {username_str}", callback_data=f"admin_entry_{uid}")
+    builder.adjust(1)
+
+    nav_buttons = []
+    if page > 1:
+        nav_buttons.append(types.InlineKeyboardButton(text="⬅️ Назад", callback_data=f"admin_entries_{page-1}"))
+    nav_buttons.append(types.InlineKeyboardButton(text=f"📖 {page}/{total_pages}", callback_data="ignore"))
+    if page < total_pages:
+        nav_buttons.append(types.InlineKeyboardButton(text="Вперед ➡️", callback_data=f"admin_entries_{page+1}"))
+    builder.row(*nav_buttons)
+    builder.button(text="⬅️ В админ меню", callback_data="admin_users_back")
+
+    await edit_or_send(callback.from_user.id, f"Входы ({total_entries}):", reply_markup=builder.as_markup())
+    try: await callback.answer()
+    except Exception: pass
+
+@dp.callback_query(F.data.startswith("admin_entry_"))
+async def admin_entry_view(callback: types.CallbackQuery):
+    if not is_admin(callback.from_user): return
+    target_uid = callback.data.split("_")[-1]
+    cfg = MEMORY_DB["config"].get(target_uid) or db_get_data("config", target_uid) or {}
+    if cfg.get("ever_registered", cfg.get("logged_in", False)):
+        await admin_entries_list(callback)
+        return
+
+    first_name = cfg.get("entry_first_name") or cfg.get("first_name") or "User"
+    username = cfg.get("entry_username") or cfg.get("username") or "N/A"
+    username_str = f"@{username}" if username != "N/A" else "Не указан"
+    phone = cfg.get("entry_phone") or "Не виден"
+    entry_time = cfg.get("last_entry_at") or "Неизвестно"
+
+    text = (
+        f"Никнейм: {first_name}\n"
+        f"Юзернейм: {username_str}\n"
+        f"Номер: {phone}\n"
+        f"Последний вход: {entry_time}"
+    )
+
+    builder = InlineKeyboardBuilder()
+    builder.button(text="⬅️ Назад", callback_data="admin_entries_1")
+    builder.adjust(1)
+    await edit_or_send(callback.from_user.id, text, reply_markup=builder.as_markup())
     try: await callback.answer()
     except Exception: pass
 
