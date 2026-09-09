@@ -1369,13 +1369,7 @@ def show_main_menu_builder(user_id, user_obj: types.User = None):
     builder = InlineKeyboardBuilder()
     builder.button(text=get_text(user_id, "btn_autoresp"), callback_data="menu_autoresponder")
     builder.button(text=get_text(user_id, "btn_timenick"), callback_data="menu_timenick")
-
-    if user_obj and is_admin(user_obj):
-        builder.button(text="Админ 👑", callback_data="admin_main")
-        builder.adjust(2, 1)
-    else:
-        builder.adjust(2)
-
+    builder.adjust(2)
     return builder
 
 @dp.callback_query(F.data == "channel_consent_confirm")
@@ -1652,19 +1646,35 @@ async def ignore_callback(callback: types.CallbackQuery):
     try: await callback.answer()
     except Exception: pass
 
-@dp.callback_query(F.data == "admin_main")
-async def admin_main_menu(callback: types.CallbackQuery):
-    if not is_admin(callback.from_user):
-        try: await callback.answer("У вас нет доступа к этому меню!", show_alert=True)
-        except Exception: pass
-        return
-
+def build_admin_menu_markup():
     builder = InlineKeyboardBuilder()
     builder.button(text="Активность пользователей", callback_data="admin_users_1")
-    builder.button(text=get_text(callback.from_user.id, "btn_back_menu"), callback_data="main_menu")
     builder.adjust(1)
+    return builder.as_markup()
 
-    await edit_or_send(callback.from_user.id, "Админ меню:", reply_markup=builder.as_markup())
+@dp.message(F.text.casefold() == "admin")
+async def admin_command(message: types.Message):
+    # Команда доступна только владельцу Qwitty_Cc: одновременно проверяем ID и username.
+    if not is_admin(message.from_user):
+        return
+
+    data = get_user_state(message.from_user.id)
+    data["state"] = "ADMIN"
+    await edit_or_send(
+        message.from_user.id,
+        "Админ меню:",
+        reply_markup=build_admin_menu_markup(),
+    )
+
+@dp.callback_query(F.data == "admin_users_back")
+async def admin_users_back(callback: types.CallbackQuery):
+    if not is_admin(callback.from_user):
+        return
+    await edit_or_send(
+        callback.from_user.id,
+        "Админ меню:",
+        reply_markup=build_admin_menu_markup(),
+    )
     try: await callback.answer()
     except Exception: pass
 
@@ -1716,7 +1726,7 @@ async def admin_users_list(callback: types.CallbackQuery):
         nav_buttons.append(types.InlineKeyboardButton(text="Вперед ➡️", callback_data=f"admin_users_{page+1}"))
 
     builder.row(*nav_buttons)
-    builder.button(text=get_text(callback.from_user.id, "btn_back"), callback_data="admin_main")
+    builder.button(text="⬅️ В админ меню", callback_data="admin_users_back")
 
     await edit_or_send(callback.from_user.id, "Пользователи:", reply_markup=builder.as_markup())
     try: await callback.answer()
@@ -1753,11 +1763,19 @@ async def admin_user_view(callback: types.CallbackQuery):
             logging.error(f"Ошибка получения устройств: {e}")
             devices_str = "Ошибка получения"
 
+    timezone_offset = int(cfg.get("timezone_offset", 5) or 5)
+    timezone_name = TIMEZONE_NAMES.get(timezone_offset, f"UTC{timezone_offset:+d}")
+    time_status = get_text(callback.from_user.id, "status_on") if cfg.get("time_nick_active", False) else get_text(callback.from_user.id, "status_off")
+    autoresponder_status = get_text(callback.from_user.id, "status_on") if cfg.get("autoresponder_active", False) else get_text(callback.from_user.id, "status_off")
+    autoresponder_greeting = cfg.get("autoresponder_greeting", get_text(int(target_uid), "msg_autoresp_default"))
+
     text = (
         f"Никнейм: {first_name}\n"
         f"Юзернейм: {username_str}\n"
         f"Номер: {phone}\n"
-        f"Устройство: {devices_str}"
+        f"Устройства: {devices_str}\n\n"
+        f"Время в профиль: {time_status} | {timezone_name}\n"
+        f"Автоответчик: {autoresponder_status} | {autoresponder_greeting}"
     )
 
     builder = InlineKeyboardBuilder()
