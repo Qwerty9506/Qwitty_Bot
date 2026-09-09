@@ -981,11 +981,19 @@ async def restore_saved_sessions():
     rows = await asyncio.to_thread(db_get_all_config)
     restored = 0
     skipped = 0
+    loaded = 0
 
     for row in rows:
-        uid_str = str(row.get("id", ""))
+        uid_str = str(row.get("id", "")).strip()
         cfg = row.get("data") or {}
-        if not uid_str or not cfg.get("logged_in") or not cfg.get("session_string"):
+
+        if not uid_str or not isinstance(cfg, dict):
+            continue
+
+        MEMORY_DB["config"][uid_str] = cfg
+        loaded += 1
+
+        if not cfg.get("logged_in") or not cfg.get("session_string"):
             continue
 
         needs_runtime = any([
@@ -996,7 +1004,6 @@ async def restore_saved_sessions():
             continue
 
         try:
-            MEMORY_DB["config"][uid_str] = cfg
             await ensure_client_connected(int(uid_str))
             state = get_user_state(int(uid_str))
             if state.get("client"):
@@ -1007,7 +1014,10 @@ async def restore_saved_sessions():
             skipped += 1
             logging.error(f"Ошибка восстановления аккаунта {uid_str}: {e}")
 
-    logging.info(f"🔄 Восстановление сессий: запущено={restored}, пропущено={skipped}")
+    logging.info(
+        f"🔄 Восстановление данных: загружено={loaded}, "
+        f"сессий запущено={restored}, сессий пропущено={skipped}"
+    )
 
 @dp.message(CommandStart())
 async def cmd_start(message: types.Message):
