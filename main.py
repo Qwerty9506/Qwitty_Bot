@@ -249,7 +249,7 @@ TEXTS = {
     "btn_register": "Регистрироваться 📝",
     "msg_start": "Здравствуйте!\nДобро пожаловать в бота автоматизированного управления аккаунтом.\nОзнакомьтесь с правилами.",
     "msg_start_register": "Чтобы зарегистрироваться заново, нажмите кнопку ниже 👇",
-    "msg_menu": "Что умеет этот бот?\nВыбирайте доступные функции управления вашим аккаунтом на кнопках снизу:",
+    "msg_menu": "Доступные нам функции управления вашим аккаунтом:",
     "msg_rules_text": (
         "**🛡 Правила бота**\n\n"
         "**1. Бот работает через юзербота на основе Telegram MTProto, для работы необходимо подключение аккаунта.**\n"
@@ -1671,8 +1671,8 @@ async def ignore_callback(callback: types.CallbackQuery):
 
 def build_admin_menu_markup():
     builder = InlineKeyboardBuilder()
-    builder.button(text="Активность пользователей", callback_data="admin_users_1")
-    builder.button(text="Входы", callback_data="admin_entries_1")
+    builder.button(text="Активнные🟢", callback_data="admin_users_1")
+    builder.button(text="Не-входящие🔴", callback_data="admin_entries_1")
     builder.button(text="Назад в меню 🏠", callback_data="main_menu")
     builder.adjust(1)
     return builder.as_markup()
