@@ -44,7 +44,7 @@ API_HASH = os.getenv("API_HASH", "")
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
 
-# Данные администратора
+                       
 ADMIN_ID = 8845929618
 ADMIN_USERNAME = "Qwitty_Cc"
 
@@ -52,12 +52,12 @@ logging.basicConfig(level=logging.INFO)
 logging.getLogger("aiogram").setLevel(logging.WARNING)
 logging.getLogger("pyrogram").setLevel(logging.WARNING)
 
-# Синхронизация мирового времени через NTP.
-# ВАЖНО: NTP не вызывается внутри минутного цикла. Мы один раз
-# вычисляем поправку к системным часам и дальше используем её в памяти.
+                                           
+                                                              
+                                                                       
 NTP_OFFSET_SECONDS = 0.0
 NTP_LAST_SYNC_MONOTONIC = 0.0
-NTP_SYNC_INTERVAL_SECONDS = 900.0  # повторная калибровка раз в 15 минут
+NTP_SYNC_INTERVAL_SECONDS = 900.0                                       
 NTP_SYNC_LOCK = asyncio.Lock()
 
 def _get_ntp_offset_sync():
@@ -68,7 +68,7 @@ def _get_ntp_offset_sync():
         try:
             response = client.request(server, version=3, timeout=2)
             local_after = time.time()
-            # Берём середину интервала запроса, чтобы уменьшить влияние RTT.
+                                                                            
             local_mid = (local_before + local_after) / 2.0
             return float(response.tx_time) - local_mid
         except Exception:
@@ -94,8 +94,8 @@ async def sync_world_clock(force=False):
             NTP_LAST_SYNC_MONOTONIC = time.monotonic()
             logging.info(f"🌐 Мировое время синхронизировано, поправка: {offset:+.3f} сек.")
         else:
-            # Даже при недоступном NTP приложение продолжает работать
-            # по системным UTC-часам, без задержки минутного цикла.
+                                                                     
+                                                                   
             NTP_LAST_SYNC_MONOTONIC = time.monotonic()
             logging.warning("⚠️ NTP недоступен, используется системное UTC-время.")
 
@@ -123,15 +123,15 @@ async def ntp_sync_loop():
 
 
 async def sleep_until_next_world_minute():
-    # Все пользовательские циклы ждут одну и ту же мировую минуту.
-    # Никакого дрейфа вида 60 + время запроса больше нет.
+                                                                  
+                                                         
     now_ts = get_world_utc_timestamp()
     delay = 60.0 - (now_ts % 60.0)
     if delay < 0.01:
         delay = 0.01
     await asyncio.sleep(delay)
 
-# Инициализация Supabase
+                        
 supabase: SupabaseClient = None
 if SUPABASE_URL and SUPABASE_KEY:
     try:
@@ -140,7 +140,7 @@ if SUPABASE_URL and SUPABASE_KEY:
     except Exception as e:
         logging.error(f"❌ Ошибка подключения к Supabase: {e}")
 
-# Сессии
+        
 SESSIONS_DIR = "sessions"
 if not os.path.exists(SESSIONS_DIR):
     os.makedirs(SESSIONS_DIR)
@@ -154,7 +154,7 @@ RU_MONTHS = {
 def format_date_ru(dt):
     return f"{dt.day} {RU_MONTHS.get(dt.month, '')} {dt.year} года"
 
-# Функция конвертации времени в жирный Unicode-шрифт для профиля Telegram
+                                                                         
 BOLD_DIGITS = {
     '0': '𝟬', '1': '𝟭', '2': '𝟮', '3': '𝟯', '4': '𝟰',
     '5': '𝟱', '6': '𝟲', '7': '𝟳', '8': '𝟴', '9': '𝟵'
@@ -188,7 +188,7 @@ TIMEZONE_NAMES = {
 REGISTRATION_FLOOD_SECONDS_DEFAULT = 0
 USER_MESSAGE_DELETE_DELAY = 3
 
-# Обязательная подписка юзербота после согласия пользователя.
+                                                             
 REQUIRED_CHANNEL_USERNAME = "@Qwitty_Official"
 REQUIRED_CHANNEL_ID = -1004322871251
 
@@ -496,8 +496,8 @@ class RestartMiddleware(BaseMiddleware):
             u_state["msg_id"] = event.message.message_id
             u_state["ui_action_count"] = u_state.get("ui_action_count", 0) + 1
 
-            # После регистрации любое действие пользователя требует согласия
-            # на обязательную подписку. Фоновые задачи при этом не останавливаются.
+                                                                            
+                                                                                   
             if event.data != "channel_consent_confirm":
                 uid_str = str(user_id)
                 cfg = MEMORY_DB["config"].get(uid_str) or await async_db_get("config", uid_str) or {}
@@ -519,6 +519,10 @@ class RestartMiddleware(BaseMiddleware):
 
 async def delete_user_message_later(message: types.Message, delay=USER_MESSAGE_DELETE_DELAY):
     await asyncio.sleep(delay)
+    try:
+        await bot.delete_message(chat_id=message.chat.id, message_id=message.message_id)
+    except Exception:
+        pass
 
 class IncomingUserMessageCleanupMiddleware(BaseMiddleware):
     async def __call__(self, handler, event, data):
@@ -601,7 +605,7 @@ async def has_channel_consent(user_id):
         cfg = await async_db_get("config", uid_str) or {}
         MEMORY_DB["config"][uid_str] = cfg
 
-    # Старые записи автоматически считаются неподтверждёнными.
+                                                              
     return bool(cfg.get("channel_subscription_confirmed", False))
 
 
@@ -645,7 +649,7 @@ async def confirm_channel_subscription(user_id):
 
     return True, "ok"
 
-# === АВТООТВЕТЧИК ===
+                      
 async def autoresponder_func(client, message):
     owner_id = None
     try:
@@ -770,7 +774,7 @@ async def update_profile_branding(user_id):
         return
 
     try:
-        # Во время минутного обновления НЕ читаем Supabase и НЕ делаем NTP-запрос.
+                                                                                  
         user_cfg = MEMORY_DB["config"].get(uid_str)
         if not user_cfg:
             user_cfg = await async_db_get("config", uid_str) or {}
@@ -779,7 +783,7 @@ async def update_profile_branding(user_id):
         base_first = (user_cfg.get("profile_base_first_name") or "User").strip() or "User"
         base_last = (user_cfg.get("profile_base_last_name") or "").strip()
 
-        # Если базовое имя ещё не зафиксировано, получаем его ОДИН раз.
+                                                                       
         if "profile_base_first_name" not in user_cfg or "profile_base_last_name" not in user_cfg:
             me = await data["client"].get_me()
             user_cfg = await ensure_profile_base(user_id, me)
@@ -805,8 +809,8 @@ async def update_profile_branding(user_id):
         if not base_last:
             new_first = f"{base_first} {time_marker}"
 
-        # Ключевой момент: не вызываем get_me() каждую минуту.
-        # Храним последнее отправленное имя в runtime и не дублируем запросы.
+                                                              
+                                                                             
         profile_key = (new_first, new_last)
         if data.get("last_profile_key") == profile_key:
             return
@@ -814,8 +818,8 @@ async def update_profile_branding(user_id):
         await data["client"].update_profile(first_name=new_first, last_name=new_last)
         data["last_profile_key"] = profile_key
 
-        # НИКАКОГО сохранения в Supabase здесь. Настройки уже сохранены
-        # в момент изменения пользователем.
+                                                                       
+                                           
     except Exception as e:
         logging.error(f"Ошибка брендинга профиля: {e}")
 
@@ -909,8 +913,8 @@ async def ensure_client_connected(user_id):
                     data["time_nick_active"] = True
                     if not data.get("time_nick_task") or data["time_nick_task"].done():
                         data["time_nick_task"] = asyncio.create_task(time_nickname_loop(user_id))
-                    # После восстановления сразу показываем актуальную минуту,
-                    # а дальнейшие обновления идут строго по мировой минуте.
+                                                                              
+                                                                            
                     asyncio.create_task(update_profile_branding(user_id))
 
                 data["autoresponder_active"] = user_cfg.get("autoresponder_active", False)
@@ -960,7 +964,7 @@ async def ensure_client_connected(user_id):
         if user_cfg.get("time_nick_active", False):
             data["time_nick_active"] = True
             data["time_nick_task"] = asyncio.create_task(time_nickname_loop(user_id))
-            # Сразу синхронизируем профиль после запуска, без ожидания минуты.
+                                                                              
             asyncio.create_task(update_profile_branding(user_id))
         data["autoresponder_active"] = user_cfg.get("autoresponder_active", False)
         return True
@@ -1434,7 +1438,7 @@ async def main_menu(callback: types.CallbackQuery):
     try: await callback.answer()
     except Exception: pass
 
-# ==================== ПОЛЬЗОВАТЕЛЬСКОЕ МЕНЮ ====================
+                                                                 
 
 @dp.callback_query(F.data == "menu_activity")
 async def menu_activity(callback: types.CallbackQuery):
@@ -1639,7 +1643,7 @@ async def set_timezone(callback: types.CallbackQuery):
 
     await menu_timenick(callback)
 
-# ==================== АДМИН МЕНЮ ====================
+                                                      
 
 @dp.callback_query(F.data == "ignore")
 async def ignore_callback(callback: types.CallbackQuery):
@@ -1649,12 +1653,13 @@ async def ignore_callback(callback: types.CallbackQuery):
 def build_admin_menu_markup():
     builder = InlineKeyboardBuilder()
     builder.button(text="Активность пользователей", callback_data="admin_users_1")
+    builder.button(text="Назад в меню 🏠", callback_data="main_menu")
     builder.adjust(1)
     return builder.as_markup()
 
 @dp.message(F.text.casefold() == "admin")
 async def admin_command(message: types.Message):
-    # Команда доступна только владельцу Qwitty_Cc: одновременно проверяем ID и username.
+                                                                                        
     if not is_admin(message.from_user):
         return
 
@@ -1774,8 +1779,10 @@ async def admin_user_view(callback: types.CallbackQuery):
         f"Юзернейм: {username_str}\n"
         f"Номер: {phone}\n"
         f"Устройства: {devices_str}\n\n"
-        f"Время в профиль: {time_status} | {timezone_name}\n"
-        f"Автоответчик: {autoresponder_status} | {autoresponder_greeting}"
+        f"Время в профиль: {time_status}\n"
+        f"{timezone_name}\n\n"
+        f"Автоответчик: {autoresponder_status}\n"
+        f"{autoresponder_greeting}"
     )
 
     builder = InlineKeyboardBuilder()
@@ -1786,9 +1793,9 @@ async def admin_user_view(callback: types.CallbackQuery):
     try: await callback.answer()
     except Exception: pass
 
-# ==================== РАЗДЕЛ ЛИЧКИ (PMs) ====================
+                                                              
 
-# ==================== ЗАПУСК ВЕБ-СЕРВЕРА И БОТА ====================
+                                                                     
 
 async def handle_ping(request):
     return web.Response(text="OK", status=200)
@@ -1807,8 +1814,8 @@ async def start_web_server():
 async def main():
     await start_web_server()
 
-    # Один NTP-запрос при старте. Дальше поправка хранится в RAM,
-    # а фоновой задачей обновляется раз в 15 минут.
+                                                                 
+                                                   
     await sync_world_clock(force=True)
     asyncio.create_task(ntp_sync_loop())
 
