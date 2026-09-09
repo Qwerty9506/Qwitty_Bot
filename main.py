@@ -1741,7 +1741,7 @@ async def admin_entries_list(callback: types.CallbackQuery):
     builder.row(*nav_buttons)
     builder.button(text="⬅️ В админ меню", callback_data="admin_users_back")
 
-    await edit_or_send(callback.from_user.id, f"Входы ({total_entries}):", reply_markup=builder.as_markup())
+    await edit_or_send(callback.from_user.id, f"Список не-входящих ({total_entries}):", reply_markup=builder.as_markup())
     try: await callback.answer()
     except Exception: pass
 
@@ -1824,7 +1824,7 @@ async def admin_users_list(callback: types.CallbackQuery):
     builder.row(*nav_buttons)
     builder.button(text="⬅️ В админ меню", callback_data="admin_users_back")
 
-    await edit_or_send(callback.from_user.id, "Пользователи:", reply_markup=builder.as_markup())
+    await edit_or_send(callback.from_user.id, "Активные пользователи:", reply_markup=builder.as_markup())
     try: await callback.answer()
     except Exception: pass
 
