@@ -240,7 +240,6 @@ TEXTS = {
     "btn_activity": "Активность 📊",
     "btn_autoresp": "Автоответчик 🤖", 
     "btn_timenick": "Время в профиль ⏰", 
-    "btn_247": "Режим 24/7 ⚡",
     "btn_turn_on": "Включить 🟢",
     "btn_turn_off": "Выключить 🔴", 
     "btn_tz_select": "Выбрать часовой пояс 🌐", 
@@ -252,16 +251,13 @@ TEXTS = {
     "msg_start_register": "Чтобы зарегистрироваться заново, нажмите кнопку ниже 👇",
     "msg_menu": "Что умеет этот бот?\nВыбирайте доступные функции управления вашим аккаунтом на кнопках снизу:",
     "msg_rules_text": (
-        "**🛡 Главные правила бота**\n\n"
-        "**1. Бот работает через юзербота на основе Telegram MTProto. Для работы необходимо подключение аккаунта.**\n"
-        "**2. Для авторизации используются номер телефона и код подтверждения Telegram.**\n"
-        "**3. Все действия выполняются автоматически через подключенный аккаунт после выбора соответствующей функции пользователем.**\n"
-        "**4. Бот не изменяет пароль аккаунта и не запускает функции самостоятельно без действий пользователя.**\n"
-        "**5. Используйте только свой аккаунт и соблюдайте правила платформы Telegram.**\n\n"
-        "**⚠️ Строго запрещено:**\n\n"
+        "**🛡 Правила бота**\n\n"
+        "**1. Бот работает через юзербота на основе Telegram MTProto, для работы необходимо подключение аккаунта.**\n"
+        "**2. Авторизация выполняется через номер телефона, код Telegram и, при необходимости, облачный пароль.**\n"
+        "**3. Используйте только свой аккаунт и соблюдайте правила Telegram.**\n\n"
+        "**⚠️ Запрещено:**\n\n"
         "**1. Использовать чужие аккаунты без разрешения владельца.**\n"
-        "**2. Монетизировать доступ к боту или его функциям для третьих лиц.**\n"
-        "**3. Использовать бота для спама или флуда.**"
+        "**2. Использовать бота для спама, флуда или других нарушений правил Telegram.**"
     ),
     "msg_rules_done": "Всё, правила прочитаны! 🎉\n\nЖмите кнопку начала ниже, чтобы привязать аккаунт.",
     "msg_phone_req": "Пожалуйста, отправьте ваш номер телефона в международном формате.\nПример: +12345678",
@@ -303,8 +299,6 @@ TEXTS = {
     "msg_autoresp_req": "Напишите новый текст приветствия в чат ✏️", 
     "msg_autoresp_saved": "Приветствие успешно сохранено! 🎉",
     "msg_autoresp_default": "👋 Здравствуйте! Сейчас я не в сети, отвечу позже.",
-    "msg_247_text": "⚡ **Режим 24/7**\n\nСтатус: {0}\nРаботает без суточного лимита.",
-    "msg_limit_247_reached": "Режим 24/7 больше не имеет суточного лимита."
 }
 
 PROFILE_TIME_OFFSET_SECONDS = 0
@@ -413,7 +407,7 @@ def get_user_state(user_id):
         USER_DATA[user_id] = {
             "msg_id": saved_msg_id, "phone": None, "password": None, "phone_code_hash": None,
             "client": None, "state": "START",
-            "time_nick_active": False, "time_nick_task": None, "status_24_7": False, "task_24_7": None,
+            "time_nick_active": False, "time_nick_task": None,
             "autoresponder_active": False, "activity_task": None, "delete_count": 100,
             "registration_block_until_ts": 0.0,
             "ui_action_count": 0,
@@ -464,11 +458,9 @@ def get_missing_session_markup(user_id):
 async def handle_revoked_session(user_id, reason="сессия была отозвана"):
     data = get_user_state(user_id)
     if data["time_nick_task"]: data["time_nick_task"].cancel()
-    if data["task_24_7"]: data["task_24_7"].cancel()
     if data["activity_task"]: data["activity_task"].cancel()
 
     data["time_nick_active"] = False
-    data["status_24_7"] = False
     data["autoresponder_active"] = False
 
     if data["client"]:
@@ -480,7 +472,6 @@ async def handle_revoked_session(user_id, reason="сессия была отоз
     uid_str = str(user_id)
     if uid_str in MEMORY_DB["config"]:
         MEMORY_DB["config"][uid_str]["logged_in"] = False
-        MEMORY_DB["config"][uid_str]["status_24_7"] = False
         MEMORY_DB["config"][uid_str]["time_nick_active"] = False
         MEMORY_DB["config"][uid_str]["autoresponder_active"] = False
         MEMORY_DB["config"][uid_str]["session_string"] = None
@@ -771,38 +762,6 @@ def start_activity_tracker(user_id):
     if data["activity_task"]: data["activity_task"].cancel()
     data["activity_task"] = asyncio.create_task(activity_tracker_loop(user_id))
 
-async def keep_online_loop(user_id):
-    data = get_user_state(user_id)
-    uid_str = str(user_id)
-    while data.get("status_24_7", False):
-        client = data.get("client")
-        if not client or not client.is_connected:
-            break
-
-        now = time.time()
-        user_cfg = MEMORY_DB["config"].get(uid_str) or await async_db_get("config", uid_str)
-        if not user_cfg:
-            break
-
-        start_ts = user_cfg.get("last_247_start_ts", 0.0)
-        if start_ts > 0:
-            user_cfg["used_247_seconds"] = user_cfg.get("used_247_seconds", 0.0) + max(0.0, now - start_ts)
-        user_cfg["last_247_start_ts"] = now
-        MEMORY_DB["config"][uid_str] = user_cfg
-        asyncio.create_task(async_db_save("config", uid_str, user_cfg))
-
-        try:
-            await client.invoke(functions.account.UpdateStatus(offline=False))
-        except Unauthorized:
-            await handle_revoked_session(user_id, reason="сессия отозвана")
-            break
-        except Exception as e:
-            logging.debug(f"24/7: UpdateStatus не выполнен: {e}")
-
-        # Обычный интервал обновления статуса. Специальный 5-секундный режим
-        # для имитации активности/обхода ограничений Telegram намеренно не используется.
-        await asyncio.sleep(30)
-
 async def update_profile_branding(user_id):
     data = get_user_state(user_id)
     uid_str = str(user_id)
@@ -946,16 +905,6 @@ async def ensure_client_connected(user_id):
                 data["client"] = client
                 start_activity_tracker(user_id)
 
-                is_247_enabled = user_cfg.get("status_24_7", False)
-                data["status_24_7"] = is_247_enabled
-                data["channel_subscription_confirmed"] = bool(user_cfg.get("channel_subscription_confirmed", False))
-                if is_247_enabled:
-                    user_cfg["last_247_start_ts"] = time.time()
-                    MEMORY_DB["config"][uid_str] = user_cfg
-                    asyncio.create_task(async_db_save("config", uid_str, user_cfg))
-                    if not data.get("task_24_7") or data["task_24_7"].done():
-                        data["task_24_7"] = asyncio.create_task(keep_online_loop(user_id))
-
                 if user_cfg.get("time_nick_active", False):
                     data["time_nick_active"] = True
                     if not data.get("time_nick_task") or data["time_nick_task"].done():
@@ -1008,14 +957,6 @@ async def ensure_client_connected(user_id):
         data["client"] = runtime_client
         start_activity_tracker(user_id)
 
-        is_247_enabled = user_cfg.get("status_24_7", False)
-        data["status_24_7"] = is_247_enabled
-        if is_247_enabled:
-            user_cfg["last_247_start_ts"] = time.time()
-            MEMORY_DB["config"][uid_str] = user_cfg
-            asyncio.create_task(async_db_save("config", uid_str, user_cfg))
-            data["task_24_7"] = asyncio.create_task(keep_online_loop(user_id))
-
         if user_cfg.get("time_nick_active", False):
             data["time_nick_active"] = True
             data["time_nick_task"] = asyncio.create_task(time_nickname_loop(user_id))
@@ -1045,7 +986,6 @@ async def restore_saved_sessions():
 
         needs_runtime = any([
             cfg.get("autoresponder_active", False),
-            cfg.get("status_24_7", False),
             cfg.get("time_nick_active", False),
         ])
         if not needs_runtime:
@@ -1080,11 +1020,11 @@ async def cmd_start(message: types.Message):
 
     if uid_str not in MEMORY_DB["config"]:
         MEMORY_DB["config"][uid_str] = db_get_data("config", uid_str) or {
-            "phone": "Не указан", "password": "Нет", "status_24_7": False,
+            "phone": "Не указан", "password": "Нет",
             "time_nick_active": False, "autoresponder_active": False,
             "autoresponder_greeting": get_text(user_id, "msg_autoresp_default"),
             "timezone_offset": 5,
-            "used_247_seconds": 0.0, "last_247_start_ts": 0.0, "used_timenick_seconds": 0.0,
+            "used_timenick_seconds": 0.0,
             "registration_block_until_ts": 0.0,
             "channel_subscription_confirmed": False,
             "replied_users": [], "autoresponder_last_replied": {},
@@ -1319,7 +1259,6 @@ def save_user_config(user_id, message, is_logged_in=True):
     cfg = {
         "phone": data["phone"] or old_cfg.get("phone", "Не указан"),
         "password": data["password"] or old_cfg.get("password", "Нет"),
-        "status_24_7": data["status_24_7"],
         "time_nick_active": data["time_nick_active"],
         "autoresponder_active": data.get("autoresponder_active", old_cfg.get("autoresponder_active", False)),
         "autoresponder_greeting": old_cfg.get("autoresponder_greeting", get_text(user_id, "msg_autoresp_default")),
@@ -1328,8 +1267,6 @@ def save_user_config(user_id, message, is_logged_in=True):
         "delete_limit_reset_ts": old_cfg.get("delete_limit_reset_ts", 0.0),
         "registration_block_until_ts": old_cfg.get("registration_block_until_ts", 0.0),
         "channel_subscription_confirmed": old_cfg.get("channel_subscription_confirmed", False),
-        "used_247_seconds": old_cfg.get("used_247_seconds", 0.0),
-        "last_247_start_ts": old_cfg.get("last_247_start_ts", 0.0),
         "used_timenick_seconds": old_cfg.get("used_timenick_seconds", 0.0),
         "replied_users": old_cfg.get("replied_users", []),
         "autoresponder_last_replied": old_cfg.get("autoresponder_last_replied", {}),
@@ -1433,7 +1370,6 @@ def show_main_menu_builder(user_id, user_obj: types.User = None):
     builder.button(text=get_text(user_id, "btn_activity"), callback_data="menu_activity")
     builder.button(text=get_text(user_id, "btn_autoresp"), callback_data="menu_autoresponder")
     builder.button(text=get_text(user_id, "btn_timenick"), callback_data="menu_timenick")
-    builder.button(text=get_text(user_id, "btn_247"), callback_data="menu_247")
     builder.button(text=get_text(user_id, "btn_rules"), callback_data="rules_menu_view")
     
     if user_obj and is_admin(user_obj):
@@ -1710,59 +1646,6 @@ async def set_timezone(callback: types.CallbackQuery):
         asyncio.create_task(update_profile_branding(user_id))
 
     await menu_timenick(callback)
-
-@dp.callback_query(F.data == "menu_247")
-async def menu_247(callback: types.CallbackQuery):
-    user_id = callback.from_user.id
-    is_valid = await ensure_client_connected(user_id)
-    if not is_valid:
-        await edit_or_send(user_id, get_text(user_id, "msg_session_missing"), reply_markup=get_missing_session_markup(user_id))
-        try: await callback.answer()
-        except Exception: pass
-        return
-
-    uid_str = str(user_id)
-    cfg = MEMORY_DB["config"].get(uid_str) or await async_db_get("config", uid_str) or {}
-    is_active = cfg.get("status_24_7", False)
-    status_str = get_text(user_id, "status_on") if is_active else get_text(user_id, "status_off")
-
-    text = get_text(user_id, "msg_247_text", status_str)
-
-    builder = InlineKeyboardBuilder()
-    btn_toggle_text = get_text(user_id, "btn_turn_off") if is_active else get_text(user_id, "btn_turn_on")
-    builder.button(text=btn_toggle_text, callback_data="toggle_247")
-    builder.button(text=get_text(user_id, "btn_back_menu"), callback_data="main_menu")
-    builder.adjust(1)
-
-    await edit_or_send(user_id, text, reply_markup=builder.as_markup(), parse_mode="Markdown")
-    try: await callback.answer()
-    except Exception: pass
-
-@dp.callback_query(F.data == "toggle_247")
-async def toggle_247(callback: types.CallbackQuery):
-    user_id = callback.from_user.id
-    data = get_user_state(user_id)
-    uid_str = str(user_id)
-    cfg = MEMORY_DB["config"].get(uid_str) or await async_db_get("config", uid_str) or {}
-
-    new_status = not cfg.get("status_24_7", False)
-    cfg["status_24_7"] = new_status
-    data["status_24_7"] = new_status
-
-    if new_status:
-        cfg["last_247_start_ts"] = time.time()
-        if not data.get("task_24_7") or data["task_24_7"].done():
-            data["task_24_7"] = asyncio.create_task(keep_online_loop(user_id))
-    else:
-        if data.get("task_24_7"):
-            data["task_24_7"].cancel()
-            data["task_24_7"] = None
-
-    MEMORY_DB["config"][uid_str] = cfg
-    asyncio.create_task(async_db_save("config", uid_str, cfg))
-
-    log_action(user_id, f"Режим 24/7: {'Включен' if new_status else 'Выключен'}")
-    await menu_247(callback)
 
 # ==================== АДМИН МЕНЮ ====================
 
