@@ -1367,17 +1367,15 @@ async def process_password(message: types.Message):
 
 def show_main_menu_builder(user_id, user_obj: types.User = None):
     builder = InlineKeyboardBuilder()
-    builder.button(text=get_text(user_id, "btn_activity"), callback_data="menu_activity")
     builder.button(text=get_text(user_id, "btn_autoresp"), callback_data="menu_autoresponder")
     builder.button(text=get_text(user_id, "btn_timenick"), callback_data="menu_timenick")
-    builder.button(text=get_text(user_id, "btn_rules"), callback_data="rules_menu_view")
-    
+
     if user_obj and is_admin(user_obj):
         builder.button(text="Админ 👑", callback_data="admin_main")
-        builder.adjust(2, 2, 2)
+        builder.adjust(2, 1)
     else:
-        builder.adjust(2, 2, 1)
-        
+        builder.adjust(2)
+
     return builder
 
 @dp.callback_query(F.data == "channel_consent_confirm")
