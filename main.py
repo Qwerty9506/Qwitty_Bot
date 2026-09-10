@@ -1737,9 +1737,7 @@ async def admin_entries_list(callback: types.CallbackQuery):
     builder = InlineKeyboardBuilder()
     for uid, cfg in current_page:
         first_name = cfg.get("entry_first_name") or cfg.get("first_name") or "User"
-        username = cfg.get("entry_username") or cfg.get("username") or "N/A"
-        username_str = f"@{username}" if username != "N/A" else "без username"
-        builder.button(text=f"👤 {first_name} • {username_str}", callback_data=f"admin_entry_{uid}")
+        builder.button(text=f"👤 {first_name}", callback_data=f"admin_entry_{uid}")
     builder.adjust(1)
 
     nav_buttons = []
@@ -1784,20 +1782,101 @@ async def admin_entry_view(callback: types.CallbackQuery):
     try: await callback.answer()
     except Exception: pass
 
+async def admin_validate_session(user_id, cfg, semaphore=None):
+    """Быстрая проверка сессии для админского списка.
+    Не делает повторные попытки: один сломанный/отозванный аккаунт
+    не должен тормозить весь список активных пользователей.
+    """
+    if semaphore is not None:
+        async with semaphore:
+            return await _admin_validate_session(user_id, cfg)
+    return await _admin_validate_session(user_id, cfg)
+
+async def _admin_validate_session(user_id, cfg):
+    if not cfg.get("logged_in", False):
+        return False
+
+    data = get_user_state(user_id)
+    client = data.get("client")
+
+    if client and client.is_connected:
+        try:
+            await client.get_me()
+            return True
+        except Unauthorized:
+            try:
+                await handle_revoked_session(user_id, reason="сессия деактивирована пользователем")
+            except Exception as e:
+                logging.warning(f"Не удалось обработать отозванную сессию {user_id}: {e}")
+            return False
+        except Exception as e:
+            # Клиент подключён, а ошибка может быть временной.
+            # Не удаляем такого пользователя из активных только из-за transient-ошибки.
+            logging.warning(f"Временная проверка активности {user_id}: {e}")
+            return True
+
+    session_string = cfg.get("session_string")
+    if not session_string:
+        return False
+
+    try:
+        client = await _build_runtime_client(user_id, session_string)
+        data["client"] = client
+        start_activity_tracker(user_id)
+
+        if cfg.get("time_nick_active", False):
+            data["time_nick_active"] = True
+            if not data.get("time_nick_task") or data["time_nick_task"].done():
+                data["time_nick_task"] = asyncio.create_task(time_nickname_loop(user_id))
+            asyncio.create_task(update_profile_branding(user_id))
+
+        data["autoresponder_active"] = cfg.get("autoresponder_active", False)
+        return True
+    except Unauthorized:
+        try:
+            await handle_revoked_session(user_id, reason="сохранённая сессия отозвана Telegram")
+        except Exception as e:
+            logging.warning(f"Не удалось очистить отозванную сессию {user_id}: {e}")
+        return False
+    except Exception as e:
+        logging.warning(f"Недоступна сессия пользователя {user_id}: {e}")
+        return False
+
 @dp.callback_query(F.data.startswith("admin_users_"))
 async def admin_users_list(callback: types.CallbackQuery):
     if not is_admin(callback.from_user): return
 
-    page = int(callback.data.split("_")[-1])
+    try:
+        page = int(callback.data.split("_")[-1])
+    except (ValueError, TypeError):
+        page = 1
+
     all_configs = list(MEMORY_DB["config"].items())
 
+    # Проверяем аккаунты независимо друг от друга.
+    # Если один юзер заблокировал бота, удалил юзербота или его сессия отозвана,
+    # это больше не ломает построение всего списка.
+    validation_semaphore = asyncio.Semaphore(5)
+    validation_tasks = [
+        admin_validate_session(int(uid), cfg, validation_semaphore)
+        for uid, cfg in all_configs
+        if cfg.get("logged_in", False)
+    ]
+    validation_results = await asyncio.gather(*validation_tasks, return_exceptions=True)
+
     active_configs = []
+    result_index = 0
     for uid, cfg in all_configs:
-        try:
-            if cfg.get("logged_in") and await ensure_client_connected(int(uid)):
-                active_configs.append((uid, cfg))
-        except Exception:
-            pass
+        if not cfg.get("logged_in", False):
+            continue
+
+        result = validation_results[result_index]
+        result_index += 1
+
+        if result is True:
+            active_configs.append((uid, cfg))
+        elif isinstance(result, Exception):
+            logging.warning(f"Ошибка проверки активности {uid}: {result}")
 
     def get_user_score(item):
         uid, cfg = item
@@ -1819,15 +1898,15 @@ async def admin_users_list(callback: types.CallbackQuery):
     for uid, cfg in current_page_users:
         first_name = cfg.get("first_name") or cfg.get("profile_base_first_name") or "User"
         builder.button(text=f"👤 {first_name} ({uid})", callback_data=f"admin_user_{uid}")
-    
+
     builder.adjust(1)
 
     nav_buttons = []
     if page > 1:
         nav_buttons.append(types.InlineKeyboardButton(text="⬅️ Назад", callback_data=f"admin_users_{page-1}"))
-    
+
     nav_buttons.append(types.InlineKeyboardButton(text=f"📖 {page}/{total_pages}", callback_data="ignore"))
-    
+
     if page < total_pages:
         nav_buttons.append(types.InlineKeyboardButton(text="Вперед ➡️", callback_data=f"admin_users_{page+1}"))
 
