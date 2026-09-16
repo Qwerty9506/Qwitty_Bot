@@ -59,6 +59,7 @@ def user_data(user_id: int) -> dict:
             "ui_message_id": None,
             "last_profile_key": None,
             "time_task": None,
+            "connection_watch_task": None,
         }
     return USERS[user_id]
 
@@ -89,8 +90,6 @@ def profile_preview(data: dict) -> str:
 
 
 def is_ready(data: dict) -> bool:
-    # Обязательно право «Изменение имени» из раздела
-    # «Управление профилем» — без него функция не запускается.
     return bool(
         data.get("connection_id")
         and data.get("connection_enabled")
@@ -100,12 +99,10 @@ def is_ready(data: dict) -> bool:
 
 def welcome_text(user: types.User) -> str:
     name = html.escape(user.first_name or "Пользователь")
-    # Показываем актуальное время, а не фиксированный пример 16:30.
-    example_time = current_time_text(DEFAULT_TIMEZONE)
     return (
         "🛡 <b>Прежде чем начать</b>\n\n"
         f"𝗤ᴡɪᴛᴛʏ 𝗧ɪᴍᴇ создаст время в ваш профиль, например:\n"
-        f"{name} [<b>{example_time}</b>]\n\n"
+        f"<b>{name} [𝟭𝟲:𝟯𝟬]</b>\n\n"
         "Коротко о правилах:\n"
         "• бот обновляет имя пользователя раз в минуту\n"
         "• содержимое не сохраняется в базе\n"
@@ -357,6 +354,7 @@ async def command_start(message: types.Message):
         await render(user_id, time_menu_text(user_id), time_menu_markup(user_id))
     elif data.get("connection_enabled"):
         await render(user_id, requirements_text(), None)
+        ensure_connection_watch(user_id)
     else:
         await render(user_id, welcome_text(message.from_user), welcome_markup())
 
@@ -369,19 +367,79 @@ async def consent(callback: types.CallbackQuery):
 
     if data.get("connection_enabled"):
         await show_current_state(user_id)
+        ensure_connection_watch(user_id)
     else:
         await render(user_id, setup_text(), setup_markup())
 
     await callback.answer()
 
 
-@dp.business_connection()
-async def business_connection(connection: types.BusinessConnection):
+async def refresh_business_connection(user_id: int) -> bool:
+    """Fetch the latest BusinessConnection state and sync local state/UI."""
+    data = user_data(user_id)
+    connection_id = data.get("connection_id")
+    if not connection_id:
+        return False
+
+    try:
+        connection = await bot.get_business_connection(connection_id)
+    except Exception as exc:
+        logging.warning("Не удалось обновить BusinessConnection %s: %s", user_id, exc)
+        return False
+
+    if not connection:
+        return False
+
+    changed = (
+        data.get("connection_enabled") != bool(connection.is_enabled)
+        or data.get("can_change_name") != bool(
+            getattr(connection.rights, "can_change_name", False) if connection.rights else False
+        )
+    )
+
+    # Reuse the exact same state-processing path as the incoming update.
+    await apply_business_connection(connection)
+    return changed
+
+
+async def watch_business_connection(user_id: int) -> None:
+    """Keep the requirements screen responsive while Telegram updates the connection."""
+    try:
+        while True:
+            await asyncio.sleep(2.0)
+            data = user_data(user_id)
+            if not data.get("connection_id"):
+                return
+
+            # Once fully ready, no need to keep polling permissions.
+            if is_ready(data):
+                return
+
+            await refresh_business_connection(user_id)
+    except asyncio.CancelledError:
+        return
+    except Exception as exc:
+        logging.error("Ошибка watcher BusinessConnection %s: %s", user_id, exc)
+
+
+def ensure_connection_watch(user_id: int) -> None:
+    data = user_data(user_id)
+    task = data.get("connection_watch_task")
+    if task and not task.done():
+        return
+    if data.get("connection_id") and not is_ready(data):
+        data["connection_watch_task"] = asyncio.create_task(watch_business_connection(user_id))
+
+
+async def apply_business_connection(connection: types.BusinessConnection) -> None:
     user_id = connection.user.id
     data = user_data(user_id)
 
     if not connection.is_enabled:
         stop_time_loop(user_id)
+        watcher = data.get("connection_watch_task")
+        if watcher and not watcher.done() and watcher is not asyncio.current_task():
+            watcher.cancel()
         data.update({
             "connection_id": None,
             "connection_enabled": False,
@@ -407,15 +465,26 @@ async def business_connection(connection: types.BusinessConnection):
     data["base_last_name"] = strip_time_marker(connection.user.last_name)
     data["last_profile_key"] = None
 
-    # User requested both red blocks to disappear together as soon as
-    # the profile-name permission is granted. The second block is guidance only;
-    # Telegram Bot API does not expose the selected-chat list directly.
+    logging.info(
+        "BusinessConnection %s: enabled=%s can_change_name=%s",
+        user_id, connection.is_enabled, data["can_change_name"]
+    )
+
     if is_ready(data):
+        watcher = data.get("connection_watch_task")
+        if watcher and not watcher.done() and watcher is not asyncio.current_task():
+            watcher.cancel()
         await render(user_id, time_menu_text(user_id), time_menu_markup(user_id))
     elif data.get("consent_accepted"):
         await render(user_id, requirements_text(), None)
+        ensure_connection_watch(user_id)
     else:
         await render(user_id, welcome_text(connection.user), welcome_markup())
+
+
+@dp.business_connection()
+async def business_connection(connection: types.BusinessConnection):
+    await apply_business_connection(connection)
 
 
 @dp.callback_query(F.data == "toggle_time")
@@ -514,6 +583,9 @@ async def main() -> None:
     finally:
         for user_id in list(USERS):
             stop_time_loop(user_id)
+            task = user_data(user_id).get("connection_watch_task")
+            if task and not task.done():
+                task.cancel()
         await health_runner.cleanup()
         await bot.session.close()
 
