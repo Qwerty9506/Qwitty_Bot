@@ -71,7 +71,6 @@ def bold_time(value: str) -> str:
 def strip_time_marker(value: str | None) -> str:
     if not value:
         return ""
-    # Strips full [12:34] or truncated [12: markers cleanly
     return re.sub(r"\s*\[[^\]]*\]?\s*$", "", value.strip()).strip()
 
 
@@ -135,13 +134,13 @@ def setup_markup() -> types.InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.row(
         InlineKeyboardButton(
-            text="📲Открыть настройки Telegram",
+            text="📲 Открыть настройки Telegram",
             url=TELEGRAM_SETTINGS_URL,
         )
     )
     builder.row(
         InlineKeyboardButton(
-            text="📋Скопировать @Qwitty_Time_Bot",
+            text="📋 Скопировать @Qwitty_Time_Bot",
             copy_text=CopyTextButton(text=BOT_COPY_USERNAME),
         )
     )
@@ -150,20 +149,22 @@ def setup_markup() -> types.InlineKeyboardMarkup:
 
 def requirements_text() -> str:
     return (
-        "⚠️ <b>Почти готово — не хватает несколько разрешении</b>\n\n"
-        "🔴 Telegram не дал боту права <b>управление с профилем</b>. Без него бот не сможет добавлять время.\n"
-        "<b>Где включается:</b>\n"
-        "1️⃣ Настройки Telegram → <b>Автоматизация чатов</b>\n"
-        "2️⃣ Пролистайте до раздела <b>«Разрешение для бота»</b>\n"
-        "3️⃣ В группе <b>«Управление профилем»</b> включите «Изменение имени»\n\n"
-        "🔴 Вы не выбрали 𝗤ᴡɪᴛᴛʏ 𝗧ɪᴍᴇ через «Только выбранные чаты»\n"
-        "<b>Где включается:</b>\n"
-        "1️⃣ Настройки Telegram → <b>Автоматизация чатов</b>\n"
-        "2️⃣ Пролистайте до раздела <b>«Чаты, доступные боту»</b>\n"
-        "3️⃣ В группе <b>«Только выбранные чаты»</b> выберите «𝗤ᴡɪᴛᴛʏ 𝗧ɪ繆ᴇ»\n\n"
-        "Как все сделаете — бот заработает, ничего писать мне не нужно.\n"
-        "Если не сработало, нажмите /start ещё раз."
+        "⚠️ <b>Не хватает разрешения на изменение имени</b>\n\n"
+        "Telegram подключен, но бот не может обновлять время, так как вы не включили тумблер <b>«Изменение имени»</b>.\n\n"
+        "<b>Как включить:</b>\n"
+        "1️⃣ Нажмите кнопку <b>«📲 Открыть настройки»</b> ниже\n"
+        "2️⃣ Выберите бота <b>𝗤ᴡɪᴛᴛʏ 𝗧ɪᴍᴇ</b>\n"
+        "3️⃣ Включите тумблер <b>«Изменение имени»</b>\n"
+        "4️⃣ Вернитесь и нажмите <b>«🔄 Проверить разрешения»</b>"
     )
+
+
+def requirements_markup() -> types.InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(text="🔄 Проверить разрешения", callback_data="check_rights")
+    builder.button(text="📲 Открыть настройки", url=TELEGRAM_SETTINGS_URL)
+    builder.adjust(1)
+    return builder.as_markup()
 
 
 def time_menu_text(user_id: int) -> str:
@@ -287,7 +288,6 @@ async def update_profile_time(user_id: int, force: bool = False) -> None:
     first = strip_time_marker(data.get("base_first_name")) or "User"
     last = strip_time_marker(data.get("base_last_name"))
 
-    # Safely truncate name so marker is never sliced by Telegram 64 char limit
     if last:
         new_first = first[:64]
         max_last_len = max(1, 64 - len(marker) - 1)
@@ -313,7 +313,6 @@ async def time_loop(user_id: int) -> None:
                 return
 
             now = datetime.datetime.now(datetime.timezone.utc)
-            # Calculate sleep delay until top of next minute + 0.1s
             delay = 60.0 - now.second - (now.microsecond / 1_000_000.0) + 0.1
             await asyncio.sleep(max(1.0, delay))
             await update_profile_time(user_id, force=False)
@@ -344,7 +343,7 @@ async def show_current_state(user_id: int) -> None:
     if is_ready(data):
         await render(user_id, time_menu_text(user_id), time_menu_markup(user_id))
     else:
-        await render(user_id, requirements_text(), None)
+        await render(user_id, requirements_text(), requirements_markup())
 
 
 @dp.message(CommandStart())
@@ -373,7 +372,7 @@ async def command_start(message: types.Message):
     if is_ready(data):
         await render(user_id, time_menu_text(user_id), time_menu_markup(user_id))
     elif data.get("connection_enabled"):
-        await render(user_id, requirements_text(), None)
+        await render(user_id, requirements_text(), requirements_markup())
     else:
         await render(user_id, welcome_text(message.from_user), welcome_markup())
 
@@ -392,16 +391,47 @@ async def consent(callback: types.CallbackQuery):
     await callback.answer()
 
 
+@dp.callback_query(F.data == "check_rights")
+async def check_rights_handler(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
+    data = user_data(user_id)
+    conn_id = data.get("connection_id")
+
+    if not conn_id:
+        await callback.answer("Подключение не найдено. Подключите бота в настройках Telegram.", show_alert=True)
+        return
+
+    try:
+        connection = await bot.get_business_connection(business_connection_id=conn_id)
+        rights = connection.rights
+        data["connection_enabled"] = bool(connection.is_enabled)
+        data["can_change_name"] = bool(getattr(rights, "can_change_name", False) if rights else False)
+        data["base_first_name"] = strip_time_marker(connection.user.first_name) or "User"
+        data["base_last_name"] = strip_time_marker(connection.user.last_name)
+    except Exception as exc:
+        logging.warning("Ошибка при проверке прав %s: %s", user_id, exc)
+
+    if is_ready(data):
+        stop_connection_checker(user_id)
+        data["time_active"] = True
+        start_time_loop(user_id)
+        await update_profile_time(user_id, force=True)
+        await render(user_id, time_menu_text(user_id), time_menu_markup(user_id))
+        await callback.answer("Права получены! Время в профиле активировано 🟢", show_alert=True)
+    else:
+        await callback.answer("❌ Тумблер «Изменение имени» всё ещё выключен в настройках!", show_alert=True)
+
+
 async def refresh_business_connection(user_id: int) -> None:
-    """Re-fetch BusinessConnection with reduced rate until setup completes."""
+    """Re-fetch BusinessConnection with reduced delay until setup completes."""
     data = user_data(user_id)
     connection_id = data.get("connection_id")
     if not connection_id:
         return
 
     attempts = 0
-    while attempts < 30:  # Prevent infinite execution
-        await asyncio.sleep(10.0)
+    while attempts < 40:
+        await asyncio.sleep(3.0)
         attempts += 1
         data = user_data(user_id)
         connection_id = data.get("connection_id")
@@ -439,18 +469,17 @@ async def refresh_business_connection(user_id: int) -> None:
         can_change_name = bool(
             getattr(rights, "can_change_name", False) if rights else False
         )
-        old_ready = is_ready(data)
         data["connection_enabled"] = True
         data["can_change_name"] = can_change_name
         data["base_first_name"] = strip_time_marker(connection.user.first_name) or "User"
         data["base_last_name"] = strip_time_marker(connection.user.last_name)
 
-        if can_change_name and (not old_ready or data.get("ui_message_id")):
+        if can_change_name:
+            data["time_active"] = True
             data["last_profile_key"] = None
+            start_time_loop(user_id)
+            await update_profile_time(user_id, force=True)
             await render(user_id, time_menu_text(user_id), time_menu_markup(user_id))
-            if data.get("time_active"):
-                start_time_loop(user_id)
-                await update_profile_time(user_id, force=True)
             return
 
 
@@ -501,14 +530,16 @@ async def business_connection(connection: types.BusinessConnection):
     data["can_change_name"] = bool(getattr(rights, "can_change_name", False)) if rights else False
     data["base_first_name"] = strip_time_marker(connection.user.first_name) or "User"
     data["base_last_name"] = strip_time_marker(connection.user.last_name)
-    data["last_profile_key"] = None
 
     if is_ready(data):
         stop_connection_checker(user_id)
+        data["time_active"] = True
+        start_time_loop(user_id)
+        await update_profile_time(user_id, force=True)
         await render(user_id, time_menu_text(user_id), time_menu_markup(user_id))
     elif data.get("consent_accepted"):
         start_connection_checker(user_id)
-        await render(user_id, requirements_text(), None)
+        await render(user_id, requirements_text(), requirements_markup())
     else:
         start_connection_checker(user_id)
         await render(user_id, welcome_text(connection.user), welcome_markup())
