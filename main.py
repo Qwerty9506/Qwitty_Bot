@@ -121,7 +121,7 @@ def setup_text() -> str:
         "Нажми кнопку ниже, откроются настройки Telegram. Там:\n\n"
         "1️⃣ пункт <b>Автоматизация чатов</b>\n"
         "2️⃣ вставьте <code>@Qwitty_Time_Bot</code>\n"
-        "3️⃣ нажмите <b>Только выбранные чаты</b> и выберите Qwitty Time из списка\n\n"
+        "3️⃣ нажмите <b>Только выбранные чаты</b> и выберите 𝗤ᴡɪᴛᴛʏ 𝗧ɪᴍᴇ из списка\n\n"
         "Username при нажатии будет скопирован — если не вставился, жмите «Скопировать»."
     )
 
@@ -146,7 +146,7 @@ def setup_markup() -> types.InlineKeyboardMarkup:
 def requirements_text() -> str:
     return (
         "⚠️ <b>Почти готово — не хватает несколько разрешении</b>\n\n"
-        "🔴 Telegram не дал ему права <b>управление с профилем</b>. Без него бот не сможет добавлять время.\n"
+        "🔴 Telegram не дал боту права <b>управление с профилем</b>. Без него бот не сможет добавлять время.\n"
         "<b>Где включается:</b>\n"
         "1️⃣ Настройки Telegram → <b>Автоматизация чатов</b>\n"
         "2️⃣ Пролистайте до раздела <b>«Разрешение для бота»</b>\n"
@@ -502,7 +502,7 @@ async def main() -> None:
         raise RuntimeError("BOT_TOKEN не задан")
 
     me = await bot.get_me()
-    logging.info("🤖 Qwitty Time запущен: @%s", me.username or "Qwitty_Time_Bot")
+    logging.info("🤖 𝗤ᴡɪᴛᴛʏ 𝗧ɪᴍᴇ запущен: @%s", me.username or "Qwitty_Time_Bot")
 
     health_runner = await start_health_server()
     try:
