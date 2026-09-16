@@ -89,6 +89,8 @@ def profile_preview(data: dict) -> str:
 
 
 def is_ready(data: dict) -> bool:
+    # Обязательно право «Изменение имени» из раздела
+    # «Управление профилем» — без него функция не запускается.
     return bool(
         data.get("connection_id")
         and data.get("connection_enabled")
@@ -98,10 +100,12 @@ def is_ready(data: dict) -> bool:
 
 def welcome_text(user: types.User) -> str:
     name = html.escape(user.first_name or "Пользователь")
+    # Показываем актуальное время, а не фиксированный пример 16:30.
+    example_time = current_time_text(DEFAULT_TIMEZONE)
     return (
         "🛡 <b>Прежде чем начать</b>\n\n"
         f"𝗤ᴡɪᴛᴛʏ 𝗧ɪᴍᴇ создаст время в ваш профиль, например:\n"
-        f"<b>{name} [𝟭𝟲:𝟯𝟬]</b>\n\n"
+        f"{name} [<b>{example_time}</b>]\n\n"
         "Коротко о правилах:\n"
         "• бот обновляет имя пользователя раз в минуту\n"
         "• содержимое не сохраняется в базе\n"
