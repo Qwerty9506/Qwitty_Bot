@@ -1,3 +1,4 @@
+import copy
 import asyncio
 import sys
 import os
@@ -7,7 +8,6 @@ import glob
 import logging
 import re
 import json
-import random
 import math
 import psutil
 import ntplib
@@ -52,7 +52,7 @@ RENDER_FREE_HOURS = float(os.getenv("RENDER_FREE_HOURS", "750") or 750)
 SUPABASE_DB_SIZE_RPC = os.getenv("SUPABASE_DB_SIZE_RPC", "get_database_size_bytes")
 SUPABASE_DB_LIMIT_MB = float(os.getenv("SUPABASE_DB_LIMIT_MB", "500") or 500)
 
-                       
+
 ADMIN_ID = 8845929618
 ADMIN_USERNAME = "Qwitty_Cc"
 
@@ -60,12 +60,10 @@ logging.basicConfig(level=logging.INFO)
 logging.getLogger("aiogram").setLevel(logging.WARNING)
 logging.getLogger("pyrogram").setLevel(logging.WARNING)
 
-                                           
-                                                              
-                                                                       
+
 NTP_OFFSET_SECONDS = 0.0
 NTP_LAST_SYNC_MONOTONIC = 0.0
-NTP_SYNC_INTERVAL_SECONDS = 900.0                                       
+NTP_SYNC_INTERVAL_SECONDS = 900.0
 NTP_SYNC_LOCK = asyncio.Lock()
 
 def _get_ntp_offset_sync():
@@ -76,7 +74,7 @@ def _get_ntp_offset_sync():
         try:
             response = client.request(server, version=3, timeout=2)
             local_after = time.time()
-                                                                            
+
             local_mid = (local_before + local_after) / 2.0
             return float(response.tx_time) - local_mid
         except Exception:
@@ -102,8 +100,8 @@ async def sync_world_clock(force=False):
             NTP_LAST_SYNC_MONOTONIC = time.monotonic()
             logging.info(f"🌐 Мировое время синхронизировано, поправка: {offset:+.3f} сек.")
         else:
-                                                                     
-                                                                   
+
+
             NTP_LAST_SYNC_MONOTONIC = time.monotonic()
             logging.warning("⚠️ NTP недоступен, используется системное UTC-время.")
 
@@ -131,15 +129,15 @@ async def ntp_sync_loop():
 
 
 async def sleep_until_next_world_minute():
-                                                                  
-                                                         
+
+
     now_ts = get_world_utc_timestamp()
     delay = 60.0 - (now_ts % 60.0)
     if delay < 0.01:
         delay = 0.01
     await asyncio.sleep(delay)
 
-                        
+
 supabase: SupabaseClient = None
 if SUPABASE_URL and SUPABASE_KEY:
     try:
@@ -168,7 +166,7 @@ RU_MONTHS = {
 def format_date_ru(dt):
     return f"{dt.day} {RU_MONTHS.get(dt.month, '')} {dt.year} года"
 
-                                                                         
+
 BOLD_DIGITS = {
     '0': '𝟬', '1': '𝟭', '2': '𝟮', '3': '𝟯', '4': '𝟰',
     '5': '𝟱', '6': '𝟲', '7': '𝟳', '8': '𝟴', '9': '𝟵'
@@ -178,11 +176,9 @@ def format_bold_time(time_str):
     return "".join(BOLD_DIGITS.get(ch, ch) for ch in time_str)
 
 def is_admin(user: types.User):
-    if user.id != ADMIN_ID:
-        return False
-    if user.username and user.username.lower() == ADMIN_USERNAME.lower():
-        return True
-    return False
+    # Числовой ID устойчив к смене/удалению username.
+    return user is not None and user.id == ADMIN_ID
+
 
 TIMEZONE_NAMES = {
     -8: "Лос-Анджелес UTC-8",
@@ -202,7 +198,6 @@ TIMEZONE_NAMES = {
 REGISTRATION_FLOOD_SECONDS_DEFAULT = 0
 USER_MESSAGE_DELETE_DELAY = 3
 
-                                                             
 
 def format_remaining_time(seconds):
     total = max(0, int(seconds))
@@ -243,21 +238,21 @@ def is_registration_blocked(user_id):
     return get_registration_block_until(user_id) > time.time()
 
 TEXTS = {
-    "btn_start": "Начинаем 🚀", 
+    "btn_start": "Начинаем 🚀",
     "btn_rules": "Правила 📜",
-    "btn_back": "Назад ⬅️", 
-    "btn_back_menu": "Назад в меню 🏠", 
-    "btn_confirm": "Подтвердить ✅", 
+    "btn_back": "Назад ⬅️",
+    "btn_back_menu": "Назад в меню 🏠",
+    "btn_confirm": "Подтвердить ✅",
     "btn_activity": "Активность 📊",
-    "btn_autoresp": "Автоответчик 🤖", 
-    "btn_timenick": "Время в профиль ⏰", 
+    "btn_autoresp": "Автоответчик 🤖",
+    "btn_timenick": "Время в профиль ⏰",
     "btn_turn_on": "Включить 🟢",
-    "btn_turn_off": "Выключить 🔴", 
-    "btn_tz_select": "Выбрать часовой пояс 🌐", 
+    "btn_turn_off": "Выключить 🔴",
+    "btn_tz_select": "Выбрать часовой пояс 🌐",
     "btn_refresh": "Обновить 🔄",
     "btn_server_stats": "Статистика сервера 🖥",
     "btn_autoresp_setup": "Изменить текст ✏️",
-    "btn_im_sure": "Я уверен 👍", 
+    "btn_im_sure": "Я уверен 👍",
     "btn_register": "Регистрироваться 📝",
     "msg_start": "Здравствуйте!\nДобро пожаловать в бота автоматизированного управления аккаунтом.\nОзнакомьтесь с правилами.",
     "msg_start_register": "Чтобы зарегистрироваться заново, нажмите кнопку ниже 👇",
@@ -277,10 +272,10 @@ TEXTS = {
     "msg_pwd_req": "Аккаунт защищен облачным паролем.\nВведите его в чат:",
     "msg_success_login": "Бот успешно зашел в аккаунт!\nНажмите кнопку ниже для продолжения.",
     "msg_btn_go": "Поехали 🚀",
-    "status_on": "Включен 🟢", 
+    "status_on": "Включен 🟢",
     "status_off": "Выключен 🔴",
     "msg_already_logged": "Вы уже авторизованы! Переходим в меню...",
-    "msg_auth_canceled": "Авторизация отменена.", 
+    "msg_auth_canceled": "Авторизация отменена.",
     "msg_sending_req": "Отправка запроса... Подождите.",
     "msg_limit_tg": "⚠️ **Вы поймали флуд от Telegram!**\n\nСлишком часто запрашивалась регистрация/код.\nПовторите через **{0}**.",
     "msg_error_send_code": "Ошибка при отправке кода: {0}\nПопробуйте снова через /start",
@@ -294,18 +289,55 @@ TEXTS = {
     "msg_pwd_wrong": "❌ Неверный пароль!\nВведите заново:",
     "msg_pwd_ok": "Пароль принят!\nЮзербот успешно запущен.",
     "msg_activity_text": "Ваша история активности (за 5 дней):\n\n{0}",
-    "msg_timenick_text": "Вывод текущего времени в имя профиля.\n\nТекущий статус: {0}\nПрофиль: {1}\nСмещение часового пояса: UTC{2}",
-    "msg_tz_select": "Выберите ваш часовой пояс🌐", 
+    "msg_timenick_text": "Вывод текущего времени в имя профиля.\n\nТекущий статус: {0}\nПредпросмотр: {1}\nСмещение часового пояса: UTC{2}",
+    "msg_tz_select": "Выберите ваш часовой пояс🌐",
     "msg_tz_saved": "Часовой пояс изменен на UTC{0}!",
     "msg_autoresp_text": "🤖 **Автоответчик**\n\nСтатус: {1}\nТекст приветствия:\n💬 \"{0}\"",
-    "msg_autoresp_req": "Напишите новый текст приветствия в чат ✏️", 
+    "msg_autoresp_req": "Напишите новый текст приветствия в чат ✏️",
     "msg_autoresp_saved": "Приветствие успешно сохранено! 🎉",
     "msg_autoresp_default": "👋 Здравствуйте! Сейчас я не в сети, отвечу позже.",
 }
 
+# Имя Telegram — plain text: используются Unicode-цифры, не HTML-курсив.
+TIME_STYLES = (
+    ("0123456789", "[", "]", ":"),
+    ("𝟬𝟭𝟮𝟯𝟰𝟱𝟲𝟳𝟴𝟵", "[", "]", ":"),
+    ("𝟎𝟏𝟐𝟑𝟒𝟓𝟔𝟕𝟖𝟗", "『", "』", ":"),
+    ("𝟘𝟙𝟚𝟛𝟜𝟝𝟞𝟟𝟠𝟡", "⟦", "⟧", ":"),
+    ("𝟢𝟣𝟤𝟥𝟦𝟧𝟨𝟩𝟪𝟫", "⌜", "⌟", ":"),
+    ("𝟶𝟷𝟸𝟹𝟺𝟻𝟼𝟽𝟾𝟿", "〈", "〉", ":"),
+    ("０１２３４５６７８９", "", "", "："),
+    ("⁰¹²³⁴⁵⁶⁷⁸⁹", "✦ ", " ✦", ":"),
+    ("₀₁₂₃₄₅₆₇₈₉", "⌁ ", " ⌁", ":"),
+    ("⓪①②③④⑤⑥⑦⑧⑨", "", " ♡", ":"),
+)
+
+
+def format_profile_time(raw_time, style=1):
+    try:
+        index = int(style)
+        if not 0 <= index < len(TIME_STYLES):
+            index = 1
+    except (TypeError, ValueError):
+        index = 1
+    digits, left, right, colon = TIME_STYLES[index]
+    value = raw_time.translate(str.maketrans("0123456789:", digits + colon))
+    return left + value + right
+
+
+def profile_names(base_first, base_last, marker):
+    first = ((base_first or "User").strip() or "User")[:64]
+    last = (base_last or "").strip()
+    # Telegram ограничивает каждую часть имени 64 символами.
+    if last:
+        last = last[:max(0, 63 - len(marker))].rstrip() + " " + marker
+    else:
+        first = first[:max(0, 63 - len(marker))].rstrip() + " " + marker
+    return first, last
+
 PROFILE_TIME_OFFSET_SECONDS = 0
 
-def get_current_styled_profile_preview(base_first, base_last, offset, include_nick=True, include_time=True):
+def get_current_styled_profile_preview(base_first, base_last, offset, include_nick=True, include_time=True, style=1):
     clean_first = (base_first or "User").strip() or "User"
     clean_last = (base_last or "").strip()
     first = clean_first
@@ -318,12 +350,8 @@ def get_current_styled_profile_preview(base_first, base_last, offset, include_ni
             + datetime.timedelta(seconds=PROFILE_TIME_OFFSET_SECONDS)
         )
         raw_time = tz_now.strftime("%H:%M")
-        bold_time = format_bold_time(raw_time)
-        time_marker = f"[{bold_time}]"
-        if last:
-            last = f"{last} {time_marker}"
-        else:
-            first = f"{first} {time_marker}"
+        first, last = profile_names(clean_first, clean_last, format_profile_time(raw_time, style))
+
     return f"{first}\n{last}" if last else first
 
 async def ensure_profile_base(user_id, me=None):
@@ -336,7 +364,7 @@ async def ensure_profile_base(user_id, me=None):
         if not cfg.get("profile_base_first_name"):
             clean_first = re.sub(r"\s*\[[^\]]+\]", "", me.first_name or "User").strip()
             cfg["profile_base_first_name"] = clean_first or "User"
-        if not cfg.get("profile_base_last_name"):
+        if "profile_base_last_name" not in cfg:
             clean_last = re.sub(r"\s*\[[^\]]+\]", "", me.last_name or "").strip()
             cfg["profile_base_last_name"] = clean_last
         MEMORY_DB["config"][uid_str] = cfg
@@ -378,8 +406,14 @@ def db_save_data(table: str, user_id: str, data: dict):
 async def async_db_get(table: str, user_id: str):
     return await asyncio.to_thread(db_get_data, table, str(user_id))
 
+DB_WRITE_LOCKS = {}
+
 async def async_db_save(table: str, user_id: str, data: dict):
-    await asyncio.to_thread(db_save_data, table, str(user_id), data)
+    key = (table, str(user_id))
+    snapshot = copy.deepcopy(data)
+    lock = DB_WRITE_LOCKS.setdefault(key, asyncio.Lock())
+    async with lock:
+        await asyncio.to_thread(db_save_data, table, str(user_id), snapshot)
 
 
 def persist_user_config_now(user_id: int, cfg: dict):
@@ -494,8 +528,11 @@ def get_missing_session_markup(user_id):
 
 async def handle_revoked_session(user_id, reason="сессия была отозвана"):
     data = get_user_state(user_id)
-    if data["time_nick_task"]: data["time_nick_task"].cancel()
-    if data["activity_task"]: data["activity_task"].cancel()
+    for task_key in ("time_nick_task", "activity_task", "online_task"):
+        task = data.get(task_key)
+        if task and task is not asyncio.current_task():
+            task.cancel()
+        data[task_key] = None
 
     data["time_nick_active"] = False
     data["autoresponder_active"] = False
@@ -508,6 +545,7 @@ async def handle_revoked_session(user_id, reason="сессия была отоз
 
     uid_str = str(user_id)
     if uid_str in MEMORY_DB["config"]:
+        MEMORY_DB["config"][uid_str]["online_247"] = False
         MEMORY_DB["config"][uid_str]["logged_in"] = False
         MEMORY_DB["config"][uid_str]["time_nick_active"] = False
         MEMORY_DB["config"][uid_str]["autoresponder_active"] = False
@@ -557,49 +595,11 @@ class IncomingUserMessageCleanupMiddleware(BaseMiddleware):
 dp.callback_query.middleware(RestartMiddleware())
 dp.message.middleware(IncomingUserMessageCleanupMiddleware())
 
-async def _refresh_ui_message_loop(user_id):
-    """Переиспользует то же сообщение и раз в 3 минуты редактирует его inline."""
-    data = get_user_state(user_id)
-    keepalive_flip = False
-    while True:
-        try:
-            await asyncio.sleep(180)
-            if data.get("admin_stats_active", False):
-                continue
-            msg_id = data.get("msg_id")
-            text = data.get("last_ui_text")
-            reply_markup = data.get("last_ui_reply_markup")
-            parse_mode = data.get("last_ui_parse_mode")
-            if not msg_id or text is None:
-                continue
-            keepalive_flip = not keepalive_flip
-            # Невидимый zero-width символ заставляет Telegram принять edit,
-            # даже когда видимый текст/кнопки не изменились.
-            keepalive_text = text + ("\u200b" if keepalive_flip else "\u200b\u200b")
-            try:
-                await bot.edit_message_text(
-                    chat_id=user_id,
-                    message_id=msg_id,
-                    text=keepalive_text,
-                    reply_markup=reply_markup,
-                    parse_mode=parse_mode,
-                )
-            except TelegramBadRequest as e:
-                if "message is not modified" not in str(e).lower():
-                    logging.debug(f"UI refresh не изменил сообщение {user_id}: {e}")
-            except Exception as e:
-                logging.debug(f"Ошибка периодического UI refresh {user_id}: {e}")
-        except asyncio.CancelledError:
-            raise
-        except Exception as e:
-            logging.warning(f"Ошибка UI refresh loop {user_id}: {e}")
-
-
 def start_ui_refresh_task(user_id):
-    data = get_user_state(user_id)
-    task = data.get("ui_refresh_task")
-    if not task or task.done():
-        data["ui_refresh_task"] = asyncio.create_task(_refresh_ui_message_loop(user_id))
+    # Сообщения меняются только по действию пользователя.
+    task = get_user_state(user_id).get("ui_refresh_task")
+    if task and not task.done():
+        task.cancel()
 
 
 async def edit_or_send(user_id, text, reply_markup=None, parse_mode=None):
@@ -609,20 +609,8 @@ async def edit_or_send(user_id, text, reply_markup=None, parse_mode=None):
     data["last_ui_parse_mode"] = parse_mode
     start_ui_refresh_task(user_id)
 
-    # Каждые 5 UI-обновлений/нажатий намеренно ротируем сообщение.
-    # Это сохраняет старую защиту от устаревшего Telegram message_id,
-    # но между ротациями всё редактируется inline без создания дублей.
-    force_new_message = (
-        data.get("ui_action_count", 0) > 0
-        and data["ui_action_count"] % 5 == 0
-    )
+    force_new_message = False
 
-    if force_new_message and data.get("msg_id"):
-        try:
-            await bot.delete_message(chat_id=user_id, message_id=data["msg_id"])
-        except Exception:
-            pass
-        data["msg_id"] = None
 
     if data.get("msg_id"):
         try:
@@ -736,59 +724,125 @@ async def autoresponder_func(client, message):
     except Exception as e:
         logging.error(f"Ошибка автоответчика: {e}")
 
+ACTIVITY_DAYS = 30
+
 async def get_other_sessions_online(client):
+    """Оценка по date_active других авторизаций, не точное экранное время."""
     auths = await client.invoke(functions.account.GetAuthorizations())
-    authorizations = getattr(auths, "authorizations", []) or []
-    now = int(time.time())
-    return any(
-        not getattr(auth, "current", False)
-        and int(getattr(auth, "date_active", 0) or 0)
-        and now - int(getattr(auth, "date_active", 0) or 0) <= 90
-        for auth in authorizations
-    )
+    now = time.time()
+    for auth in getattr(auths, "authorizations", []) or []:
+        if getattr(auth, "current", False):
+            continue
+        active = getattr(auth, "date_active", 0) or 0
+        if isinstance(active, datetime.datetime):
+            active = active.timestamp()
+        try:
+            if 0 <= now - float(active) <= 90:
+                return True
+        except (TypeError, ValueError):
+            continue
+    return False
+
+
+def add_activity_interval(activity, start_ts, end_ts, offset):
+    tz = datetime.timezone(datetime.timedelta(hours=offset))
+    while start_ts < end_ts:
+        local = datetime.datetime.fromtimestamp(start_ts, tz)
+        midnight = datetime.datetime.combine(local.date() + datetime.timedelta(days=1),
+                                             datetime.time.min, tzinfo=tz).timestamp()
+        stop = min(end_ts, midnight)
+        key = local.strftime("%d.%m.%Y")
+        activity[key] = float(activity.get(key, 0)) + stop - start_ts
+        start_ts = stop
+
 
 async def activity_tracker_loop(user_id):
     data = get_user_state(user_id)
+    uid = str(user_id)
+    if uid not in MEMORY_DB["activity"]:
+        MEMORY_DB["activity"][uid] = await async_db_get("activity", uid) or {}
+    previous_ts = time.time()
+    previous_mono = time.monotonic()
     while True:
         await asyncio.sleep(60)
+        now_ts, now_mono = time.time(), time.monotonic()
+        elapsed = min(60.0, max(0.0, now_mono - previous_mono))
+        start_ts = max(previous_ts, now_ts - elapsed)
+        previous_ts, previous_mono = now_ts, now_mono
         client = data.get("client")
-        if not client or not client.is_connected:
-            break
-
+        if not client:
+            return
+        if not client.is_connected:
+            continue
         try:
-            other_session_online = await get_other_sessions_online(client)
+            active = await get_other_sessions_online(client)
+            data.pop("activity_error", None)
+        except FloodWait as e:
+            data["activity_error"] = "Telegram временно ограничил проверку активности."
+            await asyncio.sleep(max(1, e.value))
+            previous_ts, previous_mono = time.time(), time.monotonic()
+            continue
         except Unauthorized:
-            await handle_revoked_session(user_id, reason="сессия деактивирована пользователем")
-            break
+            await handle_revoked_session(user_id, "сессия деактивирована пользователем")
+            return
         except Exception as e:
-            logging.warning(f"Не удалось проверить активность других сессий: {e}")
+            data["activity_error"] = "Последняя проверка активности не удалась."
+            logging.warning("Проверка активности %s: %s", user_id, e)
             continue
-
-        if not other_session_online:
+        if not active:
             continue
-
-        uid_str = str(user_id)
-        if uid_str not in MEMORY_DB["activity"]:
-            MEMORY_DB["activity"][uid_str] = await async_db_get("activity", uid_str) or {}
-
-        today = datetime.datetime.now().strftime("%d.%m.%Y")
-        MEMORY_DB["activity"][uid_str][today] = MEMORY_DB["activity"][uid_str].get(today, 0) + 60
-
-        today_date = datetime.datetime.now().date()
-        for date_str in list(MEMORY_DB["activity"][uid_str].keys()):
+        offset = int(MEMORY_DB["config"].get(uid, {}).get("timezone_offset", 5))
+        activity = MEMORY_DB["activity"][uid]
+        add_activity_interval(activity, start_ts, now_ts, offset)
+        today = (datetime.datetime.fromtimestamp(now_ts, datetime.timezone.utc)
+                 + datetime.timedelta(hours=offset)).date()
+        for key in list(activity):
             try:
-                d = datetime.datetime.strptime(date_str, "%d.%m.%Y").date()
-                if (today_date - d).days > 4:
-                    del MEMORY_DB["activity"][uid_str][date_str]
+                if (today - datetime.datetime.strptime(key, "%d.%m.%Y").date()).days >= ACTIVITY_DAYS:
+                    del activity[key]
             except ValueError:
-                pass
+                del activity[key]
+        await async_db_save("activity", uid, activity)
 
-        asyncio.create_task(async_db_save("activity", uid_str, MEMORY_DB["activity"][uid_str]))
+
+async def online_mode_loop(user_id):
+    data = get_user_state(user_id)
+    while MEMORY_DB["config"].get(str(user_id), {}).get("online_247", False):
+        client = data.get("client")
+        if not client:
+            return
+        try:
+            if client.is_connected:
+                await client.invoke(functions.account.UpdateStatus(offline=False))
+                data.pop("online_error", None)
+        except FloodWait as e:
+            data["online_error"] = f"Пауза Telegram: {e.value} сек."
+            await asyncio.sleep(max(1, e.value))
+            continue
+        except Unauthorized:
+            await handle_revoked_session(user_id, "сессия отозвана")
+            return
+        except Exception as e:
+            data["online_error"] = "Не удалось обновить онлайн; повторяем автоматически."
+            logging.warning("Режим 24/7 %s: %s", user_id, e)
+        await asyncio.sleep(45)
+
+
+def start_online_mode(user_id):
+    data = get_user_state(user_id)
+    task = data.get("online_task")
+    if MEMORY_DB["config"].get(str(user_id), {}).get("online_247", False):
+        if not task or task.done():
+            data["online_task"] = asyncio.create_task(online_mode_loop(user_id))
+
 
 def start_activity_tracker(user_id):
     data = get_user_state(user_id)
-    if data["activity_task"]: data["activity_task"].cancel()
-    data["activity_task"] = asyncio.create_task(activity_tracker_loop(user_id))
+    task = data.get("activity_task")
+    if not task or task.done():
+        data["activity_task"] = asyncio.create_task(activity_tracker_loop(user_id))
+    start_online_mode(user_id)
+
 
 async def update_profile_branding(user_id):
     data = get_user_state(user_id)
@@ -798,7 +852,7 @@ async def update_profile_branding(user_id):
         return
 
     try:
-                                                                                  
+
         user_cfg = MEMORY_DB["config"].get(uid_str)
         if not user_cfg:
             user_cfg = await async_db_get("config", uid_str) or {}
@@ -807,7 +861,7 @@ async def update_profile_branding(user_id):
         base_first = (user_cfg.get("profile_base_first_name") or "User").strip() or "User"
         base_last = (user_cfg.get("profile_base_last_name") or "").strip()
 
-                                                                       
+
         if "profile_base_first_name" not in user_cfg or "profile_base_last_name" not in user_cfg:
             me = await data["client"].get_me()
             user_cfg = await ensure_profile_base(user_id, me)
@@ -825,16 +879,12 @@ async def update_profile_branding(user_id):
             + datetime.timedelta(seconds=PROFILE_TIME_OFFSET_SECONDS)
         )
         time_value = tz_now.strftime('%H:%M')
-        bold_time = format_bold_time(time_value)
-        time_marker = f"[{bold_time}]"
+        time_marker = format_profile_time(time_value, user_cfg.get("time_style", 1))
+        new_first, new_last = profile_names(base_first, base_last, time_marker)
+        if time.monotonic() < data.get("profile_retry_after", 0):
+            return
 
-        new_first = base_first
-        new_last = f"{base_last} {time_marker}" if base_last else base_last
-        if not base_last:
-            new_first = f"{base_first} {time_marker}"
 
-                                                              
-                                                                             
         profile_key = (new_first, new_last)
         if data.get("last_profile_key") == profile_key:
             return
@@ -842,8 +892,12 @@ async def update_profile_branding(user_id):
         await data["client"].update_profile(first_name=new_first, last_name=new_last)
         data["last_profile_key"] = profile_key
 
-                                                                       
-                                           
+
+    except FloodWait as e:
+        data["profile_retry_after"] = time.monotonic() + e.value
+        logging.warning("Обновление имени %s: FloodWait %s", user_id, e.value)
+    except Unauthorized:
+        await handle_revoked_session(user_id, "сессия отозвана")
     except Exception as e:
         logging.error(f"Ошибка брендинга профиля: {e}")
 
@@ -916,6 +970,7 @@ async def ensure_client_connected(user_id):
             if not client.is_connected:
                 await client.start()
             await client.get_me()
+            start_activity_tracker(user_id)
             return True
         except Unauthorized:
             await handle_revoked_session(user_id, reason="Telegram отклонил сохранённую сессию")
@@ -937,8 +992,8 @@ async def ensure_client_connected(user_id):
                     data["time_nick_active"] = True
                     if not data.get("time_nick_task") or data["time_nick_task"].done():
                         data["time_nick_task"] = asyncio.create_task(time_nickname_loop(user_id))
-                                                                              
-                                                                            
+
+
                     asyncio.create_task(update_profile_branding(user_id))
 
                 data["autoresponder_active"] = user_cfg.get("autoresponder_active", False)
@@ -988,7 +1043,7 @@ async def ensure_client_connected(user_id):
         if user_cfg.get("time_nick_active", False):
             data["time_nick_active"] = True
             data["time_nick_task"] = asyncio.create_task(time_nickname_loop(user_id))
-                                                                              
+
             asyncio.create_task(update_profile_branding(user_id))
         data["autoresponder_active"] = user_cfg.get("autoresponder_active", False)
         return True
@@ -1307,6 +1362,7 @@ def save_user_config(user_id, message, is_logged_in=True):
     uid_str = str(user_id)
     old_cfg = MEMORY_DB["config"].get(uid_str, {})
     cfg = {
+        **old_cfg,
         "phone": data["phone"] or old_cfg.get("phone", "Не указан"),
         # Пароль 2FA не сохраняем в Supabase: после авторизации для работы
         # используется session_string, а сам пароль больше не нужен.
@@ -1427,7 +1483,11 @@ def show_main_menu_builder(user_id, user_obj: types.User = None):
     builder = InlineKeyboardBuilder()
     builder.button(text=get_text(user_id, "btn_autoresp"), callback_data="menu_autoresponder")
     builder.button(text=get_text(user_id, "btn_timenick"), callback_data="menu_timenick")
-    builder.adjust(2)
+    builder.button(text="Статистика 📊", callback_data="menu_activity")
+    builder.button(text="Режим 24/7 🟢", callback_data="menu_247")
+    if user_id == ADMIN_ID:
+        builder.button(text="Админ меню 🛠", callback_data="admin_menu")
+    builder.adjust(2, 2, 1)
     return builder
 
 @dp.callback_query(F.data == "main_menu")
@@ -1447,7 +1507,57 @@ async def main_menu(callback: types.CallbackQuery):
     try: await callback.answer()
     except Exception: pass
 
-                                                                 
+
+def ru_plural(value, one, few, many):
+    if 11 <= value % 100 <= 14:
+        return many
+    return one if value % 10 == 1 else few if 2 <= value % 10 <= 4 else many
+
+
+@dp.callback_query(F.data == "menu_247")
+async def menu_247(callback: types.CallbackQuery):
+    uid = callback.from_user.id
+    if not await ensure_client_connected(uid):
+        await callback.answer("Сначала подключите аккаунт.", show_alert=True)
+        return
+    cfg = MEMORY_DB["config"].get(str(uid), {})
+    active = cfg.get("online_247", False)
+    text = "Режим 24/7 — делает постоянный онлайн.\n\nСтатус: " + ("🟢Включен" if active else "🔴Выключен")
+    text += "\nРаботает, пока запущен сервер и подключён аккаунт."
+    if get_user_state(uid).get("online_error") and active:
+        text += "\n⚠️ " + get_user_state(uid)["online_error"]
+    builder = InlineKeyboardBuilder()
+    builder.button(text="🔴Выключить" if active else "🟢Включить", callback_data="toggle_247")
+    builder.button(text="Назад в меню 🏠", callback_data="main_menu")
+    builder.adjust(1)
+    await edit_or_send(uid, text, reply_markup=builder.as_markup())
+    try: await callback.answer()
+    except TelegramBadRequest: pass
+
+
+@dp.callback_query(F.data == "toggle_247")
+async def toggle_247(callback: types.CallbackQuery):
+    uid = callback.from_user.id
+    if not await ensure_client_connected(uid):
+        await callback.answer("Сначала подключите аккаунт.", show_alert=True)
+        return
+    data = get_user_state(uid)
+    cfg = MEMORY_DB["config"][str(uid)]
+    cfg["online_247"] = not cfg.get("online_247", False)
+    persist_user_config_now(uid, cfg)
+    if cfg["online_247"]:
+        start_online_mode(uid)
+    else:
+        task = data.get("online_task")
+        if task:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        data["online_task"] = None
+        # Прекращаем продление статуса. Не посылаем глобальный offline,
+        # чтобы не сбивать присутствие пользователя на другом устройстве.
+        data.pop("online_error", None)
+    await menu_247(callback)
+
 
 @dp.callback_query(F.data == "menu_activity")
 async def menu_activity(callback: types.CallbackQuery):
@@ -1461,17 +1571,22 @@ async def menu_activity(callback: types.CallbackQuery):
 
     uid_str = str(user_id)
     activity_data = MEMORY_DB["activity"].get(uid_str) or await async_db_get("activity", uid_str) or {}
-    
+
     lines = []
-    today_date = datetime.datetime.now().date()
-    for i in range(4, -1, -1):
+    offset = int(MEMORY_DB["config"].get(uid_str, {}).get("timezone_offset", 5))
+    today_date = (get_world_utc_datetime() + datetime.timedelta(hours=offset)).date()
+    for i in range(ACTIVITY_DAYS):
         d = today_date - datetime.timedelta(days=i)
         date_str = d.strftime("%d.%m.%Y")
         seconds = activity_data.get(date_str, 0)
-        formatted_time = format_remaining_time(seconds) if seconds > 0 else "0 сек."
-        lines.append(f"📅 {date_str}: {formatted_time}")
+        hours, minutes = divmod(max(0, int(seconds)) // 60, 60)
+        formatted_time = f"{hours} {ru_plural(hours, 'час', 'часа', 'часов')} {minutes} {ru_plural(minutes, 'минута', 'минуты', 'минут')}"
+        lines.append(f"{date_str} — {formatted_time}")
 
-    text = get_text(user_id, "msg_activity_text", "\n".join(lines))
+    text = "Статистика активности:\n\n" + "\n".join(lines)
+    text += "\n\nПримерная активность других сессий за 30 дней. Юзербот исключён.\nИстория до начала наблюдения недоступна."
+    if get_user_state(user_id).get("activity_error"):
+        text += "\n⚠️ " + get_user_state(user_id)["activity_error"]
     builder = InlineKeyboardBuilder()
     builder.button(text=get_text(user_id, "btn_back_menu"), callback_data="main_menu")
     await edit_or_send(user_id, text, reply_markup=builder.as_markup())
@@ -1501,7 +1616,7 @@ async def menu_autoresponder(callback: types.CallbackQuery):
     builder.button(text=btn_toggle_text, callback_data="toggle_autoresponder")
     builder.button(text=get_text(user_id, "btn_autoresp_setup"), callback_data="autoresp_setup")
     builder.button(text=get_text(user_id, "btn_back_menu"), callback_data="main_menu")
-    builder.adjust(2, 1)
+    builder.adjust(2, 1, 1)
 
     await edit_or_send(user_id, text, reply_markup=builder.as_markup(), parse_mode="Markdown")
     try: await callback.answer()
@@ -1513,7 +1628,7 @@ async def toggle_autoresponder(callback: types.CallbackQuery):
     data = get_user_state(user_id)
     uid_str = str(user_id)
     cfg = MEMORY_DB["config"].get(uid_str) or await async_db_get("config", uid_str) or {}
-    
+
     new_status = not cfg.get("autoresponder_active", False)
     cfg["autoresponder_active"] = new_status
     data["autoresponder_active"] = new_status
@@ -1571,7 +1686,7 @@ async def menu_timenick(callback: types.CallbackQuery):
     base_first = cfg.get("profile_base_first_name", "User")
     base_last = cfg.get("profile_base_last_name", "")
 
-    profile_preview = get_current_styled_profile_preview(base_first, base_last, offset, include_time=is_active)
+    profile_preview = get_current_styled_profile_preview(base_first, base_last, offset, include_time=True, style=cfg.get("time_style", 1))
     sign_str = f"+{offset}" if offset >= 0 else str(offset)
 
     text = get_text(user_id, "msg_timenick_text", status_str, profile_preview, sign_str)
@@ -1580,12 +1695,49 @@ async def menu_timenick(callback: types.CallbackQuery):
     btn_toggle_text = get_text(user_id, "btn_turn_off") if is_active else get_text(user_id, "btn_turn_on")
     builder.button(text=btn_toggle_text, callback_data="toggle_timenick")
     builder.button(text=get_text(user_id, "btn_tz_select"), callback_data="tz_select")
+    builder.button(text="Стили 🎨", callback_data="time_styles")
     builder.button(text=get_text(user_id, "btn_back_menu"), callback_data="main_menu")
-    builder.adjust(2, 1)
+    builder.adjust(2, 1, 1)
 
     await edit_or_send(user_id, text, reply_markup=builder.as_markup())
     try: await callback.answer()
     except Exception: pass
+
+@dp.callback_query(F.data == "time_styles")
+async def time_styles(callback: types.CallbackQuery):
+    uid = callback.from_user.id
+    cfg = MEMORY_DB["config"].get(str(uid), {})
+    now = get_world_utc_datetime() + datetime.timedelta(hours=int(cfg.get("timezone_offset", 5)))
+    builder = InlineKeyboardBuilder()
+    for index in range(len(TIME_STYLES)):
+        builder.button(text=format_profile_time(now.strftime("%H:%M"), index), callback_data=f"time_style_{index}")
+    builder.button(text="Назад ⬅️", callback_data="menu_timenick")
+    builder.adjust(2, 2, 2, 2, 2, 1)
+    await edit_or_send(uid, "Выберите стиль:", reply_markup=builder.as_markup())
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("time_style_"))
+async def select_time_style(callback: types.CallbackQuery):
+    uid = callback.from_user.id
+    try:
+        style = int(callback.data.rsplit("_", 1)[1])
+        if not 0 <= style < len(TIME_STYLES):
+            raise ValueError
+    except (ValueError, IndexError):
+        await callback.answer("Неизвестный стиль.")
+        return
+    if not await ensure_client_connected(uid):
+        await callback.answer("Сначала подключите аккаунт.", show_alert=True)
+        return
+    cfg = MEMORY_DB["config"][str(uid)]
+    cfg["time_style"] = style
+    persist_user_config_now(uid, cfg)
+    await callback.answer()
+    if cfg.get("time_nick_active"):
+        await update_profile_branding(uid)
+    await menu_timenick(callback)
+
 
 @dp.callback_query(F.data == "toggle_timenick")
 async def toggle_timenick(callback: types.CallbackQuery):
@@ -1594,6 +1746,9 @@ async def toggle_timenick(callback: types.CallbackQuery):
     uid_str = str(user_id)
     cfg = MEMORY_DB["config"].get(uid_str) or await async_db_get("config", uid_str) or {}
 
+    if not await ensure_client_connected(user_id):
+        await callback.answer("Сначала подключите аккаунт.", show_alert=True)
+        return
     new_status = not cfg.get("time_nick_active", False)
     cfg["time_nick_active"] = new_status
     data["time_nick_active"] = new_status
@@ -1612,6 +1767,7 @@ async def toggle_timenick(callback: types.CallbackQuery):
                 base_first = cfg.get("profile_base_first_name", "User")
                 base_last = cfg.get("profile_base_last_name", "")
                 await data["client"].update_profile(first_name=base_first, last_name=base_last)
+                data.pop("last_profile_key", None)
             except Exception as e:
                 logging.error(f"Ошибка сброса имени профиля: {e}")
 
@@ -1634,7 +1790,13 @@ async def tz_select(callback: types.CallbackQuery):
 @dp.callback_query(F.data.startswith("set_tz_"))
 async def set_timezone(callback: types.CallbackQuery):
     user_id = callback.from_user.id
-    tz_val = int(callback.data.split("_")[-1])
+    try:
+        tz_val = int(callback.data.split("_")[-1])
+        if tz_val not in TIMEZONE_NAMES:
+            raise ValueError
+    except ValueError:
+        await callback.answer("Неизвестный часовой пояс.")
+        return
     uid_str = str(user_id)
     cfg = MEMORY_DB["config"].get(uid_str) or await async_db_get("config", uid_str) or {}
     cfg["timezone_offset"] = tz_val
@@ -1648,7 +1810,6 @@ async def set_timezone(callback: types.CallbackQuery):
 
     await menu_timenick(callback)
 
-                                                      
 
 @dp.callback_query(F.data == "ignore")
 async def ignore_callback(callback: types.CallbackQuery):
@@ -1678,7 +1839,6 @@ SERVER_STATS_LOCK = asyncio.Lock()
 SERVER_STATS_REFRESH_SECONDS = 30
 SERVER_STATS_USAGE_REFRESH_SECONDS = 300
 SERVER_STATS_DB_REFRESH_SECONDS = 300
-SERVER_STATS_UI_REFRESH_SECONDS = 3
 
 
 def _next_render_reset_utc(now=None):
@@ -1698,43 +1858,41 @@ def _format_render_duration(hours):
     return format_remaining_time(max(0, int(hours * 3600)))
 
 
-def _series_last_value(payload):
-    series = payload.get("data") if isinstance(payload, dict) else None
-    if not isinstance(series, list):
-        return None, None
-    last_value = None
-    unit = None
-    last_ts = None
-    for item in series:
-        if not isinstance(item, dict):
-            continue
-        unit = item.get("unit") or unit
-        for point in item.get("values") or []:
-            if isinstance(point, dict) and point.get("value") is not None:
-                last_value = point.get("value")
-                last_ts = point.get("timestamp")
-    return last_value, unit
+def _metric_series(payload):
+    series = payload.get("data", []) if isinstance(payload, dict) else payload
+    return [item for item in series if isinstance(item, dict)] if isinstance(series, list) else []
+
+
+def _metric_timestamp(value):
+    if isinstance(value, (float, int)):
+        return float(value)
+    dt = datetime.datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=datetime.timezone.utc)
+    return dt.timestamp()
 
 
 def _series_values(payload):
-    out = []
-    series = payload.get("data") if isinstance(payload, dict) else None
-    if not isinstance(series, list):
-        return out
-    for item in series:
-        if not isinstance(item, dict):
-            continue
+    totals = {}
+    for item in _metric_series(payload):
         for point in item.get("values") or []:
             if not isinstance(point, dict):
                 continue
             try:
-                ts = datetime.datetime.fromisoformat(str(point.get("timestamp")).replace("Z", "+00:00")).timestamp()
+                ts = _metric_timestamp(point.get("timestamp"))
                 value = float(point.get("value"))
-            except Exception:
+                if not math.isfinite(ts) or not math.isfinite(value):
+                    continue
+            except (ValueError, TypeError, OverflowError):
                 continue
-            out.append((ts, value))
-    out.sort(key=lambda x: x[0])
-    return out
+            totals[ts] = totals.get(ts, 0.0) + value
+    return sorted(totals.items())
+
+
+def _series_last_value(payload):
+    values = _series_values(payload)
+    unit = next((item.get("unit") for item in _metric_series(payload) if item.get("unit")), None)
+    return (values[-1][1] if values else None), unit
 
 
 async def _render_get_json(endpoint, params=None, timeout=8):
@@ -1797,7 +1955,7 @@ async def _get_render_stats(include_usage=True):
     if service_error:
         # Даже когда API не отвечает, локальные CPU/RAM остаются полезными.
         try:
-            cpu = psutil.cpu_percent(interval=None)
+            cpu = await asyncio.to_thread(psutil.Process(os.getpid()).cpu_percent, 0.1)
         except Exception:
             cpu = None
         try:
@@ -1818,9 +1976,9 @@ async def _get_render_stats(include_usage=True):
     start_month = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     current_params = {
         "resource": RENDER_SERVICE_ID,
-        "startTime": (now - datetime.timedelta(minutes=5)).isoformat().replace("+00:00", "Z"),
+        "startTime": (now - datetime.timedelta(minutes=15)).isoformat().replace("+00:00", "Z"),
         "endTime": now.isoformat().replace("+00:00", "Z"),
-        "resolutionSeconds": 30,
+        "resolutionSeconds": 60,
     }
     usage_params = {
         "resource": RENDER_SERVICE_ID,
@@ -1868,6 +2026,11 @@ async def _get_render_stats(include_usage=True):
     memory_bytes, _ = _series_last_value(memory_payload or {})
 
     api_errors = []
+    for name, value in (("cpu", cpu), ("memory", memory_bytes)):
+        if value is None:
+            api_errors.append(f"{name}: нет точек за последние 15 минут")
+    if include_usage and not instance_values:
+        api_errors.append("instance-count: нет доступной истории")
     for name, err in (("instance-count", instance_error), ("cpu", cpu_error), ("memory", memory_error)):
         if err:
             api_errors.append(f"{name}: {err}")
@@ -1880,7 +2043,7 @@ async def _get_render_stats(include_usage=True):
         "memory_bytes": memory_bytes,
         "api_error": "; ".join(api_errors) if api_errors else None,
         "service_name": service_info.get("name") if isinstance(service_info, dict) else None,
-        "service_plan": service_info.get("plan") if isinstance(service_info, dict) else None,
+        "service_plan": (service_info.get("serviceDetails") or {}).get("plan", service_info.get("plan")) if isinstance(service_info, dict) else None,
     }
 
 
@@ -1938,6 +2101,7 @@ async def refresh_server_stats_cache(force=False):
                     "render_service_name": render_stats.get("service_name"),
                     "render_service_plan": render_stats.get("service_plan"),
                 })
+                SERVER_STATS_CACHE["render_used_hours"] = render_stats.get("used_hours")
                 if render_stats.get("used_hours") is not None:
                     SERVER_STATS_CACHE["render_used_hours"] = render_stats.get("used_hours")
                     SERVER_STATS_CACHE["render_usage_updated_at"] = now_ts
@@ -1947,6 +2111,7 @@ async def refresh_server_stats_cache(force=False):
                 SERVER_STATS_CACHE["render_api_error"] = render_stats.get("api_error")
                 SERVER_STATS_CACHE["render_service_name"] = render_stats.get("service_name")
                 SERVER_STATS_CACHE["render_service_plan"] = render_stats.get("service_plan")
+                SERVER_STATS_CACHE["render_used_hours"] = render_stats.get("used_hours")
                 if render_stats.get("used_hours") is not None:
                     SERVER_STATS_CACHE["render_used_hours"] = render_stats.get("used_hours")
                     SERVER_STATS_CACHE["render_instance_count"] = render_stats.get("instance_count")
@@ -1970,21 +2135,18 @@ def _build_server_stats_text(cache):
     now = datetime.datetime.now(datetime.timezone.utc)
     reset_at = _next_render_reset_utc(now)
     used_hours = cache.get("render_used_hours")
-    remain_hours = max(0.0, RENDER_FREE_HOURS - used_hours) if used_hours is not None else None
 
     if used_hours is not None:
-        render_limit_text = f"{_format_render_duration(used_hours)} / 31 дн. (750 ч.)"
-        render_percent = min(100.0, max(0.0, used_hours / RENDER_FREE_HOURS * 100.0))
+        render_limit_text = f"{_format_render_duration(used_hours)} (оценка сервиса)"
     else:
-        render_limit_text = "Нет API-метрик / 31 дн. (750 ч.)"
-        render_percent = None
+        render_limit_text = "Нет данных метрик"
 
     cpu = cache.get("render_cpu")
     cpu_unit = str(cache.get("render_cpu_unit") or "")
     if cpu is None:
         cpu_text = "—"
     elif "%" in cpu_unit or "percent" in cpu_unit.lower() or "локально" in cpu_unit.lower():
-        cpu_text = f"{float(cpu):.1f}%"
+        cpu_text = f"{float(cpu):.1f}%" + (" (процесс локально)" if "локально" in cpu_unit else "")
     else:
         cpu_text = f"{float(cpu):.3f} {cpu_unit or 'unit'}"
 
@@ -2007,13 +2169,13 @@ def _build_server_stats_text(cache):
         "Статистика сервера:",
         "",
         "🟣 Render",
-        f"Лимит: {render_limit_text}",
-        f"Использовано: {render_percent:.1f}%" if render_percent is not None else "Использовано: —",
-        f"Осталось: {_format_render_duration(remain_hours)}" if remain_hours is not None else "Осталось: —",
+        f"Время по доступным метрикам месяца: {render_limit_text}",
+        f"Квота Free workspace: {RENDER_FREE_HOURS:g} ч./месяц",
+        "Точный остаток общей квоты: в панели Render (Billing).",
         f"Сброс лимита: {_format_utc_datetime(reset_at)}",
         f"До сброса: {remaining_to_reset}",
         f"CPU: {cpu_text}",
-        f"RAM процесса: {mem_text}",
+        f"RAM (API сервиса / локально при ошибке API): {mem_text}",
         f"Инстансы: {cache.get('render_instance_count') if cache.get('render_instance_count') is not None else '—'}",
         f"Uptime процесса: {process_uptime}",
         "",
@@ -2049,49 +2211,10 @@ def _build_server_stats_text(cache):
 
 def build_admin_stats_markup():
     builder = InlineKeyboardBuilder()
+    builder.button(text="Обновить 🔄", callback_data="admin_server_stats_refresh")
     builder.button(text="⬅️ Назад", callback_data="admin_server_stats_back")
     builder.adjust(1)
     return builder.as_markup()
-
-
-async def _admin_server_stats_loop(user_id):
-    data = get_user_state(user_id)
-    while data.get("admin_stats_active", False):
-        try:
-            cache = await refresh_server_stats_cache(force=False)
-            msg_id = data.get("msg_id")
-            if msg_id and data.get("admin_stats_active", False):
-                stats_text = _build_server_stats_text(cache)
-                markup = build_admin_stats_markup()
-                data["last_ui_text"] = stats_text
-                data["last_ui_reply_markup"] = markup
-                data["last_ui_parse_mode"] = None
-                try:
-                    await bot.edit_message_text(
-                        chat_id=user_id,
-                        message_id=msg_id,
-                        text=stats_text,
-                        reply_markup=markup,
-                    )
-                except TelegramBadRequest as e:
-                    if "message is not modified" not in str(e).lower():
-                        logging.debug(f"Не удалось обновить stats message: {e}")
-                except Exception as e:
-                    logging.debug(f"Ошибка inline refresh статистики: {e}")
-            await asyncio.sleep(SERVER_STATS_UI_REFRESH_SECONDS)
-        except asyncio.CancelledError:
-            raise
-        except Exception as e:
-            logging.warning(f"Ошибка admin stats loop: {e}")
-            await asyncio.sleep(SERVER_STATS_UI_REFRESH_SECONDS)
-
-
-def start_admin_server_stats_loop(user_id):
-    data = get_user_state(user_id)
-    data["admin_stats_active"] = True
-    task = data.get("admin_stats_task")
-    if not task or task.done():
-        data["admin_stats_task"] = asyncio.create_task(_admin_server_stats_loop(user_id))
 
 
 def stop_admin_server_stats_loop(user_id):
@@ -2113,7 +2236,7 @@ def build_admin_menu_markup():
     return builder.as_markup()
 
 
-@dp.callback_query(F.data == "admin_server_stats")
+@dp.callback_query(F.data.in_(["admin_server_stats", "admin_server_stats_refresh"]))
 async def admin_server_stats(callback: types.CallbackQuery):
     if not is_admin(callback.from_user):
         return
@@ -2121,13 +2244,17 @@ async def admin_server_stats(callback: types.CallbackQuery):
     stop_admin_server_stats_loop(user_id)
     data = get_user_state(user_id)
     data["state"] = "ADMIN_STATS"
+    try: await callback.answer("Обновляю…")
+    except TelegramBadRequest: pass
     cache = await refresh_server_stats_cache(force=True)
+    if data.get("state") != "ADMIN_STATS":
+        return
     await edit_or_send(
         user_id,
         _build_server_stats_text(cache),
         reply_markup=build_admin_stats_markup(),
     )
-    start_admin_server_stats_loop(user_id)
+    data["admin_stats_active"] = True
     try: await callback.answer()
     except Exception: pass
 
@@ -2150,7 +2277,7 @@ async def admin_server_stats_back(callback: types.CallbackQuery):
 
 @dp.message(F.text.casefold() == "admin")
 async def admin_command(message: types.Message):
-                                                                                        
+
     if not is_admin(message.from_user):
         return
 
@@ -2163,11 +2290,12 @@ async def admin_command(message: types.Message):
         reply_markup=build_admin_menu_markup(),
     )
 
-@dp.callback_query(F.data == "admin_users_back")
+@dp.callback_query(F.data.in_(["admin_menu", "admin_users_back"]))
 async def admin_users_back(callback: types.CallbackQuery):
     if not is_admin(callback.from_user):
         return
     stop_admin_server_stats_loop(callback.from_user.id)
+    get_user_state(callback.from_user.id)["state"] = "ADMIN"
     await edit_or_send(
         callback.from_user.id,
         "Админ меню:",
@@ -2267,6 +2395,7 @@ async def _admin_validate_session(user_id, cfg):
     if client and client.is_connected:
         try:
             await client.get_me()
+            start_activity_tracker(user_id)
             return True
         except Unauthorized:
             try:
@@ -2440,9 +2569,6 @@ async def admin_user_view(callback: types.CallbackQuery):
     try: await callback.answer()
     except Exception: pass
 
-                                                              
-
-                                                                     
 
 async def handle_ping(request):
     return web.Response(text="OK", status=200)
@@ -2461,14 +2587,29 @@ async def start_web_server():
 async def main():
     await start_web_server()
 
-                                                                 
-                                                   
+
     await sync_world_clock(force=True)
     asyncio.create_task(ntp_sync_loop())
 
     await restore_saved_sessions()
     logging.info("🚀 Бот успешно запущен!")
-    await dp.start_polling(bot)
+    try:
+        await dp.start_polling(bot)
+    finally:
+        tasks = []
+        for data in USER_DATA.values():
+            for key in ("activity_task", "online_task", "time_nick_task", "ui_refresh_task", "admin_stats_task"):
+                task = data.get(key)
+                if task and not task.done():
+                    task.cancel()
+                    tasks.append(task)
+        await asyncio.gather(*tasks, return_exceptions=True)
+        for uid, activity in MEMORY_DB["activity"].items():
+            await async_db_save("activity", uid, activity)
+        for data in USER_DATA.values():
+            if data.get("client"):
+                await close_pyrogram_client(data["client"])
+        await bot.session.close()
 
 if __name__ == "__main__":
     loop.run_until_complete(main())
