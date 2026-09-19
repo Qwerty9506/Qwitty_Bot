@@ -1537,8 +1537,8 @@ async def menu_247(callback: types.CallbackQuery):
         return
     cfg = MEMORY_DB["config"].get(str(uid), {})
     active = cfg.get("online_247", False)
-    text = "Режим 24/7 — делает постоянный онлайн.\n\nСтатус: " + ("🟢Включен" if active else "🔴Выключен")
-    text += "\nРаботает, пока запущен сервер и подключён аккаунт."
+    text = "Режим 24/7.\n\nСтатус: " + ("🟢Включен" if active else "🔴Выключен")
+    text += "\nСоздаст статус вечный онлайн."
     if get_user_state(uid).get("online_error") and active:
         text += "\n⚠️ " + get_user_state(uid)["online_error"]
     builder = InlineKeyboardBuilder()
@@ -1601,8 +1601,8 @@ async def menu_activity(callback: types.CallbackQuery):
         formatted_time = f"{hours} {ru_plural(hours, 'час', 'часа', 'часов')} {minutes} {ru_plural(minutes, 'минута', 'минуты', 'минут')}"
         lines.append(f"{date_str} — {formatted_time}")
 
-    text = "Статистика активности:\n\n" + "\n".join(lines)
-    text += "\n\nПримерная активность других сессий за 5 дней. Юзербот исключён.\nИстория до начала наблюдения недоступна."
+    text = "🗂Статистика активности:\n\n" + "\n".join(lines)
+    text += "\n\nВаша примерная активность за 5 дней."
     if get_user_state(user_id).get("activity_error"):
         text += "\n⚠️ " + get_user_state(user_id)["activity_error"]
     builder = InlineKeyboardBuilder()
