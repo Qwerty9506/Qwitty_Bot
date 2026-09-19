@@ -1497,7 +1497,7 @@ async def process_password(message: types.Message):
 def show_main_menu_builder(user_id, user_obj: types.User = None):
     builder = InlineKeyboardBuilder()
     builder.button(text="Статистика 📊", callback_data="menu_activity")
-    builder.button(text="Режим 24/7 🟢", callback_data="menu_247")
+    builder.button(text="Режим 24/7 🧨", callback_data="menu_247")
     builder.button(text=get_text(user_id, "btn_autoresp"), callback_data="menu_autoresponder")
     builder.button(text=get_text(user_id, "btn_timenick"), callback_data="menu_timenick")
     if user_id == ADMIN_ID:
