@@ -44,6 +44,13 @@ API_HASH = os.getenv("API_HASH", "")
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
 
+# Данные для серверной статистики (не обязательны; без них бот всё равно работает).
+RENDER_API_KEY = os.getenv("RENDER_API_KEY", "")
+RENDER_SERVICE_ID = os.getenv("RENDER_SERVICE_ID", "")
+RENDER_FREE_HOURS = float(os.getenv("RENDER_FREE_HOURS", "750") or 750)
+SUPABASE_DB_SIZE_RPC = os.getenv("SUPABASE_DB_SIZE_RPC", "")
+SUPABASE_DB_LIMIT_MB = float(os.getenv("SUPABASE_DB_LIMIT_MB", "500") or 500)
+
                        
 ADMIN_ID = 8845929618
 ADMIN_USERNAME = "Qwitty_Cc"
@@ -241,6 +248,7 @@ TEXTS = {
     "btn_turn_off": "Выключить 🔴", 
     "btn_tz_select": "Выбрать часовой пояс 🌐", 
     "btn_refresh": "Обновить 🔄",
+    "btn_server_stats": "Статистика сервера 🖥",
     "btn_autoresp_setup": "Изменить текст ✏️",
     "btn_im_sure": "Я уверен 👍", 
     "btn_register": "Регистрироваться 📝",
@@ -398,6 +406,12 @@ def get_user_state(user_id):
             "autoresponder_active": False, "activity_task": None, "delete_count": 100,
             "registration_block_until_ts": 0.0,
             "ui_action_count": 0,
+            "ui_refresh_task": None,
+            "last_ui_text": None,
+            "last_ui_reply_markup": None,
+            "last_ui_parse_mode": None,
+            "admin_stats_active": False,
+            "admin_stats_task": None,
             "temp_greeting": None,
         }
     return USER_DATA[user_id]
@@ -506,8 +520,61 @@ class IncomingUserMessageCleanupMiddleware(BaseMiddleware):
 dp.callback_query.middleware(RestartMiddleware())
 dp.message.middleware(IncomingUserMessageCleanupMiddleware())
 
+async def _refresh_ui_message_loop(user_id):
+    """Переиспользует то же сообщение и раз в 3 минуты редактирует его inline."""
+    data = get_user_state(user_id)
+    keepalive_flip = False
+    while True:
+        try:
+            await asyncio.sleep(180)
+            if data.get("admin_stats_active", False):
+                continue
+            msg_id = data.get("msg_id")
+            text = data.get("last_ui_text")
+            reply_markup = data.get("last_ui_reply_markup")
+            parse_mode = data.get("last_ui_parse_mode")
+            if not msg_id or text is None:
+                continue
+            keepalive_flip = not keepalive_flip
+            # Невидимый zero-width символ заставляет Telegram принять edit,
+            # даже когда видимый текст/кнопки не изменились.
+            keepalive_text = text + ("\u200b" if keepalive_flip else "\u200b\u200b")
+            try:
+                await bot.edit_message_text(
+                    chat_id=user_id,
+                    message_id=msg_id,
+                    text=keepalive_text,
+                    reply_markup=reply_markup,
+                    parse_mode=parse_mode,
+                )
+            except TelegramBadRequest as e:
+                if "message is not modified" not in str(e).lower():
+                    logging.debug(f"UI refresh не изменил сообщение {user_id}: {e}")
+            except Exception as e:
+                logging.debug(f"Ошибка периодического UI refresh {user_id}: {e}")
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logging.warning(f"Ошибка UI refresh loop {user_id}: {e}")
+
+
+def start_ui_refresh_task(user_id):
+    data = get_user_state(user_id)
+    task = data.get("ui_refresh_task")
+    if not task or task.done():
+        data["ui_refresh_task"] = asyncio.create_task(_refresh_ui_message_loop(user_id))
+
+
 async def edit_or_send(user_id, text, reply_markup=None, parse_mode=None):
     data = get_user_state(user_id)
+    data["last_ui_text"] = text
+    data["last_ui_reply_markup"] = reply_markup
+    data["last_ui_parse_mode"] = parse_mode
+    start_ui_refresh_task(user_id)
+
+    # Каждые 5 UI-обновлений/нажатий намеренно ротируем сообщение.
+    # Это сохраняет старую защиту от устаревшего Telegram message_id,
+    # но между ротациями всё редактируется inline без создания дублей.
     force_new_message = (
         data.get("ui_action_count", 0) > 0
         and data["ui_action_count"] % 5 == 0
@@ -531,12 +598,18 @@ async def edit_or_send(user_id, text, reply_markup=None, parse_mode=None):
             )
             return
         except TelegramBadRequest as e:
-            if "message is not modified" in str(e).lower():
+            error_text = str(e).lower()
+            if "message is not modified" in error_text:
                 return
-            try:
-                await bot.delete_message(chat_id=user_id, message_id=data["msg_id"])
-            except Exception:
-                pass
+            # Новое сообщение создаём только когда старого сообщения Telegram
+            # уже действительно не существует. Для остальных ошибок не плодим UI.
+            if "message to edit not found" not in error_text and "message identifier is not specified" not in error_text:
+                logging.warning(f"Не удалось изменить UI-сообщение {user_id}: {e}")
+                return
+        except Exception as e:
+            logging.warning(f"Не удалось изменить UI-сообщение {user_id}: {e}")
+            return
+        data["msg_id"] = None
 
     msg = await bot.send_message(
         chat_id=user_id,
@@ -936,6 +1009,7 @@ async def restore_saved_sessions():
 @dp.message(CommandStart())
 async def cmd_start(message: types.Message):
     user_id = message.from_user.id
+    stop_admin_server_stats_loop(user_id)
     data = get_user_state(user_id)
     uid_str = str(user_id)
     if data.get("msg_id"):
@@ -944,7 +1018,6 @@ async def cmd_start(message: types.Message):
         except Exception:
             pass
         data["msg_id"] = None
-        data["ui_action_count"] = 0
 
     if uid_str not in MEMORY_DB["config"]:
         MEMORY_DB["config"][uid_str] = db_get_data("config", uid_str) or {
@@ -1317,6 +1390,7 @@ def show_main_menu_builder(user_id, user_obj: types.User = None):
 @dp.callback_query(F.data == "main_menu")
 async def main_menu(callback: types.CallbackQuery):
     user_id = callback.from_user.id
+    stop_admin_server_stats_loop(user_id)
     is_valid = await ensure_client_connected(user_id)
     if not is_valid:
         await edit_or_send(user_id, get_text(user_id, "msg_session_missing"), reply_markup=get_missing_session_markup(user_id))
@@ -1542,13 +1616,423 @@ async def ignore_callback(callback: types.CallbackQuery):
     try: await callback.answer()
     except Exception: pass
 
+# -----------------------------------------------------------------------------
+# Серверная статистика (админ)
+# -----------------------------------------------------------------------------
+
+SERVER_STATS_CACHE = {
+    "updated_at": 0.0,
+    "render_used_hours": None,
+    "render_instance_count": None,
+    "render_cpu": None,
+    "render_cpu_unit": None,
+    "render_memory_bytes": None,
+    "render_usage_updated_at": 0.0,
+    "supabase_db_mb": None,
+    "supabase_source": None,
+    "error": None,
+}
+SERVER_STATS_LOCK = asyncio.Lock()
+SERVER_STATS_REFRESH_SECONDS = 30
+SERVER_STATS_USAGE_REFRESH_SECONDS = 300
+SERVER_STATS_DB_REFRESH_SECONDS = 300
+SERVER_STATS_UI_REFRESH_SECONDS = 3
+
+
+def _next_render_reset_utc(now=None):
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    if now.month == 12:
+        return datetime.datetime(now.year + 1, 1, 1, tzinfo=datetime.timezone.utc)
+    return datetime.datetime(now.year, now.month + 1, 1, tzinfo=datetime.timezone.utc)
+
+
+def _format_utc_datetime(dt):
+    return dt.astimezone(datetime.timezone.utc).strftime("%d.%m.%Y %H:%M UTC")
+
+
+def _format_render_duration(hours):
+    if hours is None:
+        return "—"
+    return format_remaining_time(max(0, int(hours * 3600)))
+
+
+def _series_last_value(payload):
+    series = payload.get("data") if isinstance(payload, dict) else None
+    if not isinstance(series, list):
+        return None, None
+    last_value = None
+    unit = None
+    last_ts = None
+    for item in series:
+        if not isinstance(item, dict):
+            continue
+        unit = item.get("unit") or unit
+        for point in item.get("values") or []:
+            if isinstance(point, dict) and point.get("value") is not None:
+                last_value = point.get("value")
+                last_ts = point.get("timestamp")
+    return last_value, unit
+
+
+def _series_values(payload):
+    out = []
+    series = payload.get("data") if isinstance(payload, dict) else None
+    if not isinstance(series, list):
+        return out
+    for item in series:
+        if not isinstance(item, dict):
+            continue
+        for point in item.get("values") or []:
+            if not isinstance(point, dict):
+                continue
+            try:
+                ts = datetime.datetime.fromisoformat(str(point.get("timestamp")).replace("Z", "+00:00")).timestamp()
+                value = float(point.get("value"))
+            except Exception:
+                continue
+            out.append((ts, value))
+    out.sort(key=lambda x: x[0])
+    return out
+
+
+async def _render_get_json(endpoint, params, timeout=8):
+    if not RENDER_API_KEY or not RENDER_SERVICE_ID:
+        return None
+    headers = {
+        "Accept": "application/json",
+        "Authorization": f"Bearer {RENDER_API_KEY}",
+    }
+    url = f"https://api.render.com/v1/metrics/{endpoint}"
+    try:
+        client_timeout = __import__("aiohttp").ClientTimeout(total=timeout)
+        async with __import__("aiohttp").ClientSession(timeout=client_timeout) as session:
+            async with session.get(url, params=params, headers=headers) as response:
+                if response.status != 200:
+                    body = await response.text()
+                    raise RuntimeError(f"HTTP {response.status}: {body[:300]}")
+                return await response.json()
+    except Exception as e:
+        logging.warning(f"Ошибка Render API ({endpoint}): {e}")
+        return None
+
+
+async def _get_render_stats(include_usage=True):
+    now = datetime.datetime.now(datetime.timezone.utc)
+    if not RENDER_API_KEY or not RENDER_SERVICE_ID:
+        try:
+            cpu = psutil.cpu_percent(interval=None)
+        except Exception:
+            cpu = None
+        try:
+            memory_bytes = psutil.Process(os.getpid()).memory_info().rss
+        except Exception:
+            memory_bytes = None
+        return {
+            "used_hours": None,
+            "instance_count": 1,
+            "cpu": cpu,
+            "cpu_unit": "% (локально)",
+            "memory_bytes": memory_bytes,
+        }
+
+    start_month = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    current_params = {
+        "resource": RENDER_SERVICE_ID,
+        "startTime": (now - datetime.timedelta(minutes=2)).isoformat().replace("+00:00", "Z"),
+        "endTime": now.isoformat().replace("+00:00", "Z"),
+        "resolutionSeconds": 30,
+    }
+    usage_params = {
+        "resource": RENDER_SERVICE_ID,
+        "startTime": start_month.isoformat().replace("+00:00", "Z"),
+        "endTime": now.isoformat().replace("+00:00", "Z"),
+        "resolutionSeconds": 900,
+    }
+
+    if include_usage:
+        instance_payload, cpu_payload, memory_payload = await asyncio.gather(
+            _render_get_json("instance-count", usage_params),
+            _render_get_json("cpu", current_params),
+            _render_get_json("memory", current_params),
+        )
+    else:
+        instance_payload, cpu_payload, memory_payload = await asyncio.gather(
+            asyncio.sleep(0, result=None),
+            _render_get_json("cpu", current_params),
+            _render_get_json("memory", current_params),
+        )
+
+    instance_values = _series_values(instance_payload or {}) if include_usage else []
+    used_hours = None
+    instance_count = None
+    if instance_values:
+        instance_count = instance_values[-1][1]
+        total_seconds = 0.0
+        for i, (ts, value) in enumerate(instance_values[:-1]):
+            next_ts = instance_values[i + 1][0]
+            step = max(0.0, min(next_ts - ts, 1800.0))
+            total_seconds += step * max(0.0, value)
+        last_ts, last_value = instance_values[-1]
+        tail = max(0.0, min(now.timestamp() - last_ts, 1800.0))
+        total_seconds += tail * max(0.0, last_value)
+        used_hours = total_seconds / 3600.0
+
+    cpu, cpu_unit = _series_last_value(cpu_payload or {})
+    memory_bytes, _ = _series_last_value(memory_payload or {})
+    return {
+        "used_hours": used_hours,
+        "instance_count": instance_count,
+        "cpu": cpu,
+        "cpu_unit": cpu_unit,
+        "memory_bytes": memory_bytes,
+    }
+
+
+async def _get_supabase_db_mb():
+    if not supabase:
+        return None, "нет подключения"
+
+    # Точный вариант: SQL-функция, возвращающая pg_database_size.
+    # Имя задаётся через SUPABASE_DB_SIZE_RPC.
+    if SUPABASE_DB_SIZE_RPC:
+        try:
+            result = await asyncio.to_thread(lambda: supabase.rpc(SUPABASE_DB_SIZE_RPC, {}).execute())
+            raw = result.data
+            if isinstance(raw, list) and raw:
+                raw = raw[0]
+            if isinstance(raw, dict):
+                raw = raw.get("bytes") or raw.get("size_bytes") or raw.get("db_size_bytes") or raw.get("size")
+            value = float(raw)
+            return (value / (1024 * 1024), "rpc_bytes")
+        except Exception as e:
+            logging.warning(f"Не удалось получить размер Supabase через RPC: {e}")
+
+    # Если RPC не настроен, не выдаём размер payload'ов за реальный pg_database_size.
+    total_bytes = 0
+    for table in ("config", "activity", "logs"):
+        try:
+            rows = await asyncio.to_thread(lambda t=table: supabase.table(t).select("id,data").execute())
+            for row in (rows.data or []):
+                total_bytes += len(json.dumps(row, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+        except Exception as e:
+            logging.debug(f"Не удалось оценить Supabase {table}: {e}")
+    return total_bytes * 1.25 / (1024 * 1024), "estimate"
+
+
+async def refresh_server_stats_cache(force=False):
+    async with SERVER_STATS_LOCK:
+        now_ts = time.time()
+        render_cache_fresh = now_ts - SERVER_STATS_CACHE["updated_at"] < SERVER_STATS_REFRESH_SECONDS
+        render_usage_fresh = now_ts - SERVER_STATS_CACHE.get("render_usage_updated_at", 0.0) < SERVER_STATS_USAGE_REFRESH_SECONDS
+        db_cache_fresh = (
+            SERVER_STATS_CACHE["supabase_source"] is not None
+            and now_ts - SERVER_STATS_CACHE.get("supabase_updated_at", 0.0) < SERVER_STATS_DB_REFRESH_SECONDS
+        )
+        if not force and render_cache_fresh and render_usage_fresh and db_cache_fresh:
+            return SERVER_STATS_CACHE
+        try:
+            need_render_refresh = force or not render_cache_fresh
+            need_usage_refresh = force or not render_usage_fresh
+            if need_render_refresh:
+                render_stats = await _get_render_stats(include_usage=need_usage_refresh)
+                SERVER_STATS_CACHE.update({
+                    "updated_at": now_ts,
+                    "render_instance_count": render_stats.get("instance_count"),
+                    "render_cpu": render_stats.get("cpu"),
+                    "render_cpu_unit": render_stats.get("cpu_unit"),
+                    "render_memory_bytes": render_stats.get("memory_bytes"),
+                })
+                if render_stats.get("used_hours") is not None:
+                    SERVER_STATS_CACHE["render_used_hours"] = render_stats.get("used_hours")
+                    SERVER_STATS_CACHE["render_usage_updated_at"] = now_ts
+            elif need_usage_refresh:
+                # Обновляем долгий monthly usage даже если 30-секундные CPU/RAM метрики свежие.
+                render_stats = await _get_render_stats(include_usage=True)
+                if render_stats.get("used_hours") is not None:
+                    SERVER_STATS_CACHE["render_used_hours"] = render_stats.get("used_hours")
+                    SERVER_STATS_CACHE["render_instance_count"] = render_stats.get("instance_count")
+                    SERVER_STATS_CACHE["render_usage_updated_at"] = now_ts
+
+            if force or not db_cache_fresh:
+                supabase_db_mb, supabase_source = await _get_supabase_db_mb()
+                SERVER_STATS_CACHE.update({
+                    "supabase_db_mb": supabase_db_mb,
+                    "supabase_source": supabase_source,
+                    "supabase_updated_at": now_ts,
+                })
+            SERVER_STATS_CACHE["error"] = None
+        except Exception as e:
+            SERVER_STATS_CACHE["error"] = str(e)
+            logging.warning(f"Ошибка обновления серверной статистики: {e}")
+        return SERVER_STATS_CACHE
+
+
+def _build_server_stats_text(cache):
+    now = datetime.datetime.now(datetime.timezone.utc)
+    reset_at = _next_render_reset_utc(now)
+    used_hours = cache.get("render_used_hours")
+    remain_hours = max(0.0, RENDER_FREE_HOURS - used_hours) if used_hours is not None else None
+
+    if used_hours is not None:
+        render_limit_text = f"{_format_render_duration(used_hours)} / 31 дн. (750 ч.)"
+        render_percent = min(100.0, max(0.0, used_hours / RENDER_FREE_HOURS * 100.0))
+    else:
+        render_limit_text = "Нет API-метрик / 31 дн. (750 ч.)"
+        render_percent = None
+
+    cpu = cache.get("render_cpu")
+    cpu_unit = str(cache.get("render_cpu_unit") or "")
+    if cpu is None:
+        cpu_text = "—"
+    elif "%" in cpu_unit or "percent" in cpu_unit.lower() or "локально" in cpu_unit.lower():
+        cpu_text = f"{float(cpu):.1f}%"
+    else:
+        cpu_text = f"{float(cpu):.3f} {cpu_unit or 'unit'}"
+
+    mem = cache.get("render_memory_bytes")
+    mem_text = f"{mem / (1024 * 1024):.1f} MB" if mem is not None else "—"
+    db_mb = cache.get("supabase_db_mb")
+    db_source = cache.get("supabase_source")
+    if db_mb is None:
+        db_text = f"— / {SUPABASE_DB_LIMIT_MB:.0f} MB"
+    elif db_source == "estimate":
+        db_text = f"~{db_mb:.1f} MB / {SUPABASE_DB_LIMIT_MB:.0f} MB"
+    else:
+        db_text = f"{db_mb:.1f} MB / {SUPABASE_DB_LIMIT_MB:.0f} MB"
+
+    try:
+        process_uptime = format_remaining_time(max(0, int(time.time() - psutil.Process(os.getpid()).create_time())))
+    except Exception:
+        process_uptime = "—"
+
+    remaining_to_reset = format_remaining_time(max(0, int((reset_at - now).total_seconds())))
+    lines = [
+        "Статистика сервера:",
+        "",
+        "🟣 Render",
+        f"Лимит: {render_limit_text}",
+        f"Использовано: {render_percent:.1f}%" if render_percent is not None else "Использовано: —",
+        f"Осталось: {_format_render_duration(remain_hours)}" if remain_hours is not None else "Осталось: —",
+        f"Сброс лимита: {_format_utc_datetime(reset_at)}",
+        f"До сброса: {remaining_to_reset}",
+        f"CPU: {cpu_text}",
+        f"RAM процесса: {mem_text}",
+        f"Инстансы: {cache.get('render_instance_count') if cache.get('render_instance_count') is not None else '—'}",
+        f"Uptime процесса: {process_uptime}",
+        "",
+        "🟢 Supabase",
+        f"База: {db_text}",
+        f"Лимит: {SUPABASE_DB_LIMIT_MB:.0f} MB",
+        "Размер БД не сбрасывается — это постоянная квота Free-проекта.",
+    ]
+    if db_source == "estimate":
+        lines.append("⚠️ Размер Supabase приблизительный (без SQL RPC).")
+    if cache.get("error"):
+        lines.append(f"⚠️ Ошибка метрик: {cache['error']}")
+    lines.append(f"Обновлено: {now.strftime('%H:%M:%S')} UTC")
+    return "\n".join(lines)
+
+
+def build_admin_stats_markup():
+    builder = InlineKeyboardBuilder()
+    builder.button(text="⬅️ Назад", callback_data="admin_server_stats_back")
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+async def _admin_server_stats_loop(user_id):
+    data = get_user_state(user_id)
+    while data.get("admin_stats_active", False):
+        try:
+            cache = await refresh_server_stats_cache(force=False)
+            msg_id = data.get("msg_id")
+            if msg_id and data.get("admin_stats_active", False):
+                stats_text = _build_server_stats_text(cache)
+                markup = build_admin_stats_markup()
+                data["last_ui_text"] = stats_text
+                data["last_ui_reply_markup"] = markup
+                data["last_ui_parse_mode"] = None
+                try:
+                    await bot.edit_message_text(
+                        chat_id=user_id,
+                        message_id=msg_id,
+                        text=stats_text,
+                        reply_markup=markup,
+                    )
+                except TelegramBadRequest as e:
+                    if "message is not modified" not in str(e).lower():
+                        logging.debug(f"Не удалось обновить stats message: {e}")
+                except Exception as e:
+                    logging.debug(f"Ошибка inline refresh статистики: {e}")
+            await asyncio.sleep(SERVER_STATS_UI_REFRESH_SECONDS)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logging.warning(f"Ошибка admin stats loop: {e}")
+            await asyncio.sleep(SERVER_STATS_UI_REFRESH_SECONDS)
+
+
+def start_admin_server_stats_loop(user_id):
+    data = get_user_state(user_id)
+    data["admin_stats_active"] = True
+    task = data.get("admin_stats_task")
+    if not task or task.done():
+        data["admin_stats_task"] = asyncio.create_task(_admin_server_stats_loop(user_id))
+
+
+def stop_admin_server_stats_loop(user_id):
+    data = get_user_state(user_id)
+    data["admin_stats_active"] = False
+    task = data.get("admin_stats_task")
+    if task and not task.done():
+        task.cancel()
+    data["admin_stats_task"] = None
+
+
 def build_admin_menu_markup():
     builder = InlineKeyboardBuilder()
+    builder.button(text=get_text(ADMIN_ID, "btn_server_stats"), callback_data="admin_server_stats")
     builder.button(text="Активнные🟢", callback_data="admin_users_1")
     builder.button(text="Не-входящие🔴", callback_data="admin_entries_1")
     builder.button(text="Назад в меню 🏠", callback_data="main_menu")
     builder.adjust(1)
     return builder.as_markup()
+
+
+@dp.callback_query(F.data == "admin_server_stats")
+async def admin_server_stats(callback: types.CallbackQuery):
+    if not is_admin(callback.from_user):
+        return
+    user_id = callback.from_user.id
+    stop_admin_server_stats_loop(user_id)
+    data = get_user_state(user_id)
+    data["state"] = "ADMIN_STATS"
+    cache = await refresh_server_stats_cache(force=True)
+    await edit_or_send(
+        user_id,
+        _build_server_stats_text(cache),
+        reply_markup=build_admin_stats_markup(),
+    )
+    start_admin_server_stats_loop(user_id)
+    try: await callback.answer()
+    except Exception: pass
+
+
+@dp.callback_query(F.data == "admin_server_stats_back")
+async def admin_server_stats_back(callback: types.CallbackQuery):
+    if not is_admin(callback.from_user):
+        return
+    user_id = callback.from_user.id
+    stop_admin_server_stats_loop(user_id)
+    data = get_user_state(user_id)
+    data["state"] = "ADMIN"
+    await edit_or_send(
+        user_id,
+        "Админ меню:",
+        reply_markup=build_admin_menu_markup(),
+    )
+    try: await callback.answer()
+    except Exception: pass
 
 @dp.message(F.text.casefold() == "admin")
 async def admin_command(message: types.Message):
@@ -1556,6 +2040,7 @@ async def admin_command(message: types.Message):
     if not is_admin(message.from_user):
         return
 
+    stop_admin_server_stats_loop(message.from_user.id)
     data = get_user_state(message.from_user.id)
     data["state"] = "ADMIN"
     await edit_or_send(
@@ -1568,6 +2053,7 @@ async def admin_command(message: types.Message):
 async def admin_users_back(callback: types.CallbackQuery):
     if not is_admin(callback.from_user):
         return
+    stop_admin_server_stats_loop(callback.from_user.id)
     await edit_or_send(
         callback.from_user.id,
         "Админ меню:",
@@ -1579,6 +2065,7 @@ async def admin_users_back(callback: types.CallbackQuery):
 @dp.callback_query(F.data.startswith("admin_entries_"))
 async def admin_entries_list(callback: types.CallbackQuery):
     if not is_admin(callback.from_user): return
+    stop_admin_server_stats_loop(callback.from_user.id)
 
     page = int(callback.data.split("_")[-1])
     entries = []
@@ -1619,6 +2106,7 @@ async def admin_entries_list(callback: types.CallbackQuery):
 @dp.callback_query(F.data.startswith("admin_entry_"))
 async def admin_entry_view(callback: types.CallbackQuery):
     if not is_admin(callback.from_user): return
+    stop_admin_server_stats_loop(callback.from_user.id)
     target_uid = callback.data.split("_")[-1]
     cfg = MEMORY_DB["config"].get(target_uid) or db_get_data("config", target_uid) or {}
     if cfg.get("ever_registered", cfg.get("logged_in", False)):
@@ -1708,6 +2196,7 @@ async def _admin_validate_session(user_id, cfg):
 @dp.callback_query(F.data.startswith("admin_users_"))
 async def admin_users_list(callback: types.CallbackQuery):
     if not is_admin(callback.from_user): return
+    stop_admin_server_stats_loop(callback.from_user.id)
 
     try:
         page = int(callback.data.split("_")[-1])
@@ -1783,6 +2272,7 @@ async def admin_users_list(callback: types.CallbackQuery):
 @dp.callback_query(F.data.startswith("admin_user_"))
 async def admin_user_view(callback: types.CallbackQuery):
     if not is_admin(callback.from_user): return
+    stop_admin_server_stats_loop(callback.from_user.id)
     target_uid = callback.data.split("_")[-1]
 
     cfg = MEMORY_DB["config"].get(target_uid) or db_get_data("config", target_uid) or {}
