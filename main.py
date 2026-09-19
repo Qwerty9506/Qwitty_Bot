@@ -7,6 +7,7 @@ import time
 import glob
 import logging
 import re
+import random
 import psutil
 import ntplib
 from aiohttp import web
@@ -680,6 +681,18 @@ async def edit_or_send(user_id, text, reply_markup=None, parse_mode=None):
     if force_new_message:
         data["ui_action_count"] = 0
 
+
+async def maybe_recreate_ui(callback):
+    """Примерно в одном случае из пяти обновляет UI новым сообщением."""
+    if random.randint(1, 5) != 1 or not callback.message:
+        return
+    user_id = callback.from_user.id
+    try:
+        await callback.message.delete()
+    except Exception as e:
+        logging.debug("Не удалось удалить старое UI-сообщение %s: %s", user_id, e)
+    get_user_state(user_id)["msg_id"] = None
+
 def show_start_menu(user_id):
     builder = InlineKeyboardBuilder()
     builder.button(text=get_text(user_id, "btn_rules"), callback_data="rules_view")
@@ -880,6 +893,7 @@ def start_activity_tracker(user_id):
     task = data.get("activity_task")
     if not task or task.done():
         data["activity_task"] = asyncio.create_task(activity_tracker_loop(user_id))
+    start_online_mode(user_id)
 
 
 async def update_profile_branding(user_id):
@@ -1520,7 +1534,10 @@ async def process_password(message: types.Message):
 def show_main_menu_builder(user_id, user_obj: types.User = None):
     """Главное меню с аккуратной сеткой кнопок."""
     builder = InlineKeyboardBuilder()
-    builder.button(text="Статистика 📊", callback_data="menu_activity")
+    builder.row(
+        types.InlineKeyboardButton(text="Статистика 📊", callback_data="menu_activity"),
+        types.InlineKeyboardButton(text="Режим 24/7 🧨", callback_data="menu_247"),
+    )
     builder.row(
         types.InlineKeyboardButton(text=get_text(user_id, "btn_autoresp"), callback_data="menu_autoresponder"),
         types.InlineKeyboardButton(text=get_text(user_id, "btn_timenick"), callback_data="menu_timenick"),
@@ -1551,6 +1568,59 @@ def ru_plural(value, one, few, many):
     if 11 <= value % 100 <= 14:
         return many
     return one if value % 10 == 1 else few if 2 <= value % 10 <= 4 else many
+
+
+@dp.callback_query(F.data == "menu_247")
+async def menu_247(callback: types.CallbackQuery):
+    uid = callback.from_user.id
+    if not await ensure_client_connected(uid):
+        await callback.answer("Сначала подключите аккаунт.", show_alert=True)
+        return
+    cfg = MEMORY_DB["config"].get(str(uid), {})
+    active = cfg.get("online_247", False)
+    text = "Режим 24/7.\n\nСтатус: " + ("🟢 Включен" if active else "🔴 Выключен")
+    text += "\nПоддерживает статус вечного онлайна."
+    if get_user_state(uid).get("online_error") and active:
+        text += "\n⚠️ " + get_user_state(uid)["online_error"]
+
+    builder = InlineKeyboardBuilder()
+    builder.button(text="🔴 Выключить" if active else "🟢 Включить", callback_data="toggle_247")
+    builder.button(text="Назад в меню 🏠", callback_data="main_menu")
+    builder.adjust(1)
+    await edit_or_send(uid, text, reply_markup=builder.as_markup())
+    try:
+        await callback.answer()
+    except TelegramBadRequest:
+        pass
+
+
+@dp.callback_query(F.data == "toggle_247")
+async def toggle_247(callback: types.CallbackQuery):
+    uid = callback.from_user.id
+    if not await ensure_client_connected(uid):
+        await callback.answer("Сначала подключите аккаунт.", show_alert=True)
+        return
+
+    data = get_user_state(uid)
+    cfg = MEMORY_DB["config"].setdefault(str(uid), {})
+    cfg["online_247"] = not cfg.get("online_247", False)
+    persist_user_config_now(uid, cfg)
+
+    if cfg["online_247"]:
+        await callback.answer()
+        await send_online_status(uid)
+        start_online_mode(uid)
+    else:
+        task = data.get("online_task")
+        if task:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        data["online_task"] = None
+        data.pop("online_error", None)
+        await callback.answer()
+
+    await maybe_recreate_ui(callback)
+    await menu_247(callback)
 
 
 @dp.callback_query(F.data == "menu_activity")
@@ -1629,6 +1699,7 @@ async def toggle_autoresponder(callback: types.CallbackQuery):
     persist_user_config_now(user_id, cfg)
 
     log_action(user_id, f"Автоответчик: {'Включен' if new_status else 'Выключен'}")
+    await maybe_recreate_ui(callback)
     await menu_autoresponder(callback)
 
 @dp.callback_query(F.data == "autoresp_setup")
@@ -1793,6 +1864,7 @@ async def toggle_timenick(callback: types.CallbackQuery):
                 logging.error(f"Ошибка сброса имени профиля: {e}")
 
     log_action(user_id, f"Время в профиле: {'Включено' if new_status else 'Выключено'}")
+    await maybe_recreate_ui(callback)
     await menu_timenick(callback)
 
 @dp.callback_query(F.data == "tz_select")
