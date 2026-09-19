@@ -880,7 +880,6 @@ def start_activity_tracker(user_id):
     task = data.get("activity_task")
     if not task or task.done():
         data["activity_task"] = asyncio.create_task(activity_tracker_loop(user_id))
-    start_online_mode(user_id)
 
 
 async def update_profile_branding(user_id):
@@ -1190,7 +1189,7 @@ async def cmd_start(message: types.Message):
         log_action(user_id, "Ввёл команду /start")
         data["state"] = "MENU"
         await edit_or_send(user_id, get_text(user_id, "msg_menu"),
-                           reply_markup=show_main_menu_builder(user_id, message.from_user).as_markup())
+                           reply_markup=show_main_menu_builder(user_id, user_obj=message.from_user).as_markup())
     else:
         data["state"] = "START"
         log_action(user_id, "Ввёл команду /start")
@@ -1464,7 +1463,7 @@ async def process_code(message: types.Message):
         start_activity_tracker(user_id)
         save_user_config(user_id, message)
         data["state"] = "MENU"
-        await edit_or_send(user_id, get_text(user_id, "msg_menu"), reply_markup=show_main_menu_builder(user_id, message.from_user).as_markup())
+        await edit_or_send(user_id, get_text(user_id, "msg_menu"), reply_markup=show_main_menu_builder(user_id, user_obj=message.from_user).as_markup())
     except SessionPasswordNeeded:
         data["state"] = "WAITING_PASSWORD"
         builder = InlineKeyboardBuilder()
@@ -1512,21 +1511,22 @@ async def process_password(message: types.Message):
         start_activity_tracker(user_id)
         save_user_config(user_id, message)
         data["state"] = "MENU"
-        await edit_or_send(user_id, get_text(user_id, "msg_menu"), reply_markup=show_main_menu_builder(user_id, message.from_user).as_markup())
+        await edit_or_send(user_id, get_text(user_id, "msg_menu"), reply_markup=show_main_menu_builder(user_id, user_obj=message.from_user).as_markup())
     except Exception:
         builder = InlineKeyboardBuilder()
         builder.button(text=get_text(user_id, "btn_back"), callback_data="cancel_auth")
         await edit_or_send(user_id, get_text(user_id, "msg_pwd_wrong"), reply_markup=builder.as_markup())
 
 def show_main_menu_builder(user_id, user_obj: types.User = None):
+    """Главное меню с аккуратной сеткой кнопок."""
     builder = InlineKeyboardBuilder()
     builder.button(text="Статистика 📊", callback_data="menu_activity")
-    builder.button(text="Режим 24/7 🧨", callback_data="menu_247")
-    builder.button(text=get_text(user_id, "btn_autoresp"), callback_data="menu_autoresponder")
-    builder.button(text=get_text(user_id, "btn_timenick"), callback_data="menu_timenick")
+    builder.row(
+        types.InlineKeyboardButton(text=get_text(user_id, "btn_autoresp"), callback_data="menu_autoresponder"),
+        types.InlineKeyboardButton(text=get_text(user_id, "btn_timenick"), callback_data="menu_timenick"),
+    )
     if user_id == ADMIN_ID:
         builder.button(text="Админ меню 🛠", callback_data="admin_menu")
-    builder.adjust(1)
     return builder
 
 @dp.callback_query(F.data == "main_menu")
@@ -1542,7 +1542,7 @@ async def main_menu(callback: types.CallbackQuery):
 
     data = get_user_state(user_id)
     data["state"] = "MENU"
-    await edit_or_send(user_id, get_text(user_id, "msg_menu"), reply_markup=show_main_menu_builder(user_id, callback.from_user).as_markup())
+    await edit_or_send(user_id, get_text(user_id, "msg_menu"), reply_markup=show_main_menu_builder(user_id, user_obj=callback.from_user).as_markup())
     try: await callback.answer()
     except Exception: pass
 
@@ -1551,54 +1551,6 @@ def ru_plural(value, one, few, many):
     if 11 <= value % 100 <= 14:
         return many
     return one if value % 10 == 1 else few if 2 <= value % 10 <= 4 else many
-
-
-@dp.callback_query(F.data == "menu_247")
-async def menu_247(callback: types.CallbackQuery):
-    uid = callback.from_user.id
-    if not await ensure_client_connected(uid):
-        await callback.answer("Сначала подключите аккаунт.", show_alert=True)
-        return
-    cfg = MEMORY_DB["config"].get(str(uid), {})
-    active = cfg.get("online_247", False)
-    text = "Режим 24/7.\n\nСтатус: " + ("🟢Включен" if active else "🔴Выключен")
-    text += "\nСоздаст статус вечный онлайн."
-    if get_user_state(uid).get("online_error") and active:
-        text += "\n⚠️ " + get_user_state(uid)["online_error"]
-    builder = InlineKeyboardBuilder()
-    builder.button(text="🔴Выключить" if active else "🟢Включить", callback_data="toggle_247")
-    builder.button(text="Назад в меню 🏠", callback_data="main_menu")
-    builder.adjust(1)
-    await edit_or_send(uid, text, reply_markup=builder.as_markup())
-    try: await callback.answer()
-    except TelegramBadRequest: pass
-
-
-@dp.callback_query(F.data == "toggle_247")
-async def toggle_247(callback: types.CallbackQuery):
-    uid = callback.from_user.id
-    if not await ensure_client_connected(uid):
-        await callback.answer("Сначала подключите аккаунт.", show_alert=True)
-        return
-    data = get_user_state(uid)
-    cfg = MEMORY_DB["config"][str(uid)]
-    cfg["online_247"] = not cfg.get("online_247", False)
-    persist_user_config_now(uid, cfg)
-    if cfg["online_247"]:
-        try: await callback.answer()
-        except TelegramBadRequest: pass
-        await send_online_status(uid)
-        start_online_mode(uid)
-    else:
-        task = data.get("online_task")
-        if task:
-            task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
-        data["online_task"] = None
-        # Прекращаем продление статуса. Не посылаем глобальный offline,
-        # чтобы не сбивать присутствие пользователя на другом устройстве.
-        data.pop("online_error", None)
-    await menu_247(callback)
 
 
 @dp.callback_query(F.data == "menu_activity")
