@@ -308,6 +308,30 @@ TIME_STYLES = (
     ("𝟎𝟏𝟐𝟑𝟒𝟓𝟔𝟕𝟖𝟗", "꧁", "꧂", ":"),
     ("𝟶𝟷𝟸𝟹𝟺𝟻𝟼𝟽𝟾𝟿", "〈 ", " 〉", "∶"),
     ("⁰¹²³⁴⁵⁶⁷⁸⁹", "˚₊‧ ", " ‧₊˚", ":"),
+    ('𝟬𝟭𝟮𝟯𝟰𝟱𝟲𝟳𝟴𝟵', '༺', '༻', ':'),
+    ('𝟎𝟏𝟐𝟑𝟒𝟓𝟔𝟕𝟖𝟗', '⫷', '⫸', '∶'),
+    ('𝟘𝟙𝟚𝟛𝟜𝟝𝟞𝟟𝟠𝟡', '⟪', '⟫', ':'),
+    ('𝟶𝟷𝟸𝟹𝟺𝟻𝟼𝟽𝟾𝟿', '〔', '〕', '∶'),
+    ('𝟢𝟣𝟤𝟥𝟦𝟧𝟨𝟩𝟪𝟫', '⦗', '⦘', ':'),
+    ('0123456789', '❮', '❯', '∶'),
+    ('𝟬𝟭𝟮𝟯𝟰𝟱𝟲𝟳𝟴𝟵', '⌜ ', ' ⌝', ':'),
+    ('𝟎𝟏𝟐𝟑𝟒𝟓𝟔𝟕𝟖𝟗', '⌞ ', ' ⌟', '∶'),
+    ('𝟘𝟙𝟚𝟛𝟜𝟝𝟞𝟟𝟠𝟡', '✦ ┊', '┊ ✦', ':'),
+    ('𝟶𝟷𝟸𝟹𝟺𝟻𝟼𝟽𝟾𝟿', '⊹ ', ' ⊹', '∶'),
+    ('𝟢𝟣𝟤𝟥𝟦𝟧𝟨𝟩𝟪𝟫', '⟡ ', ' ⟡', ':'),
+    ('0123456789', '⋄ ⋆ ', ' ⋆ ⋄', '∶'),
+    ('𝟬𝟭𝟮𝟯𝟰𝟱𝟲𝟳𝟴𝟵', '☾ ', ' ☽', ':'),
+    ('𝟎𝟏𝟐𝟑𝟒𝟓𝟔𝟕𝟖𝟗', '☽ ⋆ ', ' ⋆ ☾', '∶'),
+    ('𝟘𝟙𝟚𝟛𝟜𝟝𝟞𝟟𝟠𝟡', '✩ ', ' ✩', ':'),
+    ('𝟶𝟷𝟸𝟹𝟺𝟻𝟼𝟽𝟾𝟿', '⭒ ', ' ⭒', '∶'),
+    ('𝟢𝟣𝟤𝟥𝟦𝟧𝟨𝟩𝟪𝟫', '♛ ', ' ♛', ':'),
+    ('0123456789', '♠ ', ' ♠', '∶'),
+    ('𝟬𝟭𝟮𝟯𝟰𝟱𝟲𝟳𝟴𝟵', '❖ ', ' ❖', ':'),
+    ('𝟎𝟏𝟐𝟑𝟒𝟓𝟔𝟕𝟖𝟗', '⚜ ', ' ⚜', '∶'),
+    ('𝟘𝟙𝟚𝟛𝟜𝟝𝟞𝟟𝟠𝟡', '∞ ', ' ∞', ':'),
+    ('𝟶𝟷𝟸𝟹𝟺𝟻𝟼𝟽𝟾𝟿', '⸙ ', ' ⸙', '∶'),
+    ('𝟢𝟣𝟤𝟥𝟦𝟧𝟨𝟩𝟪𝟫', '༄ ', ' ༄', ':'),
+    ('0123456789', 'ミ★ ', ' ★彡', '∶'),
 )
 
 
@@ -1502,7 +1526,7 @@ def show_main_menu_builder(user_id, user_obj: types.User = None):
     builder.button(text=get_text(user_id, "btn_timenick"), callback_data="menu_timenick")
     if user_id == ADMIN_ID:
         builder.button(text="Админ меню 🛠", callback_data="admin_menu")
-    builder.adjust(2, 2, 1)
+    builder.adjust(1)
     return builder
 
 @dp.callback_query(F.data == "main_menu")
@@ -1634,7 +1658,7 @@ async def menu_autoresponder(callback: types.CallbackQuery):
     builder.button(text=btn_toggle_text, callback_data="toggle_autoresponder")
     builder.button(text=get_text(user_id, "btn_autoresp_setup"), callback_data="autoresp_setup")
     builder.button(text=get_text(user_id, "btn_back_menu"), callback_data="main_menu")
-    builder.adjust(2, 1, 1)
+    builder.adjust(1)
 
     await edit_or_send(user_id, text, reply_markup=builder.as_markup(), parse_mode="Markdown")
     try: await callback.answer()
@@ -1715,23 +1739,50 @@ async def menu_timenick(callback: types.CallbackQuery):
     builder.button(text=get_text(user_id, "btn_tz_select"), callback_data="tz_select")
     builder.button(text="Стили 🎨", callback_data="time_styles")
     builder.button(text=get_text(user_id, "btn_back_menu"), callback_data="main_menu")
-    builder.adjust(2, 1, 1)
+    builder.adjust(1)
 
     await edit_or_send(user_id, text, reply_markup=builder.as_markup())
     try: await callback.answer()
     except Exception: pass
 
+TIME_STYLES_PER_PAGE = 15
+
+
+def build_time_styles_markup(raw_time, page=0):
+    pages = (len(TIME_STYLES) + TIME_STYLES_PER_PAGE - 1) // TIME_STYLES_PER_PAGE
+    page = max(0, min(page, pages - 1))
+    builder = InlineKeyboardBuilder()
+    first = page * TIME_STYLES_PER_PAGE
+    for index in range(first, min(first + TIME_STYLES_PER_PAGE, len(TIME_STYLES))):
+        builder.button(text=format_profile_time(raw_time, index), callback_data=f"time_style_{index}")
+    builder.adjust(3)
+    # Циклическая навигация: обе стрелки работают на каждой странице.
+    builder.row(
+        types.InlineKeyboardButton(text="⬅️", callback_data=f"time_styles_page_{(page - 1) % pages}"),
+        types.InlineKeyboardButton(text=f"{page + 1}/{pages}", callback_data="ignore"),
+        types.InlineKeyboardButton(text="➡️", callback_data=f"time_styles_page_{(page + 1) % pages}"),
+    )
+    builder.row(types.InlineKeyboardButton(text="Назад ⬅️", callback_data="menu_timenick"))
+    return builder.as_markup()
+
+
 @dp.callback_query(F.data == "time_styles")
+@dp.callback_query(F.data.startswith("time_styles_page_"))
 async def time_styles(callback: types.CallbackQuery):
     uid = callback.from_user.id
+    page = 0
+    if callback.data and callback.data.startswith("time_styles_page_"):
+        try:
+            page = int(callback.data.rsplit("_", 1)[1])
+            if not 0 <= page < (len(TIME_STYLES) + TIME_STYLES_PER_PAGE - 1) // TIME_STYLES_PER_PAGE:
+                raise ValueError
+        except (ValueError, IndexError):
+            await callback.answer("Страница не найдена.")
+            return
     cfg = MEMORY_DB["config"].get(str(uid), {})
     now = get_world_utc_datetime() + datetime.timedelta(hours=int(cfg.get("timezone_offset", 5)))
-    builder = InlineKeyboardBuilder()
-    for index in range(len(TIME_STYLES)):
-        builder.button(text=format_profile_time(now.strftime("%H:%M"), index), callback_data=f"time_style_{index}")
-    builder.button(text="Назад ⬅️", callback_data="menu_timenick")
-    builder.adjust(3, 3, 3, 3, 3, 3, 3, 1)
-    await edit_or_send(uid, "Выберите стиль:", reply_markup=builder.as_markup())
+    await edit_or_send(uid, "Выберите стиль:",
+                       reply_markup=build_time_styles_markup(now.strftime("%H:%M"), page))
     await callback.answer()
 
 
