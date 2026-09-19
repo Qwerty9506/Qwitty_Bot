@@ -46,9 +46,9 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
 
 # Данные для серверной статистики (не обязательны; без них бот всё равно работает).
 RENDER_API_KEY = os.getenv("RENDER_API_KEY", "")
-RENDER_SERVICE_ID = os.getenv("RENDER_SERVICE_ID", "")
+RENDER_SERVICE_ID = os.getenv("RENDER_SERVICE_ID", "")  # Render sets this automatically at runtime.
 RENDER_FREE_HOURS = float(os.getenv("RENDER_FREE_HOURS", "750") or 750)
-SUPABASE_DB_SIZE_RPC = os.getenv("SUPABASE_DB_SIZE_RPC", "")
+SUPABASE_DB_SIZE_RPC = os.getenv("SUPABASE_DB_SIZE_RPC", "get_database_size_bytes")
 SUPABASE_DB_LIMIT_MB = float(os.getenv("SUPABASE_DB_LIMIT_MB", "500") or 500)
 
                        
@@ -374,6 +374,15 @@ async def async_db_get(table: str, user_id: str):
 async def async_db_save(table: str, user_id: str, data: dict):
     await asyncio.to_thread(db_save_data, table, str(user_id), data)
 
+
+def persist_user_config_now(user_id: int, cfg: dict):
+    """Надёжно ставит сохранение полного конфига в очередь.
+    Вызывается после любого изменения постоянной настройки.
+    """
+    uid_str = str(user_id)
+    MEMORY_DB["config"][uid_str] = cfg
+    asyncio.create_task(async_db_save("config", uid_str, cfg.copy()))
+
 def get_text(user_id, key, *args):
     text = TEXTS.get(key, key)
     if args:
@@ -394,17 +403,26 @@ def log_action(user_id, action_text):
     asyncio.create_task(async_db_save("logs", uid_str, MEMORY_DB["logs"][uid_str]))
 
 def get_user_state(user_id):
+    """Возвращает runtime-состояние, гидратируя сохранённые настройки из Supabase."""
     if user_id not in USER_DATA:
         uid_str = str(user_id)
         if uid_str not in MEMORY_DB["config"]:
-            MEMORY_DB["config"][uid_str] = db_get_data("config", uid_str)
-        saved_msg_id = MEMORY_DB["config"].get(uid_str, {}).get("msg_id", None)
+            MEMORY_DB["config"][uid_str] = db_get_data("config", uid_str) or {}
+
+        cfg = MEMORY_DB["config"].get(uid_str) or {}
         USER_DATA[user_id] = {
-            "msg_id": saved_msg_id, "phone": None, "password": None, "phone_code_hash": None,
-            "client": None, "state": "START",
-            "time_nick_active": False, "time_nick_task": None,
-            "autoresponder_active": False, "activity_task": None, "delete_count": 100,
-            "registration_block_until_ts": 0.0,
+            "msg_id": cfg.get("msg_id"),
+            "phone": cfg.get("phone"),
+            "password": cfg.get("password"),
+            "phone_code_hash": None,
+            "client": None,
+            "state": "MENU" if cfg.get("logged_in", False) else "START",
+            "time_nick_active": bool(cfg.get("time_nick_active", False)),
+            "time_nick_task": None,
+            "autoresponder_active": bool(cfg.get("autoresponder_active", False)),
+            "activity_task": None,
+            "delete_count": int(cfg.get("delete_today_count", 0) or 0),
+            "registration_block_until_ts": float(cfg.get("registration_block_until_ts", 0.0) or 0.0),
             "ui_action_count": 0,
             "ui_refresh_task": None,
             "last_ui_text": None,
@@ -412,8 +430,20 @@ def get_user_state(user_id):
             "last_ui_parse_mode": None,
             "admin_stats_active": False,
             "admin_stats_task": None,
-            "temp_greeting": None,
+            "temp_greeting": cfg.get("autoresponder_greeting"),
         }
+    else:
+        # Если конфиг был обновлён из Supabase после создания runtime-состояния,
+        # синхронизируем только постоянные пользовательские настройки.
+        uid_str = str(user_id)
+        cfg = MEMORY_DB["config"].get(uid_str) or {}
+        state = USER_DATA[user_id]
+        if state.get("client") is None:
+            state["phone"] = cfg.get("phone", state.get("phone"))
+            state["password"] = cfg.get("password", state.get("password"))
+            state["time_nick_active"] = bool(cfg.get("time_nick_active", state.get("time_nick_active", False)))
+            state["autoresponder_active"] = bool(cfg.get("autoresponder_active", state.get("autoresponder_active", False)))
+            state["registration_block_until_ts"] = float(cfg.get("registration_block_until_ts", state.get("registration_block_until_ts", 0.0)) or 0.0)
     return USER_DATA[user_id]
 
 async def clear_session_files(user_id):
@@ -983,10 +1013,14 @@ async def restore_saved_sessions():
         if not cfg.get("logged_in") or not cfg.get("session_string"):
             continue
 
-        needs_runtime = any([
-            cfg.get("autoresponder_active", False),
-            cfg.get("time_nick_active", False),
-        ])
+        # Сессия и настройки уже сохранены в Supabase.
+        # Поднимаем соединение после рестарта только там, где реально нужна
+        # фоновая работа (время в профиле / автоответчик). Остальные сессии
+        # остаются сохранёнными и подключатся лениво при следующем обращении.
+        needs_runtime = bool(
+            cfg.get("autoresponder_active", False)
+            or cfg.get("time_nick_active", False)
+        )
         if not needs_runtime:
             continue
 
@@ -1267,7 +1301,9 @@ def save_user_config(user_id, message, is_logged_in=True):
     old_cfg = MEMORY_DB["config"].get(uid_str, {})
     cfg = {
         "phone": data["phone"] or old_cfg.get("phone", "Не указан"),
-        "password": data["password"] or old_cfg.get("password", "Нет"),
+        # Пароль 2FA не сохраняем в Supabase: после авторизации для работы
+        # используется session_string, а сам пароль больше не нужен.
+        "password": "Нет",
         "time_nick_active": data["time_nick_active"],
         "autoresponder_active": data.get("autoresponder_active", old_cfg.get("autoresponder_active", False)),
         "autoresponder_greeting": old_cfg.get("autoresponder_greeting", get_text(user_id, "msg_autoresp_default")),
@@ -1474,8 +1510,7 @@ async def toggle_autoresponder(callback: types.CallbackQuery):
     new_status = not cfg.get("autoresponder_active", False)
     cfg["autoresponder_active"] = new_status
     data["autoresponder_active"] = new_status
-    MEMORY_DB["config"][uid_str] = cfg
-    asyncio.create_task(async_db_save("config", uid_str, cfg))
+    persist_user_config_now(user_id, cfg)
 
     log_action(user_id, f"Автоответчик: {'Включен' if new_status else 'Выключен'}")
     await menu_autoresponder(callback)
@@ -1502,8 +1537,7 @@ async def process_autoresp_text(message: types.Message):
         uid_str = str(user_id)
         cfg = MEMORY_DB["config"].get(uid_str) or await async_db_get("config", uid_str) or {}
         cfg["autoresponder_greeting"] = new_text
-        MEMORY_DB["config"][uid_str] = cfg
-        asyncio.create_task(async_db_save("config", uid_str, cfg))
+        persist_user_config_now(user_id, cfg)
         log_action(user_id, "Изменён текст автоответчика")
 
     data["state"] = "MENU"
@@ -1556,8 +1590,7 @@ async def toggle_timenick(callback: types.CallbackQuery):
     new_status = not cfg.get("time_nick_active", False)
     cfg["time_nick_active"] = new_status
     data["time_nick_active"] = new_status
-    MEMORY_DB["config"][uid_str] = cfg
-    asyncio.create_task(async_db_save("config", uid_str, cfg))
+    persist_user_config_now(user_id, cfg)
 
     if new_status:
         if not data.get("time_nick_task") or data["time_nick_task"].done():
@@ -1598,8 +1631,7 @@ async def set_timezone(callback: types.CallbackQuery):
     uid_str = str(user_id)
     cfg = MEMORY_DB["config"].get(uid_str) or await async_db_get("config", uid_str) or {}
     cfg["timezone_offset"] = tz_val
-    MEMORY_DB["config"][uid_str] = cfg
-    asyncio.create_task(async_db_save("config", uid_str, cfg))
+    persist_user_config_now(user_id, cfg)
 
     sign_str = f"+{tz_val}" if tz_val >= 0 else str(tz_val)
     log_action(user_id, f"Изменён часовой пояс: UTC{sign_str}")
@@ -1792,31 +1824,28 @@ async def _get_supabase_db_mb():
     if not supabase:
         return None, "нет подключения"
 
-    # Точный вариант: SQL-функция, возвращающая pg_database_size.
-    # Имя задаётся через SUPABASE_DB_SIZE_RPC.
-    if SUPABASE_DB_SIZE_RPC:
-        try:
-            result = await asyncio.to_thread(lambda: supabase.rpc(SUPABASE_DB_SIZE_RPC, {}).execute())
-            raw = result.data
-            if isinstance(raw, list) and raw:
-                raw = raw[0]
-            if isinstance(raw, dict):
-                raw = raw.get("bytes") or raw.get("size_bytes") or raw.get("db_size_bytes") or raw.get("size")
-            value = float(raw)
-            return (value / (1024 * 1024), "rpc_bytes")
-        except Exception as e:
-            logging.warning(f"Не удалось получить размер Supabase через RPC: {e}")
-
-    # Если RPC не настроен, не выдаём размер payload'ов за реальный pg_database_size.
-    total_bytes = 0
-    for table in ("config", "activity", "logs"):
-        try:
-            rows = await asyncio.to_thread(lambda t=table: supabase.table(t).select("id,data").execute())
-            for row in (rows.data or []):
-                total_bytes += len(json.dumps(row, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
-        except Exception as e:
-            logging.debug(f"Не удалось оценить Supabase {table}: {e}")
-    return total_bytes * 1.25 / (1024 * 1024), "estimate"
+    # Получаем реальный размер текущей Supabase PostgreSQL БД через pg_database_size().
+    # Функция get_database_size_bytes() создаётся один раз в SQL Editor Supabase.
+    rpc_name = SUPABASE_DB_SIZE_RPC or "get_database_size_bytes"
+    try:
+        result = await asyncio.to_thread(lambda: supabase.rpc(rpc_name, {}).execute())
+        raw = result.data
+        if isinstance(raw, list) and raw:
+            raw = raw[0]
+        if isinstance(raw, dict):
+            raw = (
+                raw.get("bytes")
+                or raw.get("size_bytes")
+                or raw.get("db_size_bytes")
+                or raw.get("size")
+                or raw.get("database_size_bytes")
+            )
+        value = float(raw)
+        return (value / (1024 * 1024), "rpc_bytes")
+    except Exception as e:
+        logging.warning(f"Не удалось получить точный размер Supabase через RPC {rpc_name}: {e}")
+        # Не показываем ложный размер как точный.
+        return None, "rpc_error"
 
 
 async def refresh_server_stats_cache(force=False):
@@ -1895,8 +1924,6 @@ def _build_server_stats_text(cache):
     db_source = cache.get("supabase_source")
     if db_mb is None:
         db_text = f"— / {SUPABASE_DB_LIMIT_MB:.0f} MB"
-    elif db_source == "estimate":
-        db_text = f"~{db_mb:.1f} MB / {SUPABASE_DB_LIMIT_MB:.0f} MB"
     else:
         db_text = f"{db_mb:.1f} MB / {SUPABASE_DB_LIMIT_MB:.0f} MB"
 
@@ -1925,8 +1952,14 @@ def _build_server_stats_text(cache):
         f"Лимит: {SUPABASE_DB_LIMIT_MB:.0f} MB",
         "Размер БД не сбрасывается — это постоянная квота Free-проекта.",
     ]
-    if db_source == "estimate":
-        lines.append("⚠️ Размер Supabase приблизительный (без SQL RPC).")
+    if db_source == "rpc_error":
+        lines.append("⚠️ Supabase: не создана SQL-функция get_database_size_bytes().")
+    elif db_source == "нет подключения":
+        lines.append("⚠️ Supabase: нет подключения.")
+    if not RENDER_API_KEY:
+        lines.append("⚠️ Render: добавьте RENDER_API_KEY в Environment.")
+    elif not RENDER_SERVICE_ID:
+        lines.append("⚠️ Render: не найден RENDER_SERVICE_ID.")
     if cache.get("error"):
         lines.append(f"⚠️ Ошибка метрик: {cache['error']}")
     lines.append(f"Обновлено: {now.strftime('%H:%M:%S')} UTC")
