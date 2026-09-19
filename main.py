@@ -45,8 +45,9 @@ SUPABASE_URL = os.getenv("SUPABASE_URL", "")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
 
 # Данные для серверной статистики (не обязательны; без них бот всё равно работает).
-RENDER_API_KEY = os.getenv("RENDER_API_KEY", "")
-RENDER_SERVICE_ID = os.getenv("RENDER_SERVICE_ID", "")  # Render sets this automatically at runtime.
+RENDER_API_KEY = os.getenv("RENDER_API_KEY", "").strip()
+# Render автоматически предоставляет RENDER_SERVICE_ID во время работы сервиса.
+RENDER_SERVICE_ID = os.getenv("RENDER_SERVICE_ID", "").strip()
 RENDER_FREE_HOURS = float(os.getenv("RENDER_FREE_HOURS", "750") or 750)
 SUPABASE_DB_SIZE_RPC = os.getenv("SUPABASE_DB_SIZE_RPC", "get_database_size_bytes")
 SUPABASE_DB_LIMIT_MB = float(os.getenv("SUPABASE_DB_LIMIT_MB", "500") or 500)
@@ -147,7 +148,13 @@ if SUPABASE_URL and SUPABASE_KEY:
     except Exception as e:
         logging.error(f"❌ Ошибка подключения к Supabase: {e}")
 
-        
+logging.info(
+    "🖥 Render API config: key=%s, service_id=%s, render_env=%s",
+    "YES" if RENDER_API_KEY else "NO",
+    RENDER_SERVICE_ID or "MISSING",
+    os.getenv("RENDER", "false"),
+)
+
 SESSIONS_DIR = "sessions"
 if not os.path.exists(SESSIONS_DIR):
     os.makedirs(SESSIONS_DIR)
@@ -1659,6 +1666,9 @@ SERVER_STATS_CACHE = {
     "render_cpu": None,
     "render_cpu_unit": None,
     "render_memory_bytes": None,
+    "render_api_error": None,
+    "render_service_name": None,
+    "render_service_plan": None,
     "render_usage_updated_at": 0.0,
     "supabase_db_mb": None,
     "supabase_source": None,
@@ -1727,30 +1737,65 @@ def _series_values(payload):
     return out
 
 
-async def _render_get_json(endpoint, params, timeout=8):
-    if not RENDER_API_KEY or not RENDER_SERVICE_ID:
-        return None
+async def _render_get_json(endpoint, params=None, timeout=8):
+    """GET к Render API с сохранением точной ошибки для админской статистики."""
+    if not RENDER_API_KEY:
+        return None, "RENDER_API_KEY не задан"
+    if not RENDER_SERVICE_ID:
+        return None, "RENDER_SERVICE_ID не найден Render'ом"
+
     headers = {
         "Accept": "application/json",
         "Authorization": f"Bearer {RENDER_API_KEY}",
     }
     url = f"https://api.render.com/v1/metrics/{endpoint}"
     try:
-        client_timeout = __import__("aiohttp").ClientTimeout(total=timeout)
-        async with __import__("aiohttp").ClientSession(timeout=client_timeout) as session:
-            async with session.get(url, params=params, headers=headers) as response:
+        import aiohttp
+        client_timeout = aiohttp.ClientTimeout(total=timeout)
+        async with aiohttp.ClientSession(timeout=client_timeout) as session:
+            async with session.get(url, params=params or {}, headers=headers) as response:
+                body = await response.text()
                 if response.status != 200:
-                    body = await response.text()
-                    raise RuntimeError(f"HTTP {response.status}: {body[:300]}")
-                return await response.json()
+                    return None, f"HTTP {response.status}: {body[:250]}"
+                try:
+                    return json.loads(body), None
+                except Exception as e:
+                    return None, f"некорректный JSON: {e}"
     except Exception as e:
-        logging.warning(f"Ошибка Render API ({endpoint}): {e}")
-        return None
+        return None, f"сетевaя ошибка: {e}"
+
+
+async def _render_get_service(timeout=8):
+    """Проверяет API-ключ и доступ к конкретному сервису."""
+    if not RENDER_API_KEY:
+        return None, "RENDER_API_KEY не задан"
+    if not RENDER_SERVICE_ID:
+        return None, "RENDER_SERVICE_ID не найден Render'ом"
+
+    headers = {
+        "Accept": "application/json",
+        "Authorization": f"Bearer {RENDER_API_KEY}",
+    }
+    url = f"https://api.render.com/v1/services/{RENDER_SERVICE_ID}"
+    try:
+        import aiohttp
+        client_timeout = aiohttp.ClientTimeout(total=timeout)
+        async with aiohttp.ClientSession(timeout=client_timeout) as session:
+            async with session.get(url, headers=headers) as response:
+                body = await response.text()
+                if response.status != 200:
+                    return None, f"HTTP {response.status}: {body[:250]}"
+                return json.loads(body), None
+    except Exception as e:
+        return None, f"сетевaя ошибка: {e}"
 
 
 async def _get_render_stats(include_usage=True):
     now = datetime.datetime.now(datetime.timezone.utc)
-    if not RENDER_API_KEY or not RENDER_SERVICE_ID:
+
+    service_info, service_error = await _render_get_service()
+    if service_error:
+        # Даже когда API не отвечает, локальные CPU/RAM остаются полезными.
         try:
             cpu = psutil.cpu_percent(interval=None)
         except Exception:
@@ -1761,16 +1806,19 @@ async def _get_render_stats(include_usage=True):
             memory_bytes = None
         return {
             "used_hours": None,
-            "instance_count": 1,
+            "instance_count": None,
             "cpu": cpu,
             "cpu_unit": "% (локально)",
             "memory_bytes": memory_bytes,
+            "api_error": service_error,
+            "service_name": None,
+            "service_plan": None,
         }
 
     start_month = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     current_params = {
         "resource": RENDER_SERVICE_ID,
-        "startTime": (now - datetime.timedelta(minutes=2)).isoformat().replace("+00:00", "Z"),
+        "startTime": (now - datetime.timedelta(minutes=5)).isoformat().replace("+00:00", "Z"),
         "endTime": now.isoformat().replace("+00:00", "Z"),
         "resolutionSeconds": 30,
     }
@@ -1781,18 +1829,25 @@ async def _get_render_stats(include_usage=True):
         "resolutionSeconds": 900,
     }
 
+    tasks = []
     if include_usage:
-        instance_payload, cpu_payload, memory_payload = await asyncio.gather(
-            _render_get_json("instance-count", usage_params),
-            _render_get_json("cpu", current_params),
-            _render_get_json("memory", current_params),
-        )
+        tasks.append(_render_get_json("instance-count", usage_params))
     else:
-        instance_payload, cpu_payload, memory_payload = await asyncio.gather(
-            asyncio.sleep(0, result=None),
-            _render_get_json("cpu", current_params),
-            _render_get_json("memory", current_params),
-        )
+        tasks.append(asyncio.sleep(0, result=(None, None)))
+    tasks.extend([
+        _render_get_json("cpu", current_params),
+        _render_get_json("memory", current_params),
+    ])
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    def unpack(result):
+        if isinstance(result, Exception):
+            return None, f"исключение: {result}"
+        return result
+
+    instance_payload, instance_error = unpack(results[0])
+    cpu_payload, cpu_error = unpack(results[1])
+    memory_payload, memory_error = unpack(results[2])
 
     instance_values = _series_values(instance_payload or {}) if include_usage else []
     used_hours = None
@@ -1811,12 +1866,21 @@ async def _get_render_stats(include_usage=True):
 
     cpu, cpu_unit = _series_last_value(cpu_payload or {})
     memory_bytes, _ = _series_last_value(memory_payload or {})
+
+    api_errors = []
+    for name, err in (("instance-count", instance_error), ("cpu", cpu_error), ("memory", memory_error)):
+        if err:
+            api_errors.append(f"{name}: {err}")
+
     return {
         "used_hours": used_hours,
         "instance_count": instance_count,
         "cpu": cpu,
         "cpu_unit": cpu_unit,
         "memory_bytes": memory_bytes,
+        "api_error": "; ".join(api_errors) if api_errors else None,
+        "service_name": service_info.get("name") if isinstance(service_info, dict) else None,
+        "service_plan": service_info.get("plan") if isinstance(service_info, dict) else None,
     }
 
 
@@ -1870,6 +1934,9 @@ async def refresh_server_stats_cache(force=False):
                     "render_cpu": render_stats.get("cpu"),
                     "render_cpu_unit": render_stats.get("cpu_unit"),
                     "render_memory_bytes": render_stats.get("memory_bytes"),
+                    "render_api_error": render_stats.get("api_error"),
+                    "render_service_name": render_stats.get("service_name"),
+                    "render_service_plan": render_stats.get("service_plan"),
                 })
                 if render_stats.get("used_hours") is not None:
                     SERVER_STATS_CACHE["render_used_hours"] = render_stats.get("used_hours")
@@ -1877,6 +1944,9 @@ async def refresh_server_stats_cache(force=False):
             elif need_usage_refresh:
                 # Обновляем долгий monthly usage даже если 30-секундные CPU/RAM метрики свежие.
                 render_stats = await _get_render_stats(include_usage=True)
+                SERVER_STATS_CACHE["render_api_error"] = render_stats.get("api_error")
+                SERVER_STATS_CACHE["render_service_name"] = render_stats.get("service_name")
+                SERVER_STATS_CACHE["render_service_plan"] = render_stats.get("service_plan")
                 if render_stats.get("used_hours") is not None:
                     SERVER_STATS_CACHE["render_used_hours"] = render_stats.get("used_hours")
                     SERVER_STATS_CACHE["render_instance_count"] = render_stats.get("instance_count")
@@ -1956,12 +2026,23 @@ def _build_server_stats_text(cache):
         lines.append("⚠️ Supabase: не создана SQL-функция get_database_size_bytes().")
     elif db_source == "нет подключения":
         lines.append("⚠️ Supabase: нет подключения.")
-    if not RENDER_API_KEY:
-        lines.append("⚠️ Render: добавьте RENDER_API_KEY в Environment.")
+    if cache.get("render_service_name"):
+        service_label = cache.get("render_service_name")
+        plan_label = cache.get("render_service_plan")
+        if plan_label:
+            lines.append(f"Сервис: {service_label} ({plan_label})")
+        else:
+            lines.append(f"Сервис: {service_label}")
+    if cache.get("render_api_error"):
+        lines.append(f"⚠️ Render API: {cache['render_api_error']}")
+    elif not RENDER_API_KEY:
+        lines.append("⚠️ Render API: RENDER_API_KEY не задан.")
     elif not RENDER_SERVICE_ID:
-        lines.append("⚠️ Render: не найден RENDER_SERVICE_ID.")
+        lines.append("⚠️ Render API: RENDER_SERVICE_ID не найден.")
+    else:
+        lines.append("✅ Render API: подключён")
     if cache.get("error"):
-        lines.append(f"⚠️ Ошибка метрик: {cache['error']}")
+        lines.append(f"⚠️ Ошибка статистики: {cache['error']}")
     lines.append(f"Обновлено: {now.strftime('%H:%M:%S')} UTC")
     return "\n".join(lines)
 
