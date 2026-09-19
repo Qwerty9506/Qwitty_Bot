@@ -7,8 +7,6 @@ import time
 import glob
 import logging
 import re
-import json
-import math
 import psutil
 import ntplib
 from aiohttp import web
@@ -29,7 +27,7 @@ asyncio.set_event_loop(loop)
 from aiogram import Bot, Dispatcher, types, F, BaseMiddleware
 from aiogram.filters import CommandStart
 from aiogram.utils.keyboard import InlineKeyboardBuilder
-from aiogram.exceptions import TelegramBadRequest
+from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
 
 from pyrogram import Client, enums, filters
 from pyrogram.handlers import MessageHandler
@@ -44,11 +42,6 @@ API_HASH = os.getenv("API_HASH", "")
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
 
-# Данные для серверной статистики (не обязательны; без них бот всё равно работает).
-RENDER_API_KEY = os.getenv("RENDER_API_KEY", "").strip()
-# Render автоматически предоставляет RENDER_SERVICE_ID во время работы сервиса.
-RENDER_SERVICE_ID = os.getenv("RENDER_SERVICE_ID", "").strip()
-RENDER_FREE_HOURS = float(os.getenv("RENDER_FREE_HOURS", "750") or 750)
 SUPABASE_DB_SIZE_RPC = os.getenv("SUPABASE_DB_SIZE_RPC", "get_database_size_bytes")
 SUPABASE_DB_LIMIT_MB = float(os.getenv("SUPABASE_DB_LIMIT_MB", "500") or 500)
 
@@ -146,12 +139,6 @@ if SUPABASE_URL and SUPABASE_KEY:
     except Exception as e:
         logging.error(f"❌ Ошибка подключения к Supabase: {e}")
 
-logging.info(
-    "🖥 Render API config: key=%s, service_id=%s, render_env=%s",
-    "YES" if RENDER_API_KEY else "NO",
-    RENDER_SERVICE_ID or "MISSING",
-    os.getenv("RENDER", "false"),
-)
 
 SESSIONS_DIR = "sessions"
 if not os.path.exists(SESSIONS_DIR):
@@ -310,6 +297,17 @@ TIME_STYLES = (
     ("⁰¹²³⁴⁵⁶⁷⁸⁹", "✦ ", " ✦", ":"),
     ("₀₁₂₃₄₅₆₇₈₉", "⌁ ", " ⌁", ":"),
     ("⓪①②③④⑤⑥⑦⑧⑨", "", " ♡", ":"),
+    ("𝟬𝟭𝟮𝟯𝟰𝟱𝟲𝟳𝟴𝟵", "✧ ", " ✧", ":"),
+    ("𝟎𝟏𝟐𝟑𝟒𝟓𝟔𝟕𝟖𝟗", "⟨", "⟩", "∶"),
+    ("𝟘𝟙𝟚𝟛𝟜𝟝𝟞𝟟𝟠𝟡", "⌞", "⌝", ":"),
+    ("𝟶𝟷𝟸𝟹𝟺𝟻𝟼𝟽𝟾𝟿", "「", "」", ":"),
+    ("𝟢𝟣𝟤𝟥𝟦𝟧𝟨𝟩𝟪𝟫", "⋆ ", " ⋆", ":"),
+    ("0123456789", "⏾ ", "", "∶"),
+    ("𝟬𝟭𝟮𝟯𝟰𝟱𝟲𝟳𝟴𝟵", "【", "】", ":"),
+    ("𝟘𝟙𝟚𝟛𝟜𝟝𝟞𝟟𝟠𝟡", "◇ ", " ◇", ":"),
+    ("𝟎𝟏𝟐𝟑𝟒𝟓𝟔𝟕𝟖𝟗", "꧁", "꧂", ":"),
+    ("𝟶𝟷𝟸𝟹𝟺𝟻𝟼𝟽𝟾𝟿", "〈 ", " 〉", "∶"),
+    ("⁰¹²³⁴⁵⁶⁷⁸⁹", "˚₊‧ ", " ‧₊˚", ":"),
 )
 
 
@@ -568,6 +566,10 @@ class RestartMiddleware(BaseMiddleware):
         if isinstance(event, types.CallbackQuery) and event.message:
             user_id = event.from_user.id
             u_state = get_user_state(user_id)
+            stats_task = u_state.get("admin_stats_task")
+            if stats_task and not stats_task.done():
+                stop_admin_server_stats_loop(user_id)
+                await asyncio.gather(stats_task, return_exceptions=True)
             u_state["msg_id"] = event.message.message_id
             u_state["ui_action_count"] = u_state.get("ui_action_count", 0) + 1
 
@@ -724,7 +726,7 @@ async def autoresponder_func(client, message):
     except Exception as e:
         logging.error(f"Ошибка автоответчика: {e}")
 
-ACTIVITY_DAYS = 30
+ACTIVITY_DAYS = 5
 
 async def get_other_sessions_online(client):
     """Оценка по date_active других авторизаций, не точное экранное время."""
@@ -805,27 +807,40 @@ async def activity_tracker_loop(user_id):
         await async_db_save("activity", uid, activity)
 
 
+async def send_online_status(user_id):
+    """Один запрос сразу; последующие не чаще 45 секунд. FloodWait сохраняется."""
+    data = get_user_state(user_id)
+    lock = data.setdefault("online_lock", asyncio.Lock())
+    async with lock:
+        if not MEMORY_DB["config"].get(str(user_id), {}).get("online_247", False):
+            return
+        if time.monotonic() < data.get("online_next_at", 0):
+            return
+        client = data.get("client")
+        if not client or not client.is_connected:
+            data["online_error"] = "Нет соединения с Telegram; ожидаем восстановления."
+            data["online_next_at"] = time.monotonic() + 45
+            return
+        try:
+            await client.invoke(functions.account.UpdateStatus(offline=False))
+            data.pop("online_error", None)
+            data["online_next_at"] = time.monotonic() + 45
+        except FloodWait as e:
+            data["online_next_at"] = time.monotonic() + max(1, e.value) + 1
+            data["online_error"] = f"Пауза Telegram: {e.value} сек."
+        except Unauthorized:
+            await handle_revoked_session(user_id, "сессия отозвана")
+        except Exception as e:
+            data["online_error"] = "Не удалось обновить онлайн; повторим через 45 секунд."
+            data["online_next_at"] = time.monotonic() + 45
+            logging.warning("Режим 24/7 %s: %s", user_id, e)
+
+
 async def online_mode_loop(user_id):
     data = get_user_state(user_id)
     while MEMORY_DB["config"].get(str(user_id), {}).get("online_247", False):
-        client = data.get("client")
-        if not client:
-            return
-        try:
-            if client.is_connected:
-                await client.invoke(functions.account.UpdateStatus(offline=False))
-                data.pop("online_error", None)
-        except FloodWait as e:
-            data["online_error"] = f"Пауза Telegram: {e.value} сек."
-            await asyncio.sleep(max(1, e.value))
-            continue
-        except Unauthorized:
-            await handle_revoked_session(user_id, "сессия отозвана")
-            return
-        except Exception as e:
-            data["online_error"] = "Не удалось обновить онлайн; повторяем автоматически."
-            logging.warning("Режим 24/7 %s: %s", user_id, e)
-        await asyncio.sleep(45)
+        await send_online_status(user_id)
+        await asyncio.sleep(max(1, data.get("online_next_at", 0) - time.monotonic()))
 
 
 def start_online_mode(user_id):
@@ -1481,10 +1496,10 @@ async def process_password(message: types.Message):
 
 def show_main_menu_builder(user_id, user_obj: types.User = None):
     builder = InlineKeyboardBuilder()
-    builder.button(text=get_text(user_id, "btn_autoresp"), callback_data="menu_autoresponder")
-    builder.button(text=get_text(user_id, "btn_timenick"), callback_data="menu_timenick")
     builder.button(text="Статистика 📊", callback_data="menu_activity")
     builder.button(text="Режим 24/7 🟢", callback_data="menu_247")
+    builder.button(text=get_text(user_id, "btn_autoresp"), callback_data="menu_autoresponder")
+    builder.button(text=get_text(user_id, "btn_timenick"), callback_data="menu_timenick")
     if user_id == ADMIN_ID:
         builder.button(text="Админ меню 🛠", callback_data="admin_menu")
     builder.adjust(2, 2, 1)
@@ -1546,6 +1561,9 @@ async def toggle_247(callback: types.CallbackQuery):
     cfg["online_247"] = not cfg.get("online_247", False)
     persist_user_config_now(uid, cfg)
     if cfg["online_247"]:
+        try: await callback.answer()
+        except TelegramBadRequest: pass
+        await send_online_status(uid)
         start_online_mode(uid)
     else:
         task = data.get("online_task")
@@ -1584,7 +1602,7 @@ async def menu_activity(callback: types.CallbackQuery):
         lines.append(f"{date_str} — {formatted_time}")
 
     text = "Статистика активности:\n\n" + "\n".join(lines)
-    text += "\n\nПримерная активность других сессий за 30 дней. Юзербот исключён.\nИстория до начала наблюдения недоступна."
+    text += "\n\nПримерная активность других сессий за 5 дней. Юзербот исключён.\nИстория до начала наблюдения недоступна."
     if get_user_state(user_id).get("activity_error"):
         text += "\n⚠️ " + get_user_state(user_id)["activity_error"]
     builder = InlineKeyboardBuilder()
@@ -1712,7 +1730,7 @@ async def time_styles(callback: types.CallbackQuery):
     for index in range(len(TIME_STYLES)):
         builder.button(text=format_profile_time(now.strftime("%H:%M"), index), callback_data=f"time_style_{index}")
     builder.button(text="Назад ⬅️", callback_data="menu_timenick")
-    builder.adjust(2, 2, 2, 2, 2, 1)
+    builder.adjust(3, 3, 3, 3, 3, 3, 3, 1)
     await edit_or_send(uid, "Выберите стиль:", reply_markup=builder.as_markup())
     await callback.answer()
 
@@ -1820,25 +1838,13 @@ async def ignore_callback(callback: types.CallbackQuery):
 # Серверная статистика (админ)
 # -----------------------------------------------------------------------------
 
-SERVER_STATS_CACHE = {
-    "updated_at": 0.0,
-    "render_used_hours": None,
-    "render_instance_count": None,
-    "render_cpu": None,
-    "render_cpu_unit": None,
-    "render_memory_bytes": None,
-    "render_api_error": None,
-    "render_service_name": None,
-    "render_service_plan": None,
-    "render_usage_updated_at": 0.0,
-    "supabase_db_mb": None,
-    "supabase_source": None,
-    "error": None,
-}
+SERVER_STATS_CACHE = {"supabase_db_mb": None, "supabase_source": None, "updated_at": 0.0}
 SERVER_STATS_LOCK = asyncio.Lock()
-SERVER_STATS_REFRESH_SECONDS = 30
-SERVER_STATS_USAGE_REFRESH_SECONDS = 300
-SERVER_STATS_DB_REFRESH_SECONDS = 300
+PROCESS_STARTED_AT = time.monotonic()
+try:
+    PROCESS_STARTED_AT -= max(0, time.time() - psutil.Process(os.getpid()).create_time())
+except Exception:
+    pass
 
 
 def _next_render_reset_utc(now=None):
@@ -1846,205 +1852,6 @@ def _next_render_reset_utc(now=None):
     if now.month == 12:
         return datetime.datetime(now.year + 1, 1, 1, tzinfo=datetime.timezone.utc)
     return datetime.datetime(now.year, now.month + 1, 1, tzinfo=datetime.timezone.utc)
-
-
-def _format_utc_datetime(dt):
-    return dt.astimezone(datetime.timezone.utc).strftime("%d.%m.%Y %H:%M UTC")
-
-
-def _format_render_duration(hours):
-    if hours is None:
-        return "—"
-    return format_remaining_time(max(0, int(hours * 3600)))
-
-
-def _metric_series(payload):
-    series = payload.get("data", []) if isinstance(payload, dict) else payload
-    return [item for item in series if isinstance(item, dict)] if isinstance(series, list) else []
-
-
-def _metric_timestamp(value):
-    if isinstance(value, (float, int)):
-        return float(value)
-    dt = datetime.datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=datetime.timezone.utc)
-    return dt.timestamp()
-
-
-def _series_values(payload):
-    totals = {}
-    for item in _metric_series(payload):
-        for point in item.get("values") or []:
-            if not isinstance(point, dict):
-                continue
-            try:
-                ts = _metric_timestamp(point.get("timestamp"))
-                value = float(point.get("value"))
-                if not math.isfinite(ts) or not math.isfinite(value):
-                    continue
-            except (ValueError, TypeError, OverflowError):
-                continue
-            totals[ts] = totals.get(ts, 0.0) + value
-    return sorted(totals.items())
-
-
-def _series_last_value(payload):
-    values = _series_values(payload)
-    unit = next((item.get("unit") for item in _metric_series(payload) if item.get("unit")), None)
-    return (values[-1][1] if values else None), unit
-
-
-async def _render_get_json(endpoint, params=None, timeout=8):
-    """GET к Render API с сохранением точной ошибки для админской статистики."""
-    if not RENDER_API_KEY:
-        return None, "RENDER_API_KEY не задан"
-    if not RENDER_SERVICE_ID:
-        return None, "RENDER_SERVICE_ID не найден Render'ом"
-
-    headers = {
-        "Accept": "application/json",
-        "Authorization": f"Bearer {RENDER_API_KEY}",
-    }
-    url = f"https://api.render.com/v1/metrics/{endpoint}"
-    try:
-        import aiohttp
-        client_timeout = aiohttp.ClientTimeout(total=timeout)
-        async with aiohttp.ClientSession(timeout=client_timeout) as session:
-            async with session.get(url, params=params or {}, headers=headers) as response:
-                body = await response.text()
-                if response.status != 200:
-                    return None, f"HTTP {response.status}: {body[:250]}"
-                try:
-                    return json.loads(body), None
-                except Exception as e:
-                    return None, f"некорректный JSON: {e}"
-    except Exception as e:
-        return None, f"сетевaя ошибка: {e}"
-
-
-async def _render_get_service(timeout=8):
-    """Проверяет API-ключ и доступ к конкретному сервису."""
-    if not RENDER_API_KEY:
-        return None, "RENDER_API_KEY не задан"
-    if not RENDER_SERVICE_ID:
-        return None, "RENDER_SERVICE_ID не найден Render'ом"
-
-    headers = {
-        "Accept": "application/json",
-        "Authorization": f"Bearer {RENDER_API_KEY}",
-    }
-    url = f"https://api.render.com/v1/services/{RENDER_SERVICE_ID}"
-    try:
-        import aiohttp
-        client_timeout = aiohttp.ClientTimeout(total=timeout)
-        async with aiohttp.ClientSession(timeout=client_timeout) as session:
-            async with session.get(url, headers=headers) as response:
-                body = await response.text()
-                if response.status != 200:
-                    return None, f"HTTP {response.status}: {body[:250]}"
-                return json.loads(body), None
-    except Exception as e:
-        return None, f"сетевaя ошибка: {e}"
-
-
-async def _get_render_stats(include_usage=True):
-    now = datetime.datetime.now(datetime.timezone.utc)
-
-    service_info, service_error = await _render_get_service()
-    if service_error:
-        # Даже когда API не отвечает, локальные CPU/RAM остаются полезными.
-        try:
-            cpu = await asyncio.to_thread(psutil.Process(os.getpid()).cpu_percent, 0.1)
-        except Exception:
-            cpu = None
-        try:
-            memory_bytes = psutil.Process(os.getpid()).memory_info().rss
-        except Exception:
-            memory_bytes = None
-        return {
-            "used_hours": None,
-            "instance_count": None,
-            "cpu": cpu,
-            "cpu_unit": "% (локально)",
-            "memory_bytes": memory_bytes,
-            "api_error": service_error,
-            "service_name": None,
-            "service_plan": None,
-        }
-
-    start_month = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-    current_params = {
-        "resource": RENDER_SERVICE_ID,
-        "startTime": (now - datetime.timedelta(minutes=15)).isoformat().replace("+00:00", "Z"),
-        "endTime": now.isoformat().replace("+00:00", "Z"),
-        "resolutionSeconds": 60,
-    }
-    usage_params = {
-        "resource": RENDER_SERVICE_ID,
-        "startTime": start_month.isoformat().replace("+00:00", "Z"),
-        "endTime": now.isoformat().replace("+00:00", "Z"),
-        "resolutionSeconds": 900,
-    }
-
-    tasks = []
-    if include_usage:
-        tasks.append(_render_get_json("instance-count", usage_params))
-    else:
-        tasks.append(asyncio.sleep(0, result=(None, None)))
-    tasks.extend([
-        _render_get_json("cpu", current_params),
-        _render_get_json("memory", current_params),
-    ])
-    results = await asyncio.gather(*tasks, return_exceptions=True)
-
-    def unpack(result):
-        if isinstance(result, Exception):
-            return None, f"исключение: {result}"
-        return result
-
-    instance_payload, instance_error = unpack(results[0])
-    cpu_payload, cpu_error = unpack(results[1])
-    memory_payload, memory_error = unpack(results[2])
-
-    instance_values = _series_values(instance_payload or {}) if include_usage else []
-    used_hours = None
-    instance_count = None
-    if instance_values:
-        instance_count = instance_values[-1][1]
-        total_seconds = 0.0
-        for i, (ts, value) in enumerate(instance_values[:-1]):
-            next_ts = instance_values[i + 1][0]
-            step = max(0.0, min(next_ts - ts, 1800.0))
-            total_seconds += step * max(0.0, value)
-        last_ts, last_value = instance_values[-1]
-        tail = max(0.0, min(now.timestamp() - last_ts, 1800.0))
-        total_seconds += tail * max(0.0, last_value)
-        used_hours = total_seconds / 3600.0
-
-    cpu, cpu_unit = _series_last_value(cpu_payload or {})
-    memory_bytes, _ = _series_last_value(memory_payload or {})
-
-    api_errors = []
-    for name, value in (("cpu", cpu), ("memory", memory_bytes)):
-        if value is None:
-            api_errors.append(f"{name}: нет точек за последние 15 минут")
-    if include_usage and not instance_values:
-        api_errors.append("instance-count: нет доступной истории")
-    for name, err in (("instance-count", instance_error), ("cpu", cpu_error), ("memory", memory_error)):
-        if err:
-            api_errors.append(f"{name}: {err}")
-
-    return {
-        "used_hours": used_hours,
-        "instance_count": instance_count,
-        "cpu": cpu,
-        "cpu_unit": cpu_unit,
-        "memory_bytes": memory_bytes,
-        "api_error": "; ".join(api_errors) if api_errors else None,
-        "service_name": service_info.get("name") if isinstance(service_info, dict) else None,
-        "service_plan": (service_info.get("serviceDetails") or {}).get("plan", service_info.get("plan")) if isinstance(service_info, dict) else None,
-    }
 
 
 async def _get_supabase_db_mb():
@@ -2076,145 +1883,53 @@ async def _get_supabase_db_mb():
 
 
 async def refresh_server_stats_cache(force=False):
+    # Только Supabase, не чаще раза в пять минут. Render API не используется.
     async with SERVER_STATS_LOCK:
-        now_ts = time.time()
-        render_cache_fresh = now_ts - SERVER_STATS_CACHE["updated_at"] < SERVER_STATS_REFRESH_SECONDS
-        render_usage_fresh = now_ts - SERVER_STATS_CACHE.get("render_usage_updated_at", 0.0) < SERVER_STATS_USAGE_REFRESH_SECONDS
-        db_cache_fresh = (
-            SERVER_STATS_CACHE["supabase_source"] is not None
-            and now_ts - SERVER_STATS_CACHE.get("supabase_updated_at", 0.0) < SERVER_STATS_DB_REFRESH_SECONDS
-        )
-        if not force and render_cache_fresh and render_usage_fresh and db_cache_fresh:
-            return SERVER_STATS_CACHE
-        try:
-            need_render_refresh = force or not render_cache_fresh
-            need_usage_refresh = force or not render_usage_fresh
-            if need_render_refresh:
-                render_stats = await _get_render_stats(include_usage=need_usage_refresh)
-                SERVER_STATS_CACHE.update({
-                    "updated_at": now_ts,
-                    "render_instance_count": render_stats.get("instance_count"),
-                    "render_cpu": render_stats.get("cpu"),
-                    "render_cpu_unit": render_stats.get("cpu_unit"),
-                    "render_memory_bytes": render_stats.get("memory_bytes"),
-                    "render_api_error": render_stats.get("api_error"),
-                    "render_service_name": render_stats.get("service_name"),
-                    "render_service_plan": render_stats.get("service_plan"),
-                })
-                SERVER_STATS_CACHE["render_used_hours"] = render_stats.get("used_hours")
-                if render_stats.get("used_hours") is not None:
-                    SERVER_STATS_CACHE["render_used_hours"] = render_stats.get("used_hours")
-                    SERVER_STATS_CACHE["render_usage_updated_at"] = now_ts
-            elif need_usage_refresh:
-                # Обновляем долгий monthly usage даже если 30-секундные CPU/RAM метрики свежие.
-                render_stats = await _get_render_stats(include_usage=True)
-                SERVER_STATS_CACHE["render_api_error"] = render_stats.get("api_error")
-                SERVER_STATS_CACHE["render_service_name"] = render_stats.get("service_name")
-                SERVER_STATS_CACHE["render_service_plan"] = render_stats.get("service_plan")
-                SERVER_STATS_CACHE["render_used_hours"] = render_stats.get("used_hours")
-                if render_stats.get("used_hours") is not None:
-                    SERVER_STATS_CACHE["render_used_hours"] = render_stats.get("used_hours")
-                    SERVER_STATS_CACHE["render_instance_count"] = render_stats.get("instance_count")
-                    SERVER_STATS_CACHE["render_usage_updated_at"] = now_ts
-
-            if force or not db_cache_fresh:
-                supabase_db_mb, supabase_source = await _get_supabase_db_mb()
-                SERVER_STATS_CACHE.update({
-                    "supabase_db_mb": supabase_db_mb,
-                    "supabase_source": supabase_source,
-                    "supabase_updated_at": now_ts,
-                })
-            SERVER_STATS_CACHE["error"] = None
-        except Exception as e:
-            SERVER_STATS_CACHE["error"] = str(e)
-            logging.warning(f"Ошибка обновления серверной статистики: {e}")
-        return SERVER_STATS_CACHE
+        if time.monotonic() - SERVER_STATS_CACHE["updated_at"] >= 300 or not SERVER_STATS_CACHE["updated_at"]:
+            value, source = await _get_supabase_db_mb()
+            SERVER_STATS_CACHE.update(supabase_db_mb=value, supabase_source=source, updated_at=time.monotonic())
+    return SERVER_STATS_CACHE
 
 
 def _build_server_stats_text(cache):
     now = datetime.datetime.now(datetime.timezone.utc)
-    reset_at = _next_render_reset_utc(now)
-    used_hours = cache.get("render_used_hours")
-
-    if used_hours is not None:
-        render_limit_text = f"{_format_render_duration(used_hours)} (оценка сервиса)"
-    else:
-        render_limit_text = "Нет данных метрик"
-
-    cpu = cache.get("render_cpu")
-    cpu_unit = str(cache.get("render_cpu_unit") or "")
-    if cpu is None:
-        cpu_text = "—"
-    elif "%" in cpu_unit or "percent" in cpu_unit.lower() or "локально" in cpu_unit.lower():
-        cpu_text = f"{float(cpu):.1f}%" + (" (процесс локально)" if "локально" in cpu_unit else "")
-    else:
-        cpu_text = f"{float(cpu):.3f} {cpu_unit or 'unit'}"
-
-    mem = cache.get("render_memory_bytes")
-    mem_text = f"{mem / (1024 * 1024):.1f} MB" if mem is not None else "—"
-    db_mb = cache.get("supabase_db_mb")
-    db_source = cache.get("supabase_source")
-    if db_mb is None:
-        db_text = f"— / {SUPABASE_DB_LIMIT_MB:.0f} MB"
-    else:
-        db_text = f"{db_mb:.1f} MB / {SUPABASE_DB_LIMIT_MB:.0f} MB"
-
-    try:
-        process_uptime = format_remaining_time(max(0, int(time.time() - psutil.Process(os.getpid()).create_time())))
-    except Exception:
-        process_uptime = "—"
-
-    remaining_to_reset = format_remaining_time(max(0, int((reset_at - now).total_seconds())))
-    lines = [
-        "Статистика сервера:",
-        "",
-        "🟣 Render",
-        f"Время по доступным метрикам месяца: {render_limit_text}",
-        f"Квота Free workspace: {RENDER_FREE_HOURS:g} ч./месяц",
-        "Точный остаток общей квоты: в панели Render (Billing).",
-        f"Сброс лимита: {_format_utc_datetime(reset_at)}",
-        f"До сброса: {remaining_to_reset}",
-        f"CPU: {cpu_text}",
-        f"RAM (API сервиса / локально при ошибке API): {mem_text}",
-        f"Инстансы: {cache.get('render_instance_count') if cache.get('render_instance_count') is not None else '—'}",
-        f"Uptime процесса: {process_uptime}",
-        "",
-        "🟢 Supabase",
-        f"База: {db_text}",
-        f"Лимит: {SUPABASE_DB_LIMIT_MB:.0f} MB",
-        "Размер БД не сбрасывается — это постоянная квота Free-проекта.",
-    ]
-    if db_source == "rpc_error":
-        lines.append("⚠️ Supabase: не создана SQL-функция get_database_size_bytes().")
-    elif db_source == "нет подключения":
-        lines.append("⚠️ Supabase: нет подключения.")
-    if cache.get("render_service_name"):
-        service_label = cache.get("render_service_name")
-        plan_label = cache.get("render_service_plan")
-        if plan_label:
-            lines.append(f"Сервис: {service_label} ({plan_label})")
-        else:
-            lines.append(f"Сервис: {service_label}")
-    if cache.get("render_api_error"):
-        lines.append(f"⚠️ Render API: {cache['render_api_error']}")
-    elif not RENDER_API_KEY:
-        lines.append("⚠️ Render API: RENDER_API_KEY не задан.")
-    elif not RENDER_SERVICE_ID:
-        lines.append("⚠️ Render API: RENDER_SERVICE_ID не найден.")
-    else:
-        lines.append("✅ Render API: подключён")
-    if cache.get("error"):
-        lines.append(f"⚠️ Ошибка статистики: {cache['error']}")
-    lines.append(f"Обновлено: {now.strftime('%H:%M:%S')} UTC")
+    reset = _next_render_reset_utc(now)
+    lines = ["Статистика сервера:", "", "🟣 Render",
+             f"Сброс лимита: {reset.strftime('%d.%m.%Y %H:%M UTC')}",
+             f"До сброса: {format_remaining_time((reset - now).total_seconds())}",
+             f"Аптайм процесса: {format_remaining_time(time.monotonic() - PROCESS_STARTED_AT)}",
+             "", "🟢 Supabase"]
+    size = cache.get("supabase_db_mb")
+    lines.append(f"База: {size:.1f} / {SUPABASE_DB_LIMIT_MB:g} MB" if size is not None else "База: данные недоступны")
     return "\n".join(lines)
 
 
 def build_admin_stats_markup():
     builder = InlineKeyboardBuilder()
-    builder.button(text="Обновить 🔄", callback_data="admin_server_stats_refresh")
     builder.button(text="⬅️ Назад", callback_data="admin_server_stats_back")
-    builder.adjust(1)
     return builder.as_markup()
+
+
+async def _admin_server_stats_loop(user_id):
+    data = get_user_state(user_id)
+    while data.get("admin_stats_active"):
+        await asyncio.sleep(1)
+        if not data.get("admin_stats_active"):
+            return
+        try:
+            await bot.edit_message_text(chat_id=user_id, message_id=data["msg_id"],
+                text=_build_server_stats_text(SERVER_STATS_CACHE), reply_markup=build_admin_stats_markup())
+        except TelegramRetryAfter as e:
+            await asyncio.sleep(e.retry_after + 1)
+        except TelegramBadRequest as e:
+            if "message is not modified" not in str(e).lower():
+                data["admin_stats_active"] = False
+                return
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logging.warning("Статистика сервера: %s", e)
+            await asyncio.sleep(5)
 
 
 def stop_admin_server_stats_loop(user_id):
@@ -2255,6 +1970,7 @@ async def admin_server_stats(callback: types.CallbackQuery):
         reply_markup=build_admin_stats_markup(),
     )
     data["admin_stats_active"] = True
+    data["admin_stats_task"] = asyncio.create_task(_admin_server_stats_loop(user_id))
     try: await callback.answer()
     except Exception: pass
 
