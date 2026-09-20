@@ -2042,7 +2042,7 @@ def show_main_menu_builder(user_id, user_obj: types.User = None):
     builder.row(types.InlineKeyboardButton(
         text=f"Сохранённые сообщения{suffix} 🗂", callback_data="saved_menu"))
     builder.row(
-        types.InlineKeyboardButton(text="Вечный онлайн 🟢", callback_data="menu_online"),
+        types.InlineKeyboardButton(text="Вечный онлайн 📌", callback_data="menu_online"),
         types.InlineKeyboardButton(text="Автопрочтение 👀", callback_data="menu_auto_read"),
     )
     builder.row(
@@ -2135,7 +2135,7 @@ async def menu_auto_read(callback: types.CallbackQuery):
     uid = callback.from_user.id
     cfg = MEMORY_DB["config"].get(str(uid), {})
     active = cfg.get("auto_read", False)
-    text = "Автопрочтение 📌:\n\nСтатус: " + ("🟢 Включен" if active else "🔴 Выключен")
+    text = "Автопрочтение 👀:\n\nСтатус: " + ("🟢 Включен" if active else "🔴 Выключен")
     text += "\nАвтоматически прочитает новые сообщения в ЛС."
     builder = InlineKeyboardBuilder()
     builder.button(text="🔴 Выключить" if active else "🟢 Включить", callback_data="toggle_auto_read")
@@ -3795,7 +3795,7 @@ async def render_userbot_preview(callback):
         builder.button(text='Назад ⬅️', callback_data='saved_menu')
     elif action in ('menu_online', 'menu_auto_read'):
         online = action == 'menu_online'
-        text = ('Вечный онлайн 🟢' if online else 'Автопрочтение 👀') + '\n\nСтатус: Выключено 🔴'
+        text = ('Вечный онлайн 📌' if online else 'Автопрочтение 👀') + '\n\nСтатус: Выключено 🔴'
         builder.button(text='Включить 🟢', callback_data='toggle_247' if online else 'toggle_auto_read')
         builder.button(text='Назад ⬅️', callback_data='main_menu')
         builder.adjust(1)
