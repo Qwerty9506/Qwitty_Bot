@@ -26,7 +26,9 @@ from userbot import (
     DB_TASKS,
     MEMORY_DB,
     USER_DATA,
-    accrue_activity,
+    SAVED,
+    start_saved_service,
+    stop_saved_service,
     async_db_save,
     bot,
     close_pyrogram_client,
@@ -69,6 +71,8 @@ async def main():
     ntp_task = asyncio.create_task(ntp_sync_loop())
     db_task = asyncio.create_task(db_retry_loop())
 
+    await SAVED.open()
+    start_saved_service()
     await restore_saved_sessions()
     recovery_task = asyncio.create_task(session_recovery_loop())
 
@@ -77,19 +81,18 @@ async def main():
     try:
         await dp.start_polling(bot)
     finally:
+        SAVED.closing = True
+        recovery_task.cancel()
+        await asyncio.gather(recovery_task, return_exceptions=True)
         tasks = []
-
-        for uid in USER_DATA:
-            accrue_activity(uid)
 
         for data in USER_DATA.values():
             for key in (
-                "activity_task",
+                "saved_history_task",
                 "online_task",
                 "time_nick_task",
                 "ui_refresh_task",
                 "admin_stats_task",
-                "activity_ui_task",
                 "auto_read_offline_task",
             ):
                 task = data.get(key)
@@ -103,6 +106,11 @@ async def main():
             task.cancel()
         await asyncio.gather(recovery_task, db_task, ntp_task, return_exceptions=True)
 
+        for data in USER_DATA.values():
+            if data.get("client"):
+                await close_pyrogram_client(data["client"])
+        await stop_saved_service()
+
         pending_db_tasks = list(DB_TASKS)
         for task in pending_db_tasks:
             if not task.done():
@@ -113,14 +121,6 @@ async def main():
             await async_db_save(
                 "config", uid, cfg, max_attempts=3, background_on_fail=False
             )
-        for uid, activity in MEMORY_DB["activity"].items():
-            await async_db_save(
-                "activity", uid, activity, max_attempts=2, background_on_fail=False
-            )
-
-        for data in USER_DATA.values():
-            if data.get("client"):
-                await close_pyrogram_client(data["client"])
 
         await bot.session.close()
         await web_runner.cleanup()
