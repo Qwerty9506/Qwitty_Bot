@@ -2317,7 +2317,6 @@ async def menu_auto_read(callback: types.CallbackQuery):
     active = cfg.get("auto_read", False)
     text = "Авто-Прочтение 📌:\n\nСтатус: " + ("🟢 Включен" if active else "🔴 Выключен")
     text += "\nАвтоматически прочитает новые сообщения в ЛС."
-    text += "\nСтатус «в сети / не в сети» функция не изменяет."
     builder = InlineKeyboardBuilder()
     builder.button(text="🔴 Выключить" if active else "🟢 Включить", callback_data="toggle_auto_read")
     builder.button(text="Назад в меню 🏠", callback_data="menu_247")
