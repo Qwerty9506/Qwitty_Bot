@@ -474,6 +474,10 @@ async def db_retry_loop():
     while True:
         await asyncio.sleep(5)
         for table, uid in list(DB_DIRTY):
+            # activity сохраняется своим разнесённым по времени циклом примерно раз в 5 минут.
+            # Иначе этот общий retry-loop снова превращал бы редкие записи в запросы каждые 5 секунд.
+            if table == "activity":
+                continue
             await async_db_save(table, uid, MEMORY_DB[table].get(uid, {}))
 
 async def persist_user_config_now(user_id: int, cfg: dict):
@@ -816,6 +820,70 @@ async def autoresponder_func(client, message):
 
 ACTIVITY_DAYS = 5
 
+# Активность считается локально каждую секунду, но в Supabase сбрасывается редко.
+# 5 минут ±25 секунд = окно 4:35..5:25. Для разных сессий секунды резервируются
+# отдельно, чтобы при массовом запуске они не стреляли в Supabase одновременно.
+ACTIVITY_SAVE_MIN_SECONDS = 275
+ACTIVITY_SAVE_MAX_SECONDS = 325
+ACTIVITY_SAVE_RESERVATIONS = {}
+PROFILE_ACTIVITY_SUPPRESS_SECONDS = 6.0
+
+
+def schedule_next_activity_save(user_id, data):
+    now = time.monotonic()
+    uid = str(user_id)
+
+    old_slot = data.pop("activity_save_slot", None)
+    if old_slot is not None and ACTIVITY_SAVE_RESERVATIONS.get(old_slot) == uid:
+        ACTIVITY_SAVE_RESERVATIONS.pop(old_slot, None)
+
+    # Чистим уже прошедшие слоты.
+    for slot in list(ACTIVITY_SAVE_RESERVATIONS):
+        if slot <= int(now):
+            ACTIVITY_SAVE_RESERVATIONS.pop(slot, None)
+
+    # Сначала пытаемся выбрать полностью случайную секунду в 50-секундном окне.
+    candidates = list(range(ACTIVITY_SAVE_MIN_SECONDS, ACTIVITY_SAVE_MAX_SECONDS + 1))
+    random.shuffle(candidates)
+    chosen_delay = None
+    chosen_slot = None
+    for delay in candidates:
+        slot = int(now + delay)
+        if slot not in ACTIVITY_SAVE_RESERVATIONS:
+            chosen_delay = delay + random.random()
+            chosen_slot = slot
+            break
+
+    # Если сессий больше, чем свободных секунд окна, всё равно даём отдельный
+    # субсекундный момент, чтобы запросы не стартовали одним asyncio-тактом.
+    if chosen_delay is None:
+        base = random.randint(ACTIVITY_SAVE_MIN_SECONDS, ACTIVITY_SAVE_MAX_SECONDS)
+        chosen_delay = base + random.random()
+        chosen_slot = int(now + base)
+
+    ACTIVITY_SAVE_RESERVATIONS[chosen_slot] = uid
+    data["activity_save_slot"] = chosen_slot
+    data["activity_save_due"] = now + chosen_delay
+    return chosen_delay
+
+
+def profile_activity_suppressed(user_id):
+    data = get_user_state(user_id)
+    return time.monotonic() < data.get("profile_activity_suppress_until", 0.0)
+
+
+def begin_profile_activity_suppression(user_id):
+    data = get_user_state(user_id)
+    # Перед служебным изменением имени фиксируем уже набранную реальную активность,
+    # а возможный Online от самого MTProto-запроса не записываем в статистику.
+    accrue_activity(user_id)
+    set_presence(user_id, False)
+    data["profile_activity_suppress_until"] = time.monotonic() + PROFILE_ACTIVITY_SUPPRESS_SECONDS
+    data["presence_poll_at"] = max(
+        data.get("presence_poll_at", 0),
+        data["profile_activity_suppress_until"],
+    )
+
 def add_activity_interval(activity, start_ts, end_ts, offset):
     tz = datetime.timezone(datetime.timedelta(hours=offset))
     while start_ts < end_ts:
@@ -855,6 +923,11 @@ def set_presence(user_id, online, expires=0):
 
 def apply_status(user_id, status):
     if isinstance(status, raw_types.UserStatusOnline):
+        # update_profile() может кратко подсветить именно эту MTProto-сессию как Online.
+        # Такой технический Online от функции «Время в профиль» не считаем активностью.
+        if profile_activity_suppressed(user_id):
+            set_presence(user_id, False)
+            return
         set_presence(user_id, True, status.expires)
     elif isinstance(status, raw_types.UserStatusOffline):
         set_presence(user_id, False)
@@ -886,6 +959,9 @@ async def activity_tracker_loop(user_id):
     data = get_user_state(user_id)
     uid = str(user_id)
     data["activity_cursor"] = time.time()
+    if not data.get("activity_save_due"):
+        schedule_next_activity_save(user_id, data)
+
     while True:
         client = data.get("client")
         if not client:
@@ -899,6 +975,7 @@ async def activity_tracker_loop(user_id):
                 data["presence_poll_at"] = time.monotonic() + 30
                 await sync_presence(user_id, client)
             accrue_activity(user_id)
+
         activity = MEMORY_DB["activity"].get(uid, {})
         offset = int(MEMORY_DB["config"].get(uid, {}).get("timezone_offset", 5))
         today = (get_world_utc_datetime() + datetime.timedelta(hours=offset)).date()
@@ -910,13 +987,22 @@ async def activity_tracker_loop(user_id):
             if expired:
                 del activity[key]
                 DB_DIRTY.add(("activity", uid))
-        # One coalesced write per second; slow DB never delays the clock or UI.
+
+        # Сам таймер остаётся секундным и точным, но Supabase получает только один
+        # накопленный снимок примерно каждые 4:35..5:25. У каждой сессии своё время.
         pending = data.get("activity_save_task")
-        if ("activity", uid) in DB_DIRTY and (not pending or pending.done()):
+        save_due = data.get("activity_save_due", 0.0)
+        if (
+            ("activity", uid) in DB_DIRTY
+            and time.monotonic() >= save_due
+            and (not pending or pending.done())
+        ):
             pending = asyncio.create_task(async_db_save("activity", uid, activity))
             data["activity_save_task"] = pending
             DB_TASKS.add(pending)
             pending.add_done_callback(DB_TASKS.discard)
+            schedule_next_activity_save(user_id, data)
+
         await asyncio.sleep(1)
 
 
@@ -1063,8 +1149,23 @@ async def update_profile_branding(user_id):
         if data.get("last_profile_key") == profile_key:
             return
 
+        online_247 = bool(user_cfg.get("online_247", False))
+        if not online_247:
+            begin_profile_activity_suppression(user_id)
+
         await data["client"].update_profile(first_name=new_first, last_name=new_last)
         data["last_profile_key"] = profile_key
+
+        # После служебного изменения ника сразу возвращаем именно userbot-сессию
+        # в offline. Если пользователь реально сидит с телефона/ПК, следующий
+        # серверный sync_presence снова увидит настоящий Online.
+        if not online_247:
+            try:
+                await data["client"].invoke(functions.account.UpdateStatus(offline=True))
+            except FloodWait as e:
+                data["presence_poll_at"] = time.monotonic() + e.value + 1
+            except Exception as e:
+                logging.debug("Не удалось вернуть служебную сессию offline после ника %s: %s", user_id, type(e).__name__)
 
 
     except FloodWait as e:
@@ -2120,8 +2221,17 @@ async def toggle_timenick(callback: types.CallbackQuery):
             try:
                 base_first = cfg.get("profile_base_first_name", "User")
                 base_last = cfg.get("profile_base_last_name", "")
+                if not cfg.get("online_247", False):
+                    begin_profile_activity_suppression(user_id)
                 await data["client"].update_profile(first_name=base_first, last_name=base_last)
                 data.pop("last_profile_key", None)
+                if not cfg.get("online_247", False):
+                    try:
+                        await data["client"].invoke(functions.account.UpdateStatus(offline=True))
+                    except FloodWait as e:
+                        data["presence_poll_at"] = time.monotonic() + e.value + 1
+                    except Exception:
+                        pass
             except Exception as e:
                 logging.error(f"Ошибка сброса имени профиля: {e}")
 
