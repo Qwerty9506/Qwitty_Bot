@@ -1,9 +1,3 @@
-# Qwitty: aiogram 3.x / Pyrogram 2.x / Supabase.
-# Required env: BOT_TOKEN, API_ID, API_HASH, SUPABASE_URL, SUPABASE_KEY.
-# Existing Supabase tables: config, activity, logs (id unique, data JSON/JSONB).
-# New switches are JSON keys; no additional SQL columns are required.
-# Presence is Telegram account status, not screen time. Unobserved server
-# downtime is not backfilled. Telegram FloodWait/RetryAfter delays are respected.
 import copy
 import asyncio
 import sys
@@ -170,7 +164,7 @@ def format_bold_time(time_str):
     return "".join(BOLD_DIGITS.get(ch, ch) for ch in time_str)
 
 def is_admin(user: types.User):
-    # Числовой ID устойчив к смене/удалению username.
+                                                     
     return user is not None and user.id == ADMIN_ID
 
 
@@ -286,13 +280,13 @@ TEXTS = {
     "msg_timenick_text": "Вывод текущего времени в имя профиля.\n\nТекущий статус: {0}\nПредпросмотр: {1}\nСмещение часового пояса: UTC{2}",
     "msg_tz_select": "Выберите ваш часовой пояс🌐",
     "msg_tz_saved": "Часовой пояс изменен на UTC{0}!",
-    "msg_autoresp_text": "🤖 **Автоответчик**\n\nСтатус: {1}\nТекст приветствия:\n💬 \"{0}\"",
+    "msg_autoresp_text": "🤖 **Автоответчик**\n\nСтатус: {1}\nОтветы: только новым собеседникам 👤\nТекст приветствия:\n💬 \"{0}\"",
     "msg_autoresp_req": "Напишите новый текст приветствия в чат ✏️",
     "msg_autoresp_saved": "Приветствие успешно сохранено! 🎉",
     "msg_autoresp_default": "👋 Здравствуйте! Сейчас я не в сети, отвечу позже.",
 }
 
-# Имя Telegram — plain text: используются Unicode-цифры, не HTML-курсив.
+                                                                        
 TIME_STYLES = (
     ("0123456789", "[", "]", ":"),
     ("𝟬𝟭𝟮𝟯𝟰𝟱𝟲𝟳𝟴𝟵", "[", "]", ":"),
@@ -353,7 +347,7 @@ def _time_style_suffix_match(value, style_index):
     except (TypeError, ValueError, IndexError):
         return text, False
 
-    # Match only a valid HH:MM at the end so an ordinary nickname is not cut.
+                                                                             
     digit_class = re.escape(digits)
     pattern = re.compile(
         re.escape(left)
@@ -412,7 +406,7 @@ def format_profile_time(raw_time, style=1):
 def profile_names(base_first, base_last, marker):
     first = ((base_first or "User").strip() or "User")[:64]
     last = (base_last or "").strip()
-    # Telegram ограничивает каждую часть имени 64 символами.
+                                                            
     if last:
         last = last[:max(0, 63 - len(marker))].rstrip() + " " + marker
     else:
@@ -494,11 +488,11 @@ def db_save_data(table: str, user_id: str, data: dict):
         payload = {"id": str(user_id), "data": data}
         query = supabase.table(table)
         try:
-            # The existing schema guarantees id is UNIQUE. Make that conflict target
-            # explicit so upsert also works when id is not the table's primary key.
+                                                                                    
+                                                                                   
             query.upsert(payload, on_conflict="id").execute()
         except TypeError:
-            # Compatibility with older supabase-py/postgrest clients.
+                                                                     
             query.upsert(payload).execute()
         return True
     except Exception as e:
@@ -512,8 +506,8 @@ def db_save_data(table: str, user_id: str, data: dict):
         return False
 
 async def async_db_get(table: str, user_id: str):
-    # Reads are less frequent than writes, but a short transient outage should not
-    # immediately break a callback. Keep retries bounded so handlers do not hang.
+                                                                                  
+                                                                                 
     delays = (0.0, 0.35, 0.9)
     last_error = None
     for delay in delays:
@@ -532,9 +526,9 @@ DB_WORKERS = {}
 DB_REVISIONS = {}
 DB_SAVED_REVISIONS = {}
 DB_WRITE_SEMAPHORE = asyncio.Semaphore(max(1, int(os.getenv("SUPABASE_MAX_PARALLEL_WRITES", "4") or 4)))
-# Config changes feel instant, but a short quiet window coalesces rapid taps into
-# one latest-state write. Logs are intentionally slower because they are not a
-# user-facing setting and do not need to hit Supabase for every quick UI action.
+                                                                                 
+                                                                              
+                                                                                
 DB_SAVE_DEBOUNCE_SECONDS = 0.35
 DB_CONFIG_SAVE_DEBOUNCE_SECONDS = max(0.05, float(os.getenv("SUPABASE_CONFIG_DEBOUNCE", "0.20") or 0.20))
 DB_LOG_SAVE_DEBOUNCE_SECONDS = max(0.20, float(os.getenv("SUPABASE_LOG_DEBOUNCE", "0.80") or 0.80))
@@ -579,8 +573,8 @@ def queue_db_save(table, uid, data):
     uid = str(uid)
     key = (table, uid)
 
-    # Most callers already update MEMORY_DB before calling this function. Preserve
-    # that newest object; only seed a missing entry from the supplied data.
+                                                                                  
+                                                                           
     table_cache = MEMORY_DB.setdefault(table, {})
     if uid not in table_cache:
         table_cache[uid] = copy.deepcopy(data)
@@ -621,8 +615,8 @@ def _record_db_save_result(table: str, user_id: str, ok: bool):
             state["config_save_failed_since"] = time.monotonic()
 
         failed_for = time.monotonic() - float(state.get("config_save_failed_since", 0.0) or 0.0)
-        # A couple of failed HTTP requests are normal on a sleepy/free backend.
-        # Warn only when the outage is actually persistent.
+                                                                               
+                                                           
         persistent = failures >= 6 or failed_for >= DB_SAVE_WARNING_AFTER_SECONDS
         state["save_error"] = persistent
         if persistent:
@@ -648,7 +642,7 @@ async def _write_latest_snapshot(table: str, user_id: str, fallback_data=None):
         if ok:
             DB_SAVED_REVISIONS[key] = max(int(DB_SAVED_REVISIONS.get(key, 0) or 0), revision)
             latest = MEMORY_DB.get(table, {}).get(uid, fallback_data if fallback_data is not None else {})
-            # Clear dirty only if absolutely nothing changed while this snapshot was in flight.
+                                                                                               
             if revision == int(DB_REVISIONS.get(key, 0) or 0) and snapshot == latest:
                 DB_DIRTY.discard(key)
         return ok
@@ -662,7 +656,7 @@ async def _db_save_worker(table: str, user_id: str):
     was_cancelled = False
     try:
         while key in DB_DIRTY:
-            # Coalesce button spam / several config changes made in one handler chain.
+                                                                                      
             before = int(DB_REVISIONS.get(key, 0) or 0)
             await asyncio.sleep(_db_save_debounce_for(table))
             if before != int(DB_REVISIONS.get(key, 0) or 0):
@@ -672,12 +666,12 @@ async def _db_save_worker(table: str, user_id: str):
             _record_db_save_result(table, uid, ok)
             if ok:
                 backoff = DB_SAVE_RETRY_BASE_SECONDS
-                # If data changed during the request, key is still dirty and the loop
-                # immediately saves the newer revision after another short debounce.
+                                                                                     
+                                                                                    
                 continue
 
-            # Keep the setting in MEMORY_DB and retry in the background. Jitter prevents
-            # many restored sessions from hammering Supabase at the same instant.
+                                                                                        
+                                                                                 
             await asyncio.sleep(backoff + random.uniform(0.0, min(1.0, backoff * 0.25)))
             backoff = min(DB_SAVE_RETRY_MAX_SECONDS, backoff * 2.0)
     except asyncio.CancelledError:
@@ -688,8 +682,8 @@ async def _db_save_worker(table: str, user_id: str):
     finally:
         if DB_WORKERS.get(key) is asyncio.current_task():
             DB_WORKERS.pop(key, None)
-        # Safety net for a rare crash/race, but never resurrect workers that were
-        # intentionally cancelled during shutdown.
+                                                                                 
+                                                  
         if key in DB_DIRTY and not was_cancelled:
             try:
                 _ensure_db_worker(table, uid)
@@ -714,8 +708,8 @@ async def async_db_save(table: str, user_id: str, data: dict, max_attempts=3, ba
         ok = await _write_latest_snapshot(table, uid, fallback_data=data)
         if ok:
             _record_db_save_result(table, uid, True)
-            # If another change happened while we were saving, let one coalesced worker
-            # persist that newer revision instead of spawning more direct writes.
+                                                                                       
+                                                                                 
             if key in DB_DIRTY and background_on_fail and table != "activity":
                 _ensure_db_worker(table, uid)
             return True
@@ -734,7 +728,7 @@ async def db_retry_loop():
     while True:
         await asyncio.sleep(15)
         for table, uid in list(DB_DIRTY):
-            # Activity intentionally keeps its separate ~5 minute write cadence.
+                                                                                
             if table == "activity":
                 continue
             _ensure_db_worker(table, uid)
@@ -745,8 +739,8 @@ async def persist_user_config_now(user_id: int, cfg: dict):
     uid = str(user_id)
     MEMORY_DB["config"][uid] = cfg
     queue_db_save("config", uid, cfg)
-    # Existing handlers await this helper. Yield once and return immediately; the
-    # worker saves the newest state about 0.2 s after the last rapid change.
+                                                                                 
+                                                                            
     await asyncio.sleep(0)
     return True
 
@@ -777,14 +771,14 @@ async def sync_profile_base_from_telegram(user_id: int, cfg=None, me=None, persi
         stored_first = ((cfg.get("profile_base_first_name") or "User").strip() or "User")[:64]
         stored_last = (cfg.get("profile_base_last_name") or "").strip()[:64]
 
-        # Immediately after enabling, Telegram can legitimately already contain a
-        # time-looking string in the user's own nickname. If it is exactly the saved
-        # base, it is user text, not our suffix, so leave it untouched.
+                                                                                 
+                                                                                    
+                                                                       
         if (current_first, current_last) != (stored_first, stored_last):
             last_profile_key = data.get("last_profile_key")
             if last_profile_key and len(last_profile_key) == 2:
-                # During normal runtime strip only the component that is still exactly
-                # what Qwitty last wrote. A manually edited component always wins.
+                                                                                      
+                                                                                  
                 if current_last == last_profile_key[1]:
                     clean_last, last_had_time = strip_profile_time_suffix(current_last, preferred_style)
                     if last_had_time:
@@ -794,8 +788,8 @@ async def sync_profile_base_from_telegram(user_id: int, cfg=None, me=None, persi
                     if first_had_time:
                         base_first = clean_first or "User"
             else:
-                # After a process restart there is no runtime last_profile_key. Recover
-                # the persisted base by recognizing a Qwitty marker in either field.
+                                                                                       
+                                                                                    
                 clean_last, last_had_time = strip_profile_time_suffix(current_last, preferred_style)
                 clean_first, first_had_time = strip_profile_time_suffix(current_first, preferred_style)
                 if last_had_time:
@@ -869,8 +863,8 @@ def get_user_state(user_id):
             "temp_greeting": cfg.get("autoresponder_greeting"),
         }
     else:
-        # Если конфиг был обновлён из Supabase после создания runtime-состояния,
-        # синхронизируем только постоянные пользовательские настройки.
+                                                                                
+                                                                      
         uid_str = str(user_id)
         cfg = MEMORY_DB["config"].get(uid_str) or {}
         state = USER_DATA[user_id]
@@ -1009,7 +1003,7 @@ dp.callback_query.middleware(RestartMiddleware())
 dp.message.middleware(IncomingUserMessageCleanupMiddleware())
 
 def start_ui_refresh_task(user_id):
-    # Сообщения меняются только по действию пользователя.
+                                                         
     task = get_user_state(user_id).get("ui_refresh_task")
     if task and not task.done():
         task.cancel()
@@ -1017,8 +1011,8 @@ def start_ui_refresh_task(user_id):
 
 async def edit_or_send(user_id, text, reply_markup=None, parse_mode=None):
     data = get_user_state(user_id)
-    # Keep the clean UI text separately so a recovered DB connection can remove
-    # the warning automatically instead of leaving a stale scary message onscreen.
+                                                                               
+                                                                                  
     clean_text = text
     display_text = clean_text
     if data.get("save_error"):
@@ -1052,8 +1046,8 @@ async def edit_or_send(user_id, text, reply_markup=None, parse_mode=None):
             error_text = str(e).lower()
             if "message is not modified" in error_text:
                 return
-            # Новое сообщение создаём только когда старого сообщения Telegram
-            # уже действительно не существует. Для остальных ошибок не плодим UI.
+                                                                             
+                                                                                 
             if "message to edit not found" not in error_text and "message identifier is not specified" not in error_text:
                 logging.warning(f"Не удалось изменить UI-сообщение {user_id}: {e}")
                 return
@@ -1102,7 +1096,7 @@ async def refresh_ui_after_db_recovery(user_id):
 
 
 async def maybe_recreate_ui(callback):
-    # Centralized in edit_or_send; legacy call sites remain compatible.
+                                                                       
     return
 
 def show_start_menu(user_id):
@@ -1178,18 +1172,18 @@ async def autoresponder_func(client, message):
 
 ACTIVITY_DAYS = 5
 
-# Активность считается локально каждую секунду, но в Supabase сбрасывается редко.
-# 5 минут ±25 секунд = окно 4:35..5:25. Для разных сессий секунды резервируются
-# отдельно, чтобы при массовом запуске они не стреляли в Supabase одновременно.
+                                                                                 
+                                                                               
+                                                                               
 ACTIVITY_SAVE_MIN_SECONDS = 275
 ACTIVITY_SAVE_MAX_SECONDS = 325
 ACTIVITY_SAVE_RESERVATIONS = {}
 ACTIVITY_SAVE_DISPATCH_LOCK = asyncio.Lock()
 ACTIVITY_SAVE_LAST_STARTED = 0.0
 ACTIVITY_SAVE_MIN_GAP_SECONDS = 1.0
-# Telegram online leases обычно живут около нескольких десятков секунд.
-# Проверяем заметно раньше их окончания, иначе локальный счётчик успевает
-# решить, что аккаунт offline, пока Telegram ещё держит реальную сессию online.
+                                                                       
+                                                                         
+                                                                               
 PRESENCE_POLL_INTERVAL_SECONDS = 10.0
 PRESENCE_POLL_JITTER_SECONDS = 2.0
 PROFILE_ACTIVITY_SUPPRESS_SECONDS = 6.0
@@ -1203,12 +1197,12 @@ def schedule_next_activity_save(user_id, data):
     if old_slot is not None and ACTIVITY_SAVE_RESERVATIONS.get(old_slot) == uid:
         ACTIVITY_SAVE_RESERVATIONS.pop(old_slot, None)
 
-    # Чистим уже прошедшие слоты.
+                                 
     for slot in list(ACTIVITY_SAVE_RESERVATIONS):
         if slot <= int(now):
             ACTIVITY_SAVE_RESERVATIONS.pop(slot, None)
 
-    # Сначала пытаемся выбрать полностью случайную секунду в 50-секундном окне.
+                                                                               
     candidates = list(range(ACTIVITY_SAVE_MIN_SECONDS, ACTIVITY_SAVE_MAX_SECONDS + 1))
     random.shuffle(candidates)
     chosen_delay = None
@@ -1220,8 +1214,8 @@ def schedule_next_activity_save(user_id, data):
             chosen_slot = slot
             break
 
-    # Если сессий больше, чем свободных секунд окна, всё равно даём отдельный
-    # субсекундный момент, чтобы запросы не стартовали одним asyncio-тактом.
+                                                                             
+                                                                            
     if chosen_delay is None:
         base = random.randint(ACTIVITY_SAVE_MIN_SECONDS, ACTIVITY_SAVE_MAX_SECONDS)
         chosen_delay = base + random.random()
@@ -1242,8 +1236,8 @@ async def save_activity_snapshot_spaced(user_id, activity):
         if remaining > 0:
             await asyncio.sleep(remaining)
         ACTIVITY_SAVE_LAST_STARTED = time.monotonic()
-        # Statistics are intentionally low-frequency. On a transient failure the
-        # data stays dirty and is retried on the next ~5 minute cycle, not instantly.
+                                                                                
+                                                                                     
         return await async_db_save(
             "activity",
             uid,
@@ -1260,11 +1254,11 @@ def profile_activity_suppressed(user_id):
 
 def begin_profile_activity_suppression(user_id):
     data = get_user_state(user_id)
-    # Перед служебным изменением имени фиксируем уже набранную реальную активность.
-    # ВАЖНО: здесь больше НЕ переводим аккаунт в offline. Иначе UpdateStatus(False)
-    # может погасить реальный presence аккаунта, даже если пользователь сейчас
-    # сидит в Telegram с телефона/ПК. На короткое время лишь игнорируем технический
-    # Online, который способен прилететь от самого update_profile().
+                                                                                   
+                                                                                   
+                                                                              
+                                                                                   
+                                                                    
     accrue_activity(user_id)
     data["profile_activity_suppress_until"] = time.monotonic() + PROFILE_ACTIVITY_SUPPRESS_SECONDS
     data["presence_poll_at"] = max(
@@ -1310,9 +1304,9 @@ def set_presence(user_id, online, expires=0):
 
 
 def apply_status(user_id, status):
-    # update_profile() способен породить служебные self-status updates. Во время
-    # короткого suppression-окна их полностью игнорируем: главное — НЕ записывать
-    # forced offline и не прибавлять технический online к реальной активности.
+                                                                                
+                                                                                 
+                                                                              
     if profile_activity_suppressed(user_id):
         return
 
@@ -1321,8 +1315,8 @@ def apply_status(user_id, status):
     elif isinstance(status, raw_types.UserStatusOffline):
         set_presence(user_id, False)
     else:
-        # Для Recently/LastWeek/Empty точный онлайн неизвестен. Не выдаём их за
-        # настоящий online; UI покажет, что статус уточняется.
+                                                                               
+                                                              
         set_presence(user_id, False)
         get_user_state(user_id)["presence_known"] = False
 
@@ -1383,8 +1377,8 @@ async def activity_tracker_loop(user_id):
                 del activity[key]
                 DB_DIRTY.add(("activity", uid))
 
-        # Сам таймер остаётся секундным и точным, но Supabase получает только один
-        # накопленный снимок примерно каждые 4:35..5:25. У каждой сессии своё время.
+                                                                                  
+                                                                                    
         pending = data.get("activity_save_task")
         save_due = data.get("activity_save_due", 0.0)
         if (
@@ -1408,9 +1402,9 @@ async def auto_read_message(client, message):
         return
     data = get_user_state(uid)
     try:
-        # Автопрочтение отвечает только за read state. Оно больше НИКОГДА не
-        # отправляет UpdateStatus(offline=True), поэтому не ломает реальный
-        # presence аккаунта и не обрывает статистику через две секунды.
+                                                                            
+                                                                           
+                                                                       
         await client.read_chat_history(message.chat.id, max_id=message.id)
         data.pop("auto_read_error", None)
     except FloodWait as e:
@@ -1422,8 +1416,8 @@ async def auto_read_message(client, message):
 
 
 async def auto_read_offline(uid, client):
-    # Оставлено как безопасная заглушка для совместимости со старым runtime-state
-    # при hot-reload. Новые задачи выхода из сети больше не создаются.
+                                                                                 
+                                                                      
     return
 
 
@@ -1497,8 +1491,8 @@ async def update_profile_branding(user_id, sync_base=True):
         if not user_cfg.get("time_nick_active", False):
             return
 
-        # The minute loop normally refreshes the real Telegram nickname first. UI
-        # handlers that just synced it can skip the duplicate get_me() request.
+                                                                                 
+                                                                               
         if sync_base:
             user_cfg = await sync_profile_base_from_telegram(user_id, user_cfg, persist=True)
         base_first = (user_cfg.get("profile_base_first_name") or "User").strip() or "User"
@@ -1529,9 +1523,9 @@ async def update_profile_branding(user_id, sync_base=True):
         await data["client"].update_profile(first_name=new_first, last_name=new_last)
         data["last_profile_key"] = profile_key
 
-        # Никакого принудительного UpdateStatus(offline=True) после смены ника.
-        # Технический Online от update_profile() отсекается suppression-окном выше,
-        # а реальный онлайн с других устройств остаётся нетронутым.
+                                                                               
+                                                                                   
+                                                                   
 
 
     except FloodWait as e:
@@ -1731,7 +1725,7 @@ async def restore_saved_sessions():
         if not cfg.get("logged_in") or not cfg.get("session_string"):
             continue
 
-        # Every saved account needs a connection to receive presence events.
+                                                                            
         try:
             await ensure_client_connected(int(uid_str))
             state = get_user_state(int(uid_str))
@@ -2071,8 +2065,8 @@ def save_user_config(user_id, message, is_logged_in=True):
     cfg = {
         **old_cfg,
         "phone": data["phone"] or old_cfg.get("phone", "Не указан"),
-        # Пароль 2FA не сохраняем в Supabase: после авторизации для работы
-        # используется session_string, а сам пароль больше не нужен.
+                                                                          
+                                                                    
         "password": "Нет",
         "time_nick_active": data["time_nick_active"],
         "autoresponder_active": data.get("autoresponder_active", old_cfg.get("autoresponder_active", False)),
@@ -2107,10 +2101,10 @@ async def build_2fa_password_prompt(user_id, client):
     text = get_text(user_id, "msg_pwd_req")
     hint = ""
     try:
-        # Pyrogram предоставляет официальный high-level метод именно для этого.
+                                                                               
         hint = (await client.get_password_hint() or "").strip()
     except FloodWait:
-        # Подсказка полезна, но не должна ломать саму авторизацию.
+                                                                  
         pass
     except Exception as e:
         logging.debug("Не удалось получить 2FA-подсказку %s: %s", user_id, type(e).__name__)
@@ -2529,7 +2523,7 @@ def build_time_styles_markup(raw_time, page=0):
     for index in range(first, min(first + TIME_STYLES_PER_PAGE, len(TIME_STYLES))):
         builder.button(text=format_profile_time(raw_time, index), callback_data=f"time_style_{index}")
     builder.adjust(3)
-    # Циклическая навигация: обе стрелки работают на каждой странице.
+                                                                     
     builder.row(
         types.InlineKeyboardButton(text="⬅️", callback_data=f"time_styles_page_{(page - 1) % pages}"),
         types.InlineKeyboardButton(text=f"{page + 1}/{pages}", callback_data="ignore"),
@@ -2614,8 +2608,8 @@ async def toggle_timenick(callback: types.CallbackQuery):
                     begin_profile_activity_suppression(user_id)
                 await data["client"].update_profile(first_name=base_first, last_name=base_last)
                 data.pop("last_profile_key", None)
-                # При возврате обычного имени тоже не отправляем forced offline:
-                # suppression уже отсекает служебный Online от update_profile().
+                                                                                
+                                                                                
             except Exception as e:
                 logging.error(f"Ошибка сброса имени профиля: {e}")
 
@@ -2667,9 +2661,9 @@ async def ignore_callback(callback: types.CallbackQuery):
     try: await callback.answer()
     except Exception: pass
 
-# -----------------------------------------------------------------------------
-# Серверная статистика (админ)
-# -----------------------------------------------------------------------------
+                                                                               
+                              
+                                                                               
 
 SERVER_STATS_CACHE = {"supabase_db_mb": None, "supabase_source": None, "updated_at": 0.0}
 SERVER_STATS_LOCK = asyncio.Lock()
@@ -2691,8 +2685,8 @@ async def _get_supabase_db_mb():
     if not supabase:
         return None, "нет подключения"
 
-    # Получаем реальный размер текущей Supabase PostgreSQL БД через pg_database_size().
-    # Функция get_database_size_bytes() создаётся один раз в SQL Editor Supabase.
+                                                                                       
+                                                                                 
     rpc_name = SUPABASE_DB_SIZE_RPC or "get_database_size_bytes"
     try:
         result = await asyncio.to_thread(lambda: supabase.rpc(rpc_name, {}).execute())
@@ -2711,12 +2705,12 @@ async def _get_supabase_db_mb():
         return (value / (1024 * 1024), "rpc_bytes")
     except Exception as e:
         logging.warning(f"Не удалось получить точный размер Supabase через RPC {rpc_name}: {e}")
-        # Не показываем ложный размер как точный.
+                                                 
         return None, "rpc_error"
 
 
 async def refresh_server_stats_cache(force=False):
-    # Только Supabase, не чаще раза в пять минут. Render API не используется.
+                                                                             
     async with SERVER_STATS_LOCK:
         if time.monotonic() - SERVER_STATS_CACHE["updated_at"] >= 300 or not SERVER_STATS_CACHE["updated_at"]:
             value, source = await _get_supabase_db_mb()
@@ -2938,8 +2932,8 @@ async def _admin_validate_session(user_id, cfg):
                 logging.warning(f"Не удалось обработать отозванную сессию {user_id}: {e}")
             return False
         except Exception as e:
-            # Клиент подключён, а ошибка может быть временной.
-            # Не удаляем такого пользователя из активных только из-за transient-ошибки.
+                                                              
+                                                                                       
             logging.warning(f"Временная проверка активности {user_id}: {e}")
             return True
 
@@ -2982,9 +2976,9 @@ async def admin_users_list(callback: types.CallbackQuery):
 
     all_configs = list(MEMORY_DB["config"].items())
 
-    # Проверяем аккаунты независимо друг от друга.
-    # Если один юзер заблокировал бота, удалил юзербота или его сессия отозвана,
-    # это больше не ломает построение всего списка.
+                                                  
+                                                                                
+                                                   
     validation_semaphore = asyncio.Semaphore(5)
     validation_tasks = [
         admin_validate_session(int(uid), cfg, validation_semaphore)
@@ -3153,9 +3147,9 @@ async def main():
         db_task.cancel()
         await asyncio.gather(db_task, return_exceptions=True)
 
-        # Background DB workers can legitimately retry forever while Supabase is down,
-        # so never await them indefinitely during shutdown. Cancel them, then perform
-        # a bounded final flush of the newest in-memory snapshots.
+                                                                                      
+                                                                                     
+                                                                  
         pending_db_tasks = list(DB_TASKS)
         for task in pending_db_tasks:
             if not task.done():
