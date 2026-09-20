@@ -974,7 +974,7 @@ async def edit_or_send(user_id, text, reply_markup=None, parse_mode=None):
     data = get_user_state(user_id)
 
 
-    if is_preview(user_id) and data.get('state') not in ('ROOT', 'ADMIN', 'ADMIN_STATS'):
+    if is_preview(user_id) and data.get('state') not in ('ROOT', 'USERBOT_ENTRY', 'ADMIN', 'ADMIN_STATS'):
         text = '#Предпросмотр\n\n' + text.removeprefix('#Предпросмотр\n\n')
     clean_text = text
     display_text = clean_text
@@ -1341,7 +1341,11 @@ def cached_config(uid):
 
 
 def is_preview(uid):
-    return not cached_config(uid).get('logged_in', False)
+    try:
+        state = USER_DATA.get(int(uid), {}).get('state')
+    except (TypeError, ValueError):
+        state = None
+    return state == 'PREVIEW' or not cached_config(uid).get('logged_in', False)
 
 
 def entry_time_text(cfg):
@@ -1682,20 +1686,54 @@ async def root_menu(callback: types.CallbackQuery):
     await callback.answer()
 
 
+def userbot_entry_markup():
+    builder = InlineKeyboardBuilder()
+    builder.button(text="Предпросмотр 👁", callback_data="userbot_preview")
+    builder.button(text="Регистрация 📝", callback_data="start_re_register_menu")
+    builder.button(text="Назад в меню 🏠", callback_data="root_menu")
+    builder.adjust(1)
+    return builder.as_markup()
+
+
 @dp.callback_query(F.data == "userbot")
 async def open_userbot(callback: types.CallbackQuery):
     uid = callback.from_user.id
-    if await ensure_client_connected(uid):
-        await main_menu(callback)
-    elif MEMORY_DB["config"].get(str(uid), {}).get("logged_in"):
-        await callback.answer("Не удалось подключиться. Попробуйте ещё раз чуть позже.", show_alert=True)
-    elif is_registration_blocked(uid):
-        await edit_or_send(uid, get_registration_block_text(uid), reply_markup=show_registration_block_markup(uid))
+    cfg = cached_config(str(uid))
+
+    # После регистрации никаких предпросмотров и промежуточных экранов:
+    # сразу открываем настоящее меню UserBot с рабочими функциями.
+    if cfg.get("logged_in", False):
+        return await main_menu(callback)
+
+    # Для незарегистрированных доступен входной экран с предпросмотром/регистрацией.
+    get_user_state(uid)["state"] = "USERBOT_ENTRY"
+    await edit_or_send(uid, "♨️UserBot", reply_markup=userbot_entry_markup())
+    try:
         await callback.answer()
-    else:
-        get_user_state(uid)["state"] = "START"
-        await edit_or_send(uid, "♨️UserBot\n\nДля подключения аккаунта ознакомьтесь с правилами и начните регистрацию.", reply_markup=show_start_menu(uid))
+    except Exception:
+        pass
+
+
+@dp.callback_query(F.data == "userbot_preview")
+async def open_userbot_preview(callback: types.CallbackQuery):
+    uid = callback.from_user.id
+    cfg = cached_config(str(uid))
+
+    # Защита от старых inline-кнопок: зарегистрированный пользователь
+    # никогда не попадает в режим предпросмотра.
+    if cfg.get("logged_in", False):
+        return await main_menu(callback)
+
+    get_user_state(uid)["state"] = "PREVIEW"
+    await edit_or_send(
+        uid,
+        "♨️UserBot — управление аккаунтом:",
+        reply_markup=show_main_menu_builder(uid, user_obj=callback.from_user).as_markup()
+    )
+    try:
         await callback.answer()
+    except Exception:
+        pass
 
 @dp.callback_query(F.data.in_(["rules_view", "rules_menu_view"]))
 async def handle_rules(callback: types.CallbackQuery):
@@ -2042,7 +2080,7 @@ def show_main_menu_builder(user_id, user_obj: types.User = None):
     builder.row(types.InlineKeyboardButton(
         text=f"Сохранённые сообщения{suffix} 🗂", callback_data="saved_menu"))
     builder.row(
-        types.InlineKeyboardButton(text="Вечный онлайн 📌", callback_data="menu_online"),
+        types.InlineKeyboardButton(text="Вечный онлайн 📊", callback_data="menu_online"),
         types.InlineKeyboardButton(text="Автопрочтение 👀", callback_data="menu_auto_read"),
     )
     builder.row(
@@ -2084,7 +2122,7 @@ async def menu_online(callback: types.CallbackQuery):
         return
     cfg = MEMORY_DB["config"].get(str(uid), {})
     active = cfg.get("online_247", False)
-    text = "Вечный онлайн 📛:\n\nСтатус: " + ("🟢 Включен" if active else "🔴 Выключен")
+    text = "Вечный онлайн 📊:\n\nСтатус: " + ("🟢 Включен" if active else "🔴 Выключен")
     text += "\nПоддерживает статус вечного «в сети»."
     if get_user_state(uid).get("online_error") and active:
         text += "\n⚠️ " + get_user_state(uid)["online_error"]
@@ -3780,7 +3818,7 @@ async def render_userbot_preview(callback):
     action = callback.data
     get_user_state(uid)['state'] = 'PREVIEW'
     builder = InlineKeyboardBuilder()
-    if action in ('userbot', 'main_menu'):
+    if action in ('userbot_preview', 'main_menu'):
         text = '♨️UserBot — управление аккаунтом:'
         builder = show_main_menu_builder(uid)
     elif action == 'saved_menu':
@@ -3795,7 +3833,7 @@ async def render_userbot_preview(callback):
         builder.button(text='Назад ⬅️', callback_data='saved_menu')
     elif action in ('menu_online', 'menu_auto_read'):
         online = action == 'menu_online'
-        text = ('Вечный онлайн 📌' if online else 'Автопрочтение 👀') + '\n\nСтатус: Выключено 🔴'
+        text = ('Вечный онлайн 📊' if online else 'Автопрочтение 👀') + '\n\nСтатус: Выключено 🔴'
         builder.button(text='Включить 🟢', callback_data='toggle_247' if online else 'toggle_auto_read')
         builder.button(text='Назад ⬅️', callback_data='main_menu')
         builder.adjust(1)
@@ -3835,7 +3873,7 @@ async def render_userbot_preview(callback):
 
 
 def preview_action(action):
-    return action in {'userbot', 'main_menu', 'menu_online', 'menu_auto_read',
+    return action in {'userbot_preview', 'main_menu', 'menu_online', 'menu_auto_read',
                       'menu_autoresponder', 'menu_timenick', 'autoresp_setup', 'tz_select',
                       'time_styles', 'saved_menu', 'saved_toggle'} or action.startswith(
                       ('toggle_', 'set_tz_', 'time_style_', 'time_styles_page_', 'saved_chats:',
