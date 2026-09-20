@@ -3096,7 +3096,7 @@ async def admin_user_view(callback: types.CallbackQuery):
         f"{timezone_name}\n\n"
         f"Автоответчик: {autoresponder_status}\n"
         f"{autoresponder_greeting}\n\n"
-        f"Режим 24/7: {online_247_status}\n"
+        f"Режим 24/7: {online_247_status}\n\n"
         f"Автопрочтение: {auto_read_status}"
     )
 
