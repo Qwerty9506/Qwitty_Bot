@@ -342,6 +342,61 @@ TIME_STYLES = (
 )
 
 
+def _time_style_suffix_match(value, style_index):
+    """Return the base part if *value* ends with one of our HH:MM markers."""
+    text = (value or "").rstrip()
+    if not text:
+        return text, False
+    try:
+        index = int(style_index)
+        digits, left, right, colon = TIME_STYLES[index]
+    except (TypeError, ValueError, IndexError):
+        return text, False
+
+    # Match only a valid HH:MM at the end so an ordinary nickname is not cut.
+    digit_class = re.escape(digits)
+    pattern = re.compile(
+        re.escape(left)
+        + rf"([{digit_class}]{{2}})"
+        + re.escape(colon)
+        + rf"([{digit_class}]{{2}})"
+        + re.escape(right)
+        + r"$"
+    )
+    match = pattern.search(text)
+    if not match:
+        return text, False
+
+    reverse_digits = {char: str(pos) for pos, char in enumerate(digits)}
+    try:
+        hour = int("".join(reverse_digits[ch] for ch in match.group(1)))
+        minute = int("".join(reverse_digits[ch] for ch in match.group(2)))
+    except (KeyError, ValueError):
+        return text, False
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        return text, False
+
+    return text[:match.start()].rstrip(), True
+
+
+def strip_profile_time_suffix(value, preferred_style=None):
+    """Strip only a Qwitty time suffix, preferring the selected style."""
+    order = []
+    try:
+        preferred = int(preferred_style)
+        if 0 <= preferred < len(TIME_STYLES):
+            order.append(preferred)
+    except (TypeError, ValueError):
+        pass
+    order.extend(index for index in range(len(TIME_STYLES)) if index not in order)
+
+    for index in order:
+        base, matched = _time_style_suffix_match(value, index)
+        if matched:
+            return base, True
+    return (value or "").rstrip(), False
+
+
 def format_profile_time(raw_time, style=1):
     try:
         index = int(style)
@@ -477,11 +532,24 @@ DB_WORKERS = {}
 DB_REVISIONS = {}
 DB_SAVED_REVISIONS = {}
 DB_WRITE_SEMAPHORE = asyncio.Semaphore(max(1, int(os.getenv("SUPABASE_MAX_PARALLEL_WRITES", "4") or 4)))
-DB_SAVE_DEBOUNCE_SECONDS = 0.30
+# Config changes feel instant, but a short quiet window coalesces rapid taps into
+# one latest-state write. Logs are intentionally slower because they are not a
+# user-facing setting and do not need to hit Supabase for every quick UI action.
+DB_SAVE_DEBOUNCE_SECONDS = 0.35
+DB_CONFIG_SAVE_DEBOUNCE_SECONDS = max(0.05, float(os.getenv("SUPABASE_CONFIG_DEBOUNCE", "0.20") or 0.20))
+DB_LOG_SAVE_DEBOUNCE_SECONDS = max(0.20, float(os.getenv("SUPABASE_LOG_DEBOUNCE", "0.80") or 0.80))
 DB_SAVE_RETRY_BASE_SECONDS = 1.0
 DB_SAVE_RETRY_MAX_SECONDS = 30.0
 DB_SAVE_WARNING_AFTER_SECONDS = 20.0
 DB_SAVE_WARNING_TEXT = "⚠️ Настройки пока не сохранены в базе. Повторная попытка выполняется автоматически."
+
+
+def _db_save_debounce_for(table):
+    if table == "config":
+        return DB_CONFIG_SAVE_DEBOUNCE_SECONDS
+    if table == "logs":
+        return DB_LOG_SAVE_DEBOUNCE_SECONDS
+    return DB_SAVE_DEBOUNCE_SECONDS
 
 
 def _bump_db_revision(key):
@@ -596,7 +664,7 @@ async def _db_save_worker(table: str, user_id: str):
         while key in DB_DIRTY:
             # Coalesce button spam / several config changes made in one handler chain.
             before = int(DB_REVISIONS.get(key, 0) or 0)
-            await asyncio.sleep(DB_SAVE_DEBOUNCE_SECONDS)
+            await asyncio.sleep(_db_save_debounce_for(table))
             if before != int(DB_REVISIONS.get(key, 0) or 0):
                 continue
 
@@ -673,11 +741,83 @@ async def db_retry_loop():
 
 
 async def persist_user_config_now(user_id: int, cfg: dict):
+    """Queue a very fast coalesced config save instead of one request per tap."""
     uid = str(user_id)
     MEMORY_DB["config"][uid] = cfg
-    # Important user-facing switches get three immediate attempts. If Supabase is
-    # genuinely unavailable, the latest config stays dirty and a single worker retries.
-    return await async_db_save("config", uid, cfg, max_attempts=3, background_on_fail=True)
+    queue_db_save("config", uid, cfg)
+    # Existing handlers await this helper. Yield once and return immediately; the
+    # worker saves the newest state about 0.2 s after the last rapid change.
+    await asyncio.sleep(0)
+    return True
+
+
+async def sync_profile_base_from_telegram(user_id: int, cfg=None, me=None, persist=True):
+    """Keep the user's real nickname as base and treat time as a removable suffix."""
+    data = get_user_state(user_id)
+    uid = str(user_id)
+    if cfg is None:
+        cfg = MEMORY_DB["config"].get(uid) or await async_db_get("config", uid) or {}
+    MEMORY_DB["config"][uid] = cfg
+
+    client = data.get("client")
+    if me is None:
+        if not client or not client.is_connected:
+            return cfg
+        me = await client.get_me()
+    if not me:
+        return cfg
+
+    current_first = ((getattr(me, "first_name", None) or "User").strip() or "User")[:64]
+    current_last = (getattr(me, "last_name", None) or "").strip()[:64]
+    base_first = current_first
+    base_last = current_last
+
+    if cfg.get("time_nick_active", False):
+        preferred_style = cfg.get("time_style", 1)
+        stored_first = ((cfg.get("profile_base_first_name") or "User").strip() or "User")[:64]
+        stored_last = (cfg.get("profile_base_last_name") or "").strip()[:64]
+
+        # Immediately after enabling, Telegram can legitimately already contain a
+        # time-looking string in the user's own nickname. If it is exactly the saved
+        # base, it is user text, not our suffix, so leave it untouched.
+        if (current_first, current_last) != (stored_first, stored_last):
+            last_profile_key = data.get("last_profile_key")
+            if last_profile_key and len(last_profile_key) == 2:
+                # During normal runtime strip only the component that is still exactly
+                # what Qwitty last wrote. A manually edited component always wins.
+                if current_last == last_profile_key[1]:
+                    clean_last, last_had_time = strip_profile_time_suffix(current_last, preferred_style)
+                    if last_had_time:
+                        base_last = clean_last
+                if current_first == last_profile_key[0]:
+                    clean_first, first_had_time = strip_profile_time_suffix(current_first, preferred_style)
+                    if first_had_time:
+                        base_first = clean_first or "User"
+            else:
+                # After a process restart there is no runtime last_profile_key. Recover
+                # the persisted base by recognizing a Qwitty marker in either field.
+                clean_last, last_had_time = strip_profile_time_suffix(current_last, preferred_style)
+                clean_first, first_had_time = strip_profile_time_suffix(current_first, preferred_style)
+                if last_had_time:
+                    base_last = clean_last
+                elif first_had_time:
+                    base_first = clean_first or "User"
+
+    base_first = (base_first.strip() or "User")[:64]
+    base_last = base_last.strip()[:64]
+    changed = (
+        cfg.get("profile_base_first_name") != base_first
+        or cfg.get("profile_base_last_name", "") != base_last
+    )
+    if changed:
+        cfg["profile_base_first_name"] = base_first
+        cfg["profile_base_last_name"] = base_last
+        cfg["first_name"] = base_first
+        MEMORY_DB["config"][uid] = cfg
+        data.pop("last_profile_key", None)
+        if persist:
+            await persist_user_config_now(user_id, cfg)
+    return cfg
 
 def get_text(user_id, key, *args):
     text = TEXTS.get(key, key)
@@ -1044,6 +1184,9 @@ ACTIVITY_DAYS = 5
 ACTIVITY_SAVE_MIN_SECONDS = 275
 ACTIVITY_SAVE_MAX_SECONDS = 325
 ACTIVITY_SAVE_RESERVATIONS = {}
+ACTIVITY_SAVE_DISPATCH_LOCK = asyncio.Lock()
+ACTIVITY_SAVE_LAST_STARTED = 0.0
+ACTIVITY_SAVE_MIN_GAP_SECONDS = 1.0
 PROFILE_ACTIVITY_SUPPRESS_SECONDS = 6.0
 
 
@@ -1083,6 +1226,26 @@ def schedule_next_activity_save(user_id, data):
     data["activity_save_slot"] = chosen_slot
     data["activity_save_due"] = now + chosen_delay
     return chosen_delay
+
+
+async def save_activity_snapshot_spaced(user_id, activity):
+    """Save activity without starting two session writes at the same moment."""
+    global ACTIVITY_SAVE_LAST_STARTED
+    uid = str(user_id)
+    async with ACTIVITY_SAVE_DISPATCH_LOCK:
+        remaining = ACTIVITY_SAVE_MIN_GAP_SECONDS - (time.monotonic() - ACTIVITY_SAVE_LAST_STARTED)
+        if remaining > 0:
+            await asyncio.sleep(remaining)
+        ACTIVITY_SAVE_LAST_STARTED = time.monotonic()
+        # Statistics are intentionally low-frequency. On a transient failure the
+        # data stays dirty and is retried on the next ~5 minute cycle, not instantly.
+        return await async_db_save(
+            "activity",
+            uid,
+            activity,
+            max_attempts=1,
+            background_on_fail=False,
+        )
 
 
 def profile_activity_suppressed(user_id):
@@ -1217,7 +1380,7 @@ async def activity_tracker_loop(user_id):
             and time.monotonic() >= save_due
             and (not pending or pending.done())
         ):
-            pending = asyncio.create_task(async_db_save("activity", uid, activity))
+            pending = asyncio.create_task(save_activity_snapshot_spaced(user_id, activity))
             data["activity_save_task"] = pending
             DB_TASKS.add(pending)
             pending.add_done_callback(DB_TASKS.discard)
@@ -1324,7 +1487,7 @@ def start_activity_tracker(user_id):
     start_online_mode(user_id)
 
 
-async def update_profile_branding(user_id):
+async def update_profile_branding(user_id, sync_base=True):
     data = get_user_state(user_id)
     uid_str = str(user_id)
 
@@ -1338,18 +1501,15 @@ async def update_profile_branding(user_id):
             user_cfg = await async_db_get("config", uid_str) or {}
             MEMORY_DB["config"][uid_str] = user_cfg
 
-        base_first = (user_cfg.get("profile_base_first_name") or "User").strip() or "User"
-        base_last = (user_cfg.get("profile_base_last_name") or "").strip()
-
-
-        if "profile_base_first_name" not in user_cfg or "profile_base_last_name" not in user_cfg:
-            me = await data["client"].get_me()
-            user_cfg = await ensure_profile_base(user_id, me)
-            base_first = (user_cfg.get("profile_base_first_name") or me.first_name or "User").strip() or "User"
-            base_last = (user_cfg.get("profile_base_last_name") or me.last_name or "").strip()
-
         if not user_cfg.get("time_nick_active", False):
             return
+
+        # The minute loop normally refreshes the real Telegram nickname first. UI
+        # handlers that just synced it can skip the duplicate get_me() request.
+        if sync_base:
+            user_cfg = await sync_profile_base_from_telegram(user_id, user_cfg, persist=True)
+        base_first = (user_cfg.get("profile_base_first_name") or "User").strip() or "User"
+        base_last = (user_cfg.get("profile_base_last_name") or "").strip()
 
         offset = int(user_cfg.get("timezone_offset", 5))
         utc_now = get_world_utc_datetime()
@@ -1652,7 +1812,7 @@ async def cmd_start(message: types.Message):
             "registration_block_until_ts": 0.0,
             "replied_users": [], "autoresponder_last_replied": {},
             "profile_base_first_name": message.from_user.first_name or "User",
-            "profile_base_last_name": "",
+            "profile_base_last_name": message.from_user.last_name or "",
             "username": message.from_user.username or "N/A",
             "first_name": message.from_user.first_name or "User", "logged_in": False,
             "ever_registered": False,
@@ -1931,7 +2091,7 @@ def save_user_config(user_id, message, is_logged_in=True):
         "replied_users": old_cfg.get("replied_users", []),
         "autoresponder_last_replied": old_cfg.get("autoresponder_last_replied", {}),
         "profile_base_first_name": old_cfg.get("profile_base_first_name", message.from_user.first_name or "User"),
-        "profile_base_last_name": old_cfg.get("profile_base_last_name", ""),
+        "profile_base_last_name": old_cfg.get("profile_base_last_name", message.from_user.last_name or ""),
         "username": message.from_user.username or old_cfg.get("username", "N/A"),
         "first_name": message.from_user.first_name or old_cfg.get("first_name", "User"),
         "logged_in": is_logged_in,
@@ -2309,7 +2469,7 @@ async def process_autoresp_text(message: types.Message):
     await edit_or_send(user_id, get_text(user_id, "msg_autoresp_saved"), reply_markup=builder.as_markup())
 
 @dp.callback_query(F.data == "menu_timenick")
-async def menu_timenick(callback: types.CallbackQuery):
+async def menu_timenick(callback: types.CallbackQuery, sync_base=True):
     user_id = callback.from_user.id
     is_valid = await ensure_client_connected(user_id)
     if not is_valid:
@@ -2320,6 +2480,8 @@ async def menu_timenick(callback: types.CallbackQuery):
 
     uid_str = str(user_id)
     cfg = MEMORY_DB["config"].get(uid_str) or await async_db_get("config", uid_str) or {}
+    if sync_base:
+        cfg = await sync_profile_base_from_telegram(user_id, cfg, persist=True)
     is_active = cfg.get("time_nick_active", False)
     status_str = get_text(user_id, "status_on") if is_active else get_text(user_id, "status_off")
     offset = cfg.get("timezone_offset", 5)
@@ -2399,12 +2561,13 @@ async def select_time_style(callback: types.CallbackQuery):
         await callback.answer("Сначала подключите аккаунт.", show_alert=True)
         return
     cfg = MEMORY_DB["config"][str(uid)]
+    cfg = await sync_profile_base_from_telegram(uid, cfg, persist=True)
     cfg["time_style"] = style
     await persist_user_config_now(uid, cfg)
     await callback.answer()
     if cfg.get("time_nick_active"):
-        await update_profile_branding(uid)
-    await menu_timenick(callback)
+        await update_profile_branding(uid, sync_base=False)
+    await menu_timenick(callback, sync_base=False)
 
 
 @dp.callback_query(F.data == "toggle_timenick")
@@ -2417,6 +2580,7 @@ async def toggle_timenick(callback: types.CallbackQuery):
     if not await ensure_client_connected(user_id):
         await callback.answer("Сначала подключите аккаунт.", show_alert=True)
         return
+    cfg = await sync_profile_base_from_telegram(user_id, cfg, persist=True)
     new_status = not cfg.get("time_nick_active", False)
     cfg["time_nick_active"] = new_status
     data["time_nick_active"] = new_status
@@ -2425,7 +2589,7 @@ async def toggle_timenick(callback: types.CallbackQuery):
     if new_status:
         if not data.get("time_nick_task") or data["time_nick_task"].done():
             data["time_nick_task"] = asyncio.create_task(time_nickname_loop(user_id))
-        asyncio.create_task(update_profile_branding(user_id))
+        asyncio.create_task(update_profile_branding(user_id, sync_base=False))
     else:
         if data.get("time_nick_task"):
             data["time_nick_task"].cancel()
@@ -2445,7 +2609,7 @@ async def toggle_timenick(callback: types.CallbackQuery):
 
     log_action(user_id, f"Время в профиле: {'Включено' if new_status else 'Выключено'}")
     await maybe_recreate_ui(callback)
-    await menu_timenick(callback)
+    await menu_timenick(callback, sync_base=False)
 
 @dp.callback_query(F.data == "tz_select")
 async def tz_select(callback: types.CallbackQuery):
@@ -2472,6 +2636,8 @@ async def set_timezone(callback: types.CallbackQuery):
         return
     uid_str = str(user_id)
     cfg = MEMORY_DB["config"].get(uid_str) or await async_db_get("config", uid_str) or {}
+    if await ensure_client_connected(user_id):
+        cfg = await sync_profile_base_from_telegram(user_id, cfg, persist=True)
     cfg["timezone_offset"] = tz_val
     await persist_user_config_now(user_id, cfg)
 
@@ -2479,9 +2645,9 @@ async def set_timezone(callback: types.CallbackQuery):
     log_action(user_id, f"Изменён часовой пояс: UTC{sign_str}")
 
     if cfg.get("time_nick_active", False):
-        asyncio.create_task(update_profile_branding(user_id))
+        asyncio.create_task(update_profile_branding(user_id, sync_base=False))
 
-    await menu_timenick(callback)
+    await menu_timenick(callback, sync_base=False)
 
 
 @dp.callback_query(F.data == "ignore")
