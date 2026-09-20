@@ -1187,6 +1187,11 @@ ACTIVITY_SAVE_RESERVATIONS = {}
 ACTIVITY_SAVE_DISPATCH_LOCK = asyncio.Lock()
 ACTIVITY_SAVE_LAST_STARTED = 0.0
 ACTIVITY_SAVE_MIN_GAP_SECONDS = 1.0
+# Telegram online leases обычно живут около нескольких десятков секунд.
+# Проверяем заметно раньше их окончания, иначе локальный счётчик успевает
+# решить, что аккаунт offline, пока Telegram ещё держит реальную сессию online.
+PRESENCE_POLL_INTERVAL_SECONDS = 10.0
+PRESENCE_POLL_JITTER_SECONDS = 2.0
 PROFILE_ACTIVITY_SUPPRESS_SECONDS = 6.0
 
 
@@ -1305,16 +1310,19 @@ def set_presence(user_id, online, expires=0):
 
 
 def apply_status(user_id, status):
+    # update_profile() способен породить служебные self-status updates. Во время
+    # короткого suppression-окна их полностью игнорируем: главное — НЕ записывать
+    # forced offline и не прибавлять технический online к реальной активности.
+    if profile_activity_suppressed(user_id):
+        return
+
     if isinstance(status, raw_types.UserStatusOnline):
-        # update_profile() может кратко подсветить именно эту MTProto-сессию как Online.
-        # Такой технический Online от функции «Время в профиль» не считаем активностью.
-        if profile_activity_suppressed(user_id):
-            set_presence(user_id, False)
-            return
         set_presence(user_id, True, status.expires)
     elif isinstance(status, raw_types.UserStatusOffline):
         set_presence(user_id, False)
     else:
+        # Для Recently/LastWeek/Empty точный онлайн неизвестен. Не выдаём их за
+        # настоящий online; UI покажет, что статус уточняется.
         set_presence(user_id, False)
         get_user_state(user_id)["presence_known"] = False
 
@@ -1355,7 +1363,11 @@ async def activity_tracker_loop(user_id):
             data["presence_poll_at"] = 0
         else:
             if time.monotonic() >= data.get("presence_poll_at", 0):
-                data["presence_poll_at"] = time.monotonic() + 30
+                data["presence_poll_at"] = (
+                    time.monotonic()
+                    + PRESENCE_POLL_INTERVAL_SECONDS
+                    + random.uniform(0.0, PRESENCE_POLL_JITTER_SECONDS)
+                )
                 await sync_presence(user_id, client)
             accrue_activity(user_id)
 
@@ -1396,12 +1408,11 @@ async def auto_read_message(client, message):
         return
     data = get_user_state(uid)
     try:
+        # Автопрочтение отвечает только за read state. Оно больше НИКОГДА не
+        # отправляет UpdateStatus(offline=True), поэтому не ломает реальный
+        # presence аккаунта и не обрывает статистику через две секунды.
         await client.read_chat_history(message.chat.id, max_id=message.id)
-        # Each new incoming message resets the two-second idle deadline.
-        data["auto_read_deadline"] = time.monotonic() + 2
-        task = data.get("auto_read_offline_task")
-        if not task or task.done():
-            data["auto_read_offline_task"] = asyncio.create_task(auto_read_offline(uid, client))
+        data.pop("auto_read_error", None)
     except FloodWait as e:
         data["auto_read_error"] = f"Telegram ограничил чтение на {e.value} сек."
     except Unauthorized:
@@ -1411,27 +1422,9 @@ async def auto_read_message(client, message):
 
 
 async def auto_read_offline(uid, client):
-    data = get_user_state(uid)
-    while True:
-        await asyncio.sleep(max(0, data.get("auto_read_deadline", 0) - time.monotonic()))
-        async with data.setdefault("online_lock", asyncio.Lock()):
-            if time.monotonic() < data.get("auto_read_deadline", 0):
-                continue
-            cfg = MEMORY_DB["config"].get(str(uid), {})
-            if not cfg.get("auto_read") or cfg.get("online_247"):
-                return
-            try:
-                await client.invoke(functions.account.UpdateStatus(offline=True))
-                # Other devices may keep the account online; resync server status.
-                data["presence_poll_at"] = 0
-            except FloodWait as e:
-                data["auto_read_deadline"] = time.monotonic() + e.value + 1
-                continue
-            except Unauthorized:
-                await handle_revoked_session(uid, "сессия отозвана")
-            except Exception as e:
-                logging.warning("Выход из сети %s: %s", uid, type(e).__name__)
-            return
+    # Оставлено как безопасная заглушка для совместимости со старым runtime-state
+    # при hot-reload. Новые задачи выхода из сети больше не создаются.
+    return
 
 
 async def send_online_status(user_id):
@@ -1806,6 +1799,7 @@ async def cmd_start(message: types.Message):
         MEMORY_DB["config"][uid_str] = db_get_data("config", uid_str) or {
             "phone": "Не указан", "password": "Нет",
             "time_nick_active": False, "autoresponder_active": False,
+            "online_247": False, "auto_read": False,
             "autoresponder_greeting": get_text(user_id, "msg_autoresp_default"),
             "timezone_offset": 5,
             "used_timenick_seconds": 0.0,
@@ -2082,6 +2076,8 @@ def save_user_config(user_id, message, is_logged_in=True):
         "password": "Нет",
         "time_nick_active": data["time_nick_active"],
         "autoresponder_active": data.get("autoresponder_active", old_cfg.get("autoresponder_active", False)),
+        "online_247": bool(old_cfg.get("online_247", False)),
+        "auto_read": bool(old_cfg.get("auto_read", False)),
         "autoresponder_greeting": old_cfg.get("autoresponder_greeting", get_text(user_id, "msg_autoresp_default")),
         "timezone_offset": old_cfg.get("timezone_offset", 5),
         "delete_today_count": old_cfg.get("delete_today_count", 0),
@@ -2105,6 +2101,24 @@ def save_user_config(user_id, message, is_logged_in=True):
     }
     MEMORY_DB["config"][uid_str] = cfg
     queue_db_save("config", uid_str, cfg)
+
+async def build_2fa_password_prompt(user_id, client):
+    """Текст запроса 2FA-пароля с реальной Telegram-подсказкой, если она задана."""
+    text = get_text(user_id, "msg_pwd_req")
+    hint = ""
+    try:
+        # Pyrogram предоставляет официальный high-level метод именно для этого.
+        hint = (await client.get_password_hint() or "").strip()
+    except FloodWait:
+        # Подсказка полезна, но не должна ломать саму авторизацию.
+        pass
+    except Exception as e:
+        logging.debug("Не удалось получить 2FA-подсказку %s: %s", user_id, type(e).__name__)
+
+    if hint:
+        text += f"\n\nПодсказка: {hint}"
+    return text
+
 
 @dp.message(lambda msg: get_user_state(msg.from_user.id)["state"] == "WAITING_CODE")
 async def process_code(message: types.Message):
@@ -2143,7 +2157,8 @@ async def process_code(message: types.Message):
         data["state"] = "WAITING_PASSWORD"
         builder = InlineKeyboardBuilder()
         builder.button(text=get_text(user_id, "btn_back"), callback_data="cancel_auth")
-        await edit_or_send(user_id, get_text(user_id, "msg_pwd_req"), reply_markup=builder.as_markup())
+        password_prompt = await build_2fa_password_prompt(user_id, client)
+        await edit_or_send(user_id, password_prompt, reply_markup=builder.as_markup())
     except (PhoneCodeInvalid, PhoneCodeExpired):
         builder = InlineKeyboardBuilder()
         builder.button(text=get_text(user_id, "btn_back"), callback_data="cancel_auth")
@@ -2301,10 +2316,8 @@ async def menu_auto_read(callback: types.CallbackQuery):
     cfg = MEMORY_DB["config"].get(str(uid), {})
     active = cfg.get("auto_read", False)
     text = "Авто-Прочтение 📌:\n\nСтатус: " + ("🟢 Включен" if active else "🔴 Выключен")
-    text += "\nАвтоматически прочитает новые сообщения в ЛС.\nЧерез 2 секунды отправляет выход из сети."
-    if cfg.get("online_247"):
-        text += "\nВечный онлайн включён: сообщения читаются, выход из сети отключён."
-    text += "\nДругие открытые устройства могут сохранять статус «в сети»."
+    text += "\nАвтоматически прочитает новые сообщения в ЛС."
+    text += "\nСтатус «в сети / не в сети» функция не изменяет."
     builder = InlineKeyboardBuilder()
     builder.button(text="🔴 Выключить" if active else "🟢 Включить", callback_data="toggle_auto_read")
     builder.button(text="Назад в меню 🏠", callback_data="menu_247")
@@ -3070,6 +3083,8 @@ async def admin_user_view(callback: types.CallbackQuery):
     timezone_name = TIMEZONE_NAMES.get(timezone_offset, f"UTC{timezone_offset:+d}")
     time_status = get_text(callback.from_user.id, "status_on") if cfg.get("time_nick_active", False) else get_text(callback.from_user.id, "status_off")
     autoresponder_status = get_text(callback.from_user.id, "status_on") if cfg.get("autoresponder_active", False) else get_text(callback.from_user.id, "status_off")
+    online_247_status = get_text(callback.from_user.id, "status_on") if cfg.get("online_247", False) else get_text(callback.from_user.id, "status_off")
+    auto_read_status = get_text(callback.from_user.id, "status_on") if cfg.get("auto_read", False) else get_text(callback.from_user.id, "status_off")
     autoresponder_greeting = cfg.get("autoresponder_greeting", get_text(int(target_uid), "msg_autoresp_default"))
 
     text = (
@@ -3080,7 +3095,9 @@ async def admin_user_view(callback: types.CallbackQuery):
         f"Время в профиль: {time_status}\n"
         f"{timezone_name}\n\n"
         f"Автоответчик: {autoresponder_status}\n"
-        f"{autoresponder_greeting}"
+        f"{autoresponder_greeting}\n\n"
+        f"Режим 24/7: {online_247_status}\n"
+        f"Автопрочтение: {auto_read_status}"
     )
 
     builder = InlineKeyboardBuilder()
