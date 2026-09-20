@@ -18,9 +18,9 @@ else:
 loop = asyncio.new_event_loop()
 asyncio.set_event_loop(loop)
 
-# Импорт userbot регистрирует все Aiogram-хендлеры.
-import userbot  # noqa: F401
-import guard  # noqa: F401
+
+import userbot
+import guard
 
 from userbot import (
     DB_TASKS,
@@ -88,6 +88,7 @@ async def main():
 
         for data in USER_DATA.values():
             for key in (
+                "session_repair_task",
                 "saved_history_task",
                 "online_task",
                 "time_nick_task",
