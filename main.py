@@ -432,30 +432,98 @@ def db_get_all_config():
         return []
 
 def db_save_data(table: str, user_id: str, data: dict):
+    """One synchronous Supabase write attempt. Retries are managed asynchronously below."""
     if not supabase:
         return False
     try:
-        supabase.table(table).upsert({"id": str(user_id), "data": data}).execute()
+        payload = {"id": str(user_id), "data": data}
+        query = supabase.table(table)
+        try:
+            # The existing schema guarantees id is UNIQUE. Make that conflict target
+            # explicit so upsert also works when id is not the table's primary key.
+            query.upsert(payload, on_conflict="id").execute()
+        except TypeError:
+            # Compatibility with older supabase-py/postgrest clients.
+            query.upsert(payload).execute()
         return True
     except Exception as e:
-        logging.error("Supabase write failed (%s): %s", table, type(e).__name__)
+        logging.warning(
+            "Supabase write failed (%s/%s): %s: %s",
+            table,
+            user_id,
+            type(e).__name__,
+            str(e)[:300],
+        )
         return False
 
 async def async_db_get(table: str, user_id: str):
-    return await asyncio.to_thread(db_get_data, table, str(user_id))
+    # Reads are less frequent than writes, but a short transient outage should not
+    # immediately break a callback. Keep retries bounded so handlers do not hang.
+    delays = (0.0, 0.35, 0.9)
+    last_error = None
+    for delay in delays:
+        if delay:
+            await asyncio.sleep(delay)
+        try:
+            return await asyncio.to_thread(db_get_data, table, str(user_id))
+        except RuntimeError as e:
+            last_error = e
+    raise last_error or RuntimeError("Не удалось загрузить данные из Supabase.")
 
 DB_WRITE_LOCKS = {}
 DB_DIRTY = set()
 DB_TASKS = set()
+DB_WORKERS = {}
+DB_REVISIONS = {}
+DB_SAVED_REVISIONS = {}
+DB_WRITE_SEMAPHORE = asyncio.Semaphore(max(1, int(os.getenv("SUPABASE_MAX_PARALLEL_WRITES", "4") or 4)))
+DB_SAVE_DEBOUNCE_SECONDS = 0.30
+DB_SAVE_RETRY_BASE_SECONDS = 1.0
+DB_SAVE_RETRY_MAX_SECONDS = 30.0
+DB_SAVE_WARNING_AFTER_SECONDS = 20.0
+DB_SAVE_WARNING_TEXT = "⚠️ Настройки пока не сохранены в базе. Повторная попытка выполняется автоматически."
 
-def queue_db_save(table, uid, data):
-    DB_DIRTY.add((table, str(uid)))
-    task = asyncio.create_task(async_db_save(table, str(uid), data))
+
+def _bump_db_revision(key):
+    DB_REVISIONS[key] = int(DB_REVISIONS.get(key, 0) or 0) + 1
+    return DB_REVISIONS[key]
+
+
+def _track_db_task(task):
     DB_TASKS.add(task)
     task.add_done_callback(DB_TASKS.discard)
+    return task
+
+
+def _ensure_db_worker(table, uid):
+    key = (table, str(uid))
+    task = DB_WORKERS.get(key)
+    if task and not task.done():
+        return task
+    task = asyncio.create_task(_db_save_worker(table, str(uid)))
+    DB_WORKERS[key] = task
+    _track_db_task(task)
+    return task
+
+
+def queue_db_save(table, uid, data):
+    """Coalesce rapid updates into one latest-state write per table/user."""
+    uid = str(uid)
+    key = (table, uid)
+
+    # Most callers already update MEMORY_DB before calling this function. Preserve
+    # that newest object; only seed a missing entry from the supplied data.
+    table_cache = MEMORY_DB.setdefault(table, {})
+    if uid not in table_cache:
+        table_cache[uid] = copy.deepcopy(data)
+
+    DB_DIRTY.add(key)
+    _bump_db_revision(key)
+    _ensure_db_worker(table, uid)
+
 
 def _record_db_save_result(table: str, user_id: str, ok: bool):
-    """Keep config/activity persistence health separate and suppress transient UI flashes."""
+    """Track persistence health without flashing warnings for short network hiccups."""
     try:
         numeric_uid = int(user_id)
     except (TypeError, ValueError):
@@ -467,10 +535,16 @@ def _record_db_save_result(table: str, user_id: str, ok: bool):
 
     if table == "config":
         if ok:
+            had_error = bool(state.get("save_error"))
             state["config_save_failures"] = 0
             state["config_save_failed_since"] = 0.0
             state["save_error"] = False
             state.pop("config_save_error", None)
+            if had_error and state.get("msg_id") and state.get("last_ui_text") is not None:
+                try:
+                    asyncio.create_task(refresh_ui_after_db_recovery(numeric_uid))
+                except RuntimeError:
+                    pass
             return
 
         failures = int(state.get("config_save_failures", 0) or 0) + 1
@@ -478,51 +552,132 @@ def _record_db_save_result(table: str, user_id: str, ok: bool):
         if not state.get("config_save_failed_since"):
             state["config_save_failed_since"] = time.monotonic()
 
-        # A single failed request is often followed immediately by a successful
-        # coalesced/retry write. Do not flash a scary warning for that transient case.
         failed_for = time.monotonic() - float(state.get("config_save_failed_since", 0.0) or 0.0)
-        persistent = failures >= 3 or failed_for >= 15.0
+        # A couple of failed HTTP requests are normal on a sleepy/free backend.
+        # Warn only when the outage is actually persistent.
+        persistent = failures >= 6 or failed_for >= DB_SAVE_WARNING_AFTER_SECONDS
         state["save_error"] = persistent
         if persistent:
             state["config_save_error"] = True
 
     elif table == "activity":
-        # Activity is intentionally flushed only every ~5 minutes. Its persistence
-        # state must never masquerade as a settings/config save error in the main UI.
         state["activity_save_error"] = not ok
 
 
-async def async_db_save(table: str, user_id: str, data: dict):
-    key = (table, str(user_id))
-    DB_DIRTY.add(key)
+async def _write_latest_snapshot(table: str, user_id: str, fallback_data=None):
+    """Serialize writes for one record and never let an old snapshot win over a new one."""
+    uid = str(user_id)
+    key = (table, uid)
     lock = DB_WRITE_LOCKS.setdefault(key, asyncio.Lock())
+
     async with lock:
-        # Take the latest state AFTER acquiring the lock: queued old snapshots
-        # must never overwrite a newer style, switch or session string.
-        current = MEMORY_DB.get(table, {}).get(str(user_id), data)
+        current = MEMORY_DB.get(table, {}).get(uid, fallback_data if fallback_data is not None else {})
         snapshot = copy.deepcopy(current)
-        ok = await asyncio.to_thread(db_save_data, table, str(user_id), snapshot)
-        if ok and snapshot == MEMORY_DB.get(table, {}).get(str(user_id), data):
-            DB_DIRTY.discard(key)
-        _record_db_save_result(table, str(user_id), ok)
+        revision = int(DB_REVISIONS.get(key, 0) or 0)
+        async with DB_WRITE_SEMAPHORE:
+            ok = await asyncio.to_thread(db_save_data, table, uid, snapshot)
+
+        if ok:
+            DB_SAVED_REVISIONS[key] = max(int(DB_SAVED_REVISIONS.get(key, 0) or 0), revision)
+            latest = MEMORY_DB.get(table, {}).get(uid, fallback_data if fallback_data is not None else {})
+            # Clear dirty only if absolutely nothing changed while this snapshot was in flight.
+            if revision == int(DB_REVISIONS.get(key, 0) or 0) and snapshot == latest:
+                DB_DIRTY.discard(key)
         return ok
 
+
+async def _db_save_worker(table: str, user_id: str):
+    """Single background writer per record with debounce + exponential backoff."""
+    uid = str(user_id)
+    key = (table, uid)
+    backoff = DB_SAVE_RETRY_BASE_SECONDS
+    was_cancelled = False
+    try:
+        while key in DB_DIRTY:
+            # Coalesce button spam / several config changes made in one handler chain.
+            before = int(DB_REVISIONS.get(key, 0) or 0)
+            await asyncio.sleep(DB_SAVE_DEBOUNCE_SECONDS)
+            if before != int(DB_REVISIONS.get(key, 0) or 0):
+                continue
+
+            ok = await _write_latest_snapshot(table, uid)
+            _record_db_save_result(table, uid, ok)
+            if ok:
+                backoff = DB_SAVE_RETRY_BASE_SECONDS
+                # If data changed during the request, key is still dirty and the loop
+                # immediately saves the newer revision after another short debounce.
+                continue
+
+            # Keep the setting in MEMORY_DB and retry in the background. Jitter prevents
+            # many restored sessions from hammering Supabase at the same instant.
+            await asyncio.sleep(backoff + random.uniform(0.0, min(1.0, backoff * 0.25)))
+            backoff = min(DB_SAVE_RETRY_MAX_SECONDS, backoff * 2.0)
+    except asyncio.CancelledError:
+        was_cancelled = True
+        raise
+    except Exception as e:
+        logging.exception("DB worker crashed for %s/%s: %s", table, uid, e)
+    finally:
+        if DB_WORKERS.get(key) is asyncio.current_task():
+            DB_WORKERS.pop(key, None)
+        # Safety net for a rare crash/race, but never resurrect workers that were
+        # intentionally cancelled during shutdown.
+        if key in DB_DIRTY and not was_cancelled:
+            try:
+                _ensure_db_worker(table, uid)
+            except RuntimeError:
+                pass
+
+
+async def async_db_save(table: str, user_id: str, data: dict, max_attempts=3, background_on_fail=True):
+    """Save important state now, with bounded retries; keep retrying later on failure."""
+    uid = str(user_id)
+    key = (table, uid)
+    table_cache = MEMORY_DB.setdefault(table, {})
+    if uid not in table_cache:
+        table_cache[uid] = copy.deepcopy(data)
+
+    DB_DIRTY.add(key)
+    _bump_db_revision(key)
+
+    delay = 0.35
+    attempts = max(1, int(max_attempts or 1))
+    for attempt in range(attempts):
+        ok = await _write_latest_snapshot(table, uid, fallback_data=data)
+        if ok:
+            _record_db_save_result(table, uid, True)
+            # If another change happened while we were saving, let one coalesced worker
+            # persist that newer revision instead of spawning more direct writes.
+            if key in DB_DIRTY and background_on_fail and table != "activity":
+                _ensure_db_worker(table, uid)
+            return True
+        if attempt + 1 < attempts:
+            await asyncio.sleep(delay + random.uniform(0.0, 0.15))
+            delay = min(2.0, delay * 2.0)
+
+    _record_db_save_result(table, uid, False)
+    if background_on_fail and table != "activity":
+        _ensure_db_worker(table, uid)
+    return False
+
+
 async def db_retry_loop():
+    """Watchdog only: workers do the actual retrying; this revives any missing worker."""
     while True:
-        await asyncio.sleep(5)
+        await asyncio.sleep(15)
         for table, uid in list(DB_DIRTY):
-            # activity сохраняется своим разнесённым по времени циклом примерно раз в 5 минут.
-            # Иначе этот общий retry-loop снова превращал бы редкие записи в запросы каждые 5 секунд.
+            # Activity intentionally keeps its separate ~5 minute write cadence.
             if table == "activity":
                 continue
-            await async_db_save(table, uid, MEMORY_DB[table].get(uid, {}))
+            _ensure_db_worker(table, uid)
+
 
 async def persist_user_config_now(user_id: int, cfg: dict):
     uid = str(user_id)
     MEMORY_DB["config"][uid] = cfg
-    # async_db_save() centrally tracks persistent config failures. Do not overwrite
-    # that debounce here with a one-request transient error.
-    return await async_db_save("config", uid, cfg)
+    # Important user-facing switches get three immediate attempts. If Supabase is
+    # genuinely unavailable, the latest config stays dirty and a single worker retries.
+    return await async_db_save("config", uid, cfg, max_attempts=3, background_on_fail=True)
 
 def get_text(user_id, key, *args):
     text = TEXTS.get(key, key)
@@ -722,9 +877,13 @@ def start_ui_refresh_task(user_id):
 
 async def edit_or_send(user_id, text, reply_markup=None, parse_mode=None):
     data = get_user_state(user_id)
+    # Keep the clean UI text separately so a recovered DB connection can remove
+    # the warning automatically instead of leaving a stale scary message onscreen.
+    clean_text = text
+    display_text = clean_text
     if data.get("save_error"):
-        text += "\n\n⚠️ Настройки пока не сохранены в базе. Повторная попытка выполняется автоматически."
-    data["last_ui_text"] = text
+        display_text += "\n\n" + DB_SAVE_WARNING_TEXT
+    data["last_ui_text"] = clean_text
     data["last_ui_reply_markup"] = reply_markup
     data["last_ui_parse_mode"] = parse_mode
     start_ui_refresh_task(user_id)
@@ -744,7 +903,7 @@ async def edit_or_send(user_id, text, reply_markup=None, parse_mode=None):
             await bot.edit_message_text(
                 chat_id=user_id,
                 message_id=data["msg_id"],
-                text=text,
+                text=display_text,
                 reply_markup=reply_markup,
                 parse_mode=parse_mode,
             )
@@ -765,7 +924,7 @@ async def edit_or_send(user_id, text, reply_markup=None, parse_mode=None):
 
     msg = await bot.send_message(
         chat_id=user_id,
-        text=text,
+        text=display_text,
         reply_markup=reply_markup,
         parse_mode=parse_mode,
     )
@@ -778,6 +937,28 @@ async def edit_or_send(user_id, text, reply_markup=None, parse_mode=None):
 
     if force_new_message:
         data["ui_action_count"] = 0
+
+
+async def refresh_ui_after_db_recovery(user_id):
+    """Remove a persistence warning from the current UI after Supabase recovers."""
+    data = get_user_state(user_id)
+    lock = data.setdefault("ui_lock", asyncio.Lock())
+    async with lock:
+        if data.get("save_error") or not data.get("msg_id") or data.get("last_ui_text") is None:
+            return
+        try:
+            await bot.edit_message_text(
+                chat_id=user_id,
+                message_id=data["msg_id"],
+                text=data["last_ui_text"],
+                reply_markup=data.get("last_ui_reply_markup"),
+                parse_mode=data.get("last_ui_parse_mode"),
+            )
+        except TelegramBadRequest as e:
+            if "message is not modified" not in str(e).lower():
+                logging.debug("Не удалось убрать DB-предупреждение %s: %s", user_id, e)
+        except Exception as e:
+            logging.debug("Не удалось обновить UI после восстановления БД %s: %s", user_id, e)
 
 
 async def maybe_recreate_ui(callback):
@@ -2789,11 +2970,20 @@ async def main():
         await asyncio.gather(recovery_task, return_exceptions=True)
         db_task.cancel()
         await asyncio.gather(db_task, return_exceptions=True)
-        await asyncio.gather(*list(DB_TASKS), return_exceptions=True)
+
+        # Background DB workers can legitimately retry forever while Supabase is down,
+        # so never await them indefinitely during shutdown. Cancel them, then perform
+        # a bounded final flush of the newest in-memory snapshots.
+        pending_db_tasks = list(DB_TASKS)
+        for task in pending_db_tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*pending_db_tasks, return_exceptions=True)
+
         for uid, cfg in MEMORY_DB["config"].items():
-            await async_db_save("config", uid, cfg)
+            await async_db_save("config", uid, cfg, max_attempts=3, background_on_fail=False)
         for uid, activity in MEMORY_DB["activity"].items():
-            await async_db_save("activity", uid, activity)
+            await async_db_save("activity", uid, activity, max_attempts=2, background_on_fail=False)
         for data in USER_DATA.values():
             if data.get("client"):
                 await close_pyrogram_client(data["client"])
