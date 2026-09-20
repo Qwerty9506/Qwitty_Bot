@@ -454,6 +454,44 @@ def queue_db_save(table, uid, data):
     DB_TASKS.add(task)
     task.add_done_callback(DB_TASKS.discard)
 
+def _record_db_save_result(table: str, user_id: str, ok: bool):
+    """Keep config/activity persistence health separate and suppress transient UI flashes."""
+    try:
+        numeric_uid = int(user_id)
+    except (TypeError, ValueError):
+        return
+
+    state = USER_DATA.get(numeric_uid)
+    if state is None:
+        return
+
+    if table == "config":
+        if ok:
+            state["config_save_failures"] = 0
+            state["config_save_failed_since"] = 0.0
+            state["save_error"] = False
+            state.pop("config_save_error", None)
+            return
+
+        failures = int(state.get("config_save_failures", 0) or 0) + 1
+        state["config_save_failures"] = failures
+        if not state.get("config_save_failed_since"):
+            state["config_save_failed_since"] = time.monotonic()
+
+        # A single failed request is often followed immediately by a successful
+        # coalesced/retry write. Do not flash a scary warning for that transient case.
+        failed_for = time.monotonic() - float(state.get("config_save_failed_since", 0.0) or 0.0)
+        persistent = failures >= 3 or failed_for >= 15.0
+        state["save_error"] = persistent
+        if persistent:
+            state["config_save_error"] = True
+
+    elif table == "activity":
+        # Activity is intentionally flushed only every ~5 minutes. Its persistence
+        # state must never masquerade as a settings/config save error in the main UI.
+        state["activity_save_error"] = not ok
+
+
 async def async_db_save(table: str, user_id: str, data: dict):
     key = (table, str(user_id))
     DB_DIRTY.add(key)
@@ -466,8 +504,7 @@ async def async_db_save(table: str, user_id: str, data: dict):
         ok = await asyncio.to_thread(db_save_data, table, str(user_id), snapshot)
         if ok and snapshot == MEMORY_DB.get(table, {}).get(str(user_id), data):
             DB_DIRTY.discard(key)
-        if table == "config" and int(user_id) in USER_DATA:
-            USER_DATA[int(user_id)]["save_error"] = not ok
+        _record_db_save_result(table, str(user_id), ok)
         return ok
 
 async def db_retry_loop():
@@ -483,9 +520,9 @@ async def db_retry_loop():
 async def persist_user_config_now(user_id: int, cfg: dict):
     uid = str(user_id)
     MEMORY_DB["config"][uid] = cfg
-    ok = await async_db_save("config", uid, cfg)
-    get_user_state(user_id)["save_error"] = not ok
-    return ok
+    # async_db_save() centrally tracks persistent config failures. Do not overwrite
+    # that debounce here with a one-request transient error.
+    return await async_db_save("config", uid, cfg)
 
 def get_text(user_id, key, *args):
     text = TEXTS.get(key, key)
@@ -874,10 +911,12 @@ def profile_activity_suppressed(user_id):
 
 def begin_profile_activity_suppression(user_id):
     data = get_user_state(user_id)
-    # Перед служебным изменением имени фиксируем уже набранную реальную активность,
-    # а возможный Online от самого MTProto-запроса не записываем в статистику.
+    # Перед служебным изменением имени фиксируем уже набранную реальную активность.
+    # ВАЖНО: здесь больше НЕ переводим аккаунт в offline. Иначе UpdateStatus(False)
+    # может погасить реальный presence аккаунта, даже если пользователь сейчас
+    # сидит в Telegram с телефона/ПК. На короткое время лишь игнорируем технический
+    # Online, который способен прилететь от самого update_profile().
     accrue_activity(user_id)
-    set_presence(user_id, False)
     data["profile_activity_suppress_until"] = time.monotonic() + PROFILE_ACTIVITY_SUPPRESS_SECONDS
     data["presence_poll_at"] = max(
         data.get("presence_poll_at", 0),
@@ -1156,16 +1195,9 @@ async def update_profile_branding(user_id):
         await data["client"].update_profile(first_name=new_first, last_name=new_last)
         data["last_profile_key"] = profile_key
 
-        # После служебного изменения ника сразу возвращаем именно userbot-сессию
-        # в offline. Если пользователь реально сидит с телефона/ПК, следующий
-        # серверный sync_presence снова увидит настоящий Online.
-        if not online_247:
-            try:
-                await data["client"].invoke(functions.account.UpdateStatus(offline=True))
-            except FloodWait as e:
-                data["presence_poll_at"] = time.monotonic() + e.value + 1
-            except Exception as e:
-                logging.debug("Не удалось вернуть служебную сессию offline после ника %s: %s", user_id, type(e).__name__)
+        # Никакого принудительного UpdateStatus(offline=True) после смены ника.
+        # Технический Online от update_profile() отсекается suppression-окном выше,
+        # а реальный онлайн с других устройств остаётся нетронутым.
 
 
     except FloodWait as e:
@@ -1980,8 +2012,8 @@ def activity_text(user_id):
     lines.extend(["", status, "Учитывается статус аккаунта, включая вечный онлайн.", f"Обновлено: {now:%H:%M:%S}"])
     if data.get("activity_error"):
         lines.append(data["activity_error"])
-    if ("activity", uid) in DB_DIRTY and data.get("save_error"):
-        lines.append("Сохранение ожидает подключения к базе.")
+    if ("activity", uid) in DB_DIRTY and data.get("activity_save_error"):
+        lines.append("Сохранение статистики ожидает подключения к базе.")
     return "\n".join(lines)
 
 
@@ -2225,13 +2257,8 @@ async def toggle_timenick(callback: types.CallbackQuery):
                     begin_profile_activity_suppression(user_id)
                 await data["client"].update_profile(first_name=base_first, last_name=base_last)
                 data.pop("last_profile_key", None)
-                if not cfg.get("online_247", False):
-                    try:
-                        await data["client"].invoke(functions.account.UpdateStatus(offline=True))
-                    except FloodWait as e:
-                        data["presence_poll_at"] = time.monotonic() + e.value + 1
-                    except Exception:
-                        pass
+                # При возврате обычного имени тоже не отправляем forced offline:
+                # suppression уже отсекает служебный Online от update_profile().
             except Exception as e:
                 logging.error(f"Ошибка сброса имени профиля: {e}")
 
