@@ -1,4 +1,10 @@
 import copy
+import base64
+import hashlib
+import json
+import sqlite3
+import uuid
+import zlib
 import asyncio
 import sys
 import os
@@ -17,7 +23,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
 
 from pyrogram import Client, enums, filters
-from pyrogram.handlers import MessageHandler, RawUpdateHandler
+from pyrogram.handlers import MessageHandler, EditedMessageHandler, RawUpdateHandler
 from pyrogram.raw import functions, types as raw_types
 from pyrogram.errors import SessionPasswordNeeded, PhoneCodeInvalid, PhoneCodeExpired, Unauthorized, FloodWait
 
@@ -217,7 +223,6 @@ TEXTS = {
     "btn_back": "Назад ⬅️",
     "btn_back_menu": "Назад в меню 🏠",
     "btn_confirm": "Подтвердить ✅",
-    "btn_activity": "Активность 📊",
     "btn_autoresp": "Автоответчик 🤖",
     "btn_timenick": "Время в профиль ⏰",
     "btn_turn_on": "Включить 🟢",
@@ -262,7 +267,6 @@ TEXTS = {
     "msg_check_pwd": "⏳ Проверка 2FA...\n⏱ Осталось: {0} сек.",
     "msg_pwd_wrong": "❌ Неверный пароль!\nВведите заново:",
     "msg_pwd_ok": "Пароль принят!\nЮзербот успешно запущен.",
-    "msg_activity_text": "Ваша история активности (за 5 дней):\n\n{0}",
     "msg_timenick_text": "Вывод текущего времени в имя профиля.\n\nТекущий статус: {0}\nПредпросмотр: {1}\nСмещение часового пояса: UTC{2}",
     "msg_tz_select": "Выберите ваш часовой пояс🌐",
     "msg_tz_saved": "Часовой пояс изменен на UTC{0}!",
@@ -435,7 +439,7 @@ async def ensure_profile_base(user_id, me=None):
         queue_db_save("config", uid_str, cfg)
     return cfg
 
-MEMORY_DB = {"config": {}, "activity": {}, "logs": {}}
+MEMORY_DB = {"config": {}, "logs": {}}
 USER_DATA = {}
 
 def db_get_data(table: str, user_id: str):
@@ -608,8 +612,6 @@ def _record_db_save_result(table: str, user_id: str, ok: bool):
         if persistent:
             state["config_save_error"] = True
 
-    elif table == "activity":
-        state["activity_save_error"] = not ok
 
 
 async def _write_latest_snapshot(table: str, user_id: str, fallback_data=None):
@@ -696,7 +698,7 @@ async def async_db_save(table: str, user_id: str, data: dict, max_attempts=3, ba
             _record_db_save_result(table, uid, True)
                                                                                        
                                                                                  
-            if key in DB_DIRTY and background_on_fail and table != "activity":
+            if key in DB_DIRTY and background_on_fail:
                 _ensure_db_worker(table, uid)
             return True
         if attempt + 1 < attempts:
@@ -704,7 +706,7 @@ async def async_db_save(table: str, user_id: str, data: dict, max_attempts=3, ba
             delay = min(2.0, delay * 2.0)
 
     _record_db_save_result(table, uid, False)
-    if background_on_fail and table != "activity":
+    if background_on_fail:
         _ensure_db_worker(table, uid)
     return False
 
@@ -715,8 +717,6 @@ async def db_retry_loop():
         await asyncio.sleep(15)
         for table, uid in list(DB_DIRTY):
                                                                                 
-            if table == "activity":
-                continue
             _ensure_db_worker(table, uid)
 
 
@@ -836,7 +836,6 @@ def get_user_state(user_id):
             "time_nick_active": bool(cfg.get("time_nick_active", False)),
             "time_nick_task": None,
             "autoresponder_active": bool(cfg.get("autoresponder_active", False)),
-            "activity_task": None,
             "delete_count": int(cfg.get("delete_today_count", 0) or 0),
             "registration_block_until_ts": float(cfg.get("registration_block_until_ts", 0.0) or 0.0),
             "ui_action_count": 0,
@@ -902,9 +901,8 @@ def get_missing_session_markup(user_id):
     return builder.as_markup()
 
 async def handle_revoked_session(user_id, reason="сессия была отозвана"):
-    set_presence(user_id, False)
     data = get_user_state(user_id)
-    for task_key in ("time_nick_task", "activity_task", "online_task", "auto_read_offline_task", "activity_ui_task"):
+    for task_key in ("time_nick_task", "saved_history_task", "online_task", "auto_read_offline_task"):
         task = data.get(task_key)
         if task and task is not asyncio.current_task():
             task.cancel()
@@ -948,6 +946,11 @@ class RestartMiddleware(BaseMiddleware):
 
     async def dispatch(self, handler, event, data):
         if isinstance(event, types.CallbackQuery) and event.message:
+            if event.message.chat.id != event.from_user.id:
+                await event.answer("Откройте бота в личном чате.", show_alert=True)
+                return
+            if event.data == "saved_ok":
+                return await handler(event, data)
             user_id = event.from_user.id
             u_state = get_user_state(user_id)
             stats_task = u_state.get("admin_stats_task")
@@ -955,7 +958,6 @@ class RestartMiddleware(BaseMiddleware):
                 stop_admin_server_stats_loop(user_id)
                 await asyncio.gather(stats_task, return_exceptions=True)
             u_state["msg_id"] = event.message.message_id
-            await stop_activity_ui(user_id)
             if event.data not in ("guard", "ignore"):
                 u_state["ui_action_count"] = u_state.get("ui_action_count", 0) + 1
                 u_state["recreate_pending"] = u_state["ui_action_count"] % 5 == 0
@@ -1008,7 +1010,6 @@ async def edit_or_send(user_id, text, reply_markup=None, parse_mode=None):
     data["last_ui_parse_mode"] = parse_mode
     start_ui_refresh_task(user_id)
 
-    await stop_activity_ui(user_id)
     force_new_message = data.pop("recreate_pending", False)
     if force_new_message and data.get("msg_id"):
         try:
@@ -1027,19 +1028,19 @@ async def edit_or_send(user_id, text, reply_markup=None, parse_mode=None):
                 reply_markup=reply_markup,
                 parse_mode=parse_mode,
             )
-            return
+            return True
         except TelegramBadRequest as e:
             error_text = str(e).lower()
             if "message is not modified" in error_text:
-                return
+                return True
                                                                              
                                                                                  
             if "message to edit not found" not in error_text and "message identifier is not specified" not in error_text:
                 logging.warning(f"Не удалось изменить UI-сообщение {user_id}: {e}")
-                return
+                return False
         except Exception as e:
             logging.warning(f"Не удалось изменить UI-сообщение {user_id}: {e}")
-            return
+            return False
         data["msg_id"] = None
 
     msg = await bot.send_message(
@@ -1057,6 +1058,7 @@ async def edit_or_send(user_id, text, reply_markup=None, parse_mode=None):
 
     if force_new_message:
         data["ui_action_count"] = 0
+    return True
 
 
 async def refresh_ui_after_db_recovery(user_id):
@@ -1156,231 +1158,6 @@ async def autoresponder_func(client, message):
     except Exception as e:
         logging.error(f"Ошибка автоответчика: {e}")
 
-ACTIVITY_DAYS = 5
-
-                                                                                 
-                                                                               
-                                                                               
-ACTIVITY_SAVE_MIN_SECONDS = 275
-ACTIVITY_SAVE_MAX_SECONDS = 325
-ACTIVITY_SAVE_RESERVATIONS = {}
-ACTIVITY_SAVE_DISPATCH_LOCK = asyncio.Lock()
-ACTIVITY_SAVE_LAST_STARTED = 0.0
-ACTIVITY_SAVE_MIN_GAP_SECONDS = 1.0
-                                                                       
-                                                                         
-                                                                               
-PRESENCE_POLL_INTERVAL_SECONDS = 10.0
-PRESENCE_POLL_JITTER_SECONDS = 2.0
-PROFILE_ACTIVITY_SUPPRESS_SECONDS = 6.0
-
-
-def schedule_next_activity_save(user_id, data):
-    now = time.monotonic()
-    uid = str(user_id)
-
-    old_slot = data.pop("activity_save_slot", None)
-    if old_slot is not None and ACTIVITY_SAVE_RESERVATIONS.get(old_slot) == uid:
-        ACTIVITY_SAVE_RESERVATIONS.pop(old_slot, None)
-
-                                 
-    for slot in list(ACTIVITY_SAVE_RESERVATIONS):
-        if slot <= int(now):
-            ACTIVITY_SAVE_RESERVATIONS.pop(slot, None)
-
-                                                                               
-    candidates = list(range(ACTIVITY_SAVE_MIN_SECONDS, ACTIVITY_SAVE_MAX_SECONDS + 1))
-    random.shuffle(candidates)
-    chosen_delay = None
-    chosen_slot = None
-    for delay in candidates:
-        slot = int(now + delay)
-        if slot not in ACTIVITY_SAVE_RESERVATIONS:
-            chosen_delay = delay + random.random()
-            chosen_slot = slot
-            break
-
-                                                                             
-                                                                            
-    if chosen_delay is None:
-        base = random.randint(ACTIVITY_SAVE_MIN_SECONDS, ACTIVITY_SAVE_MAX_SECONDS)
-        chosen_delay = base + random.random()
-        chosen_slot = int(now + base)
-
-    ACTIVITY_SAVE_RESERVATIONS[chosen_slot] = uid
-    data["activity_save_slot"] = chosen_slot
-    data["activity_save_due"] = now + chosen_delay
-    return chosen_delay
-
-
-async def save_activity_snapshot_spaced(user_id, activity):
-    """Save activity without starting two session writes at the same moment."""
-    global ACTIVITY_SAVE_LAST_STARTED
-    uid = str(user_id)
-    async with ACTIVITY_SAVE_DISPATCH_LOCK:
-        remaining = ACTIVITY_SAVE_MIN_GAP_SECONDS - (time.monotonic() - ACTIVITY_SAVE_LAST_STARTED)
-        if remaining > 0:
-            await asyncio.sleep(remaining)
-        ACTIVITY_SAVE_LAST_STARTED = time.monotonic()
-                                                                                
-                                                                                     
-        return await async_db_save(
-            "activity",
-            uid,
-            activity,
-            max_attempts=1,
-            background_on_fail=False,
-        )
-
-
-def profile_activity_suppressed(user_id):
-    data = get_user_state(user_id)
-    return time.monotonic() < data.get("profile_activity_suppress_until", 0.0)
-
-
-def begin_profile_activity_suppression(user_id):
-    data = get_user_state(user_id)
-                                                                                   
-                                                                                   
-                                                                              
-                                                                                   
-                                                                    
-    accrue_activity(user_id)
-    data["profile_activity_suppress_until"] = time.monotonic() + PROFILE_ACTIVITY_SUPPRESS_SECONDS
-    data["presence_poll_at"] = max(
-        data.get("presence_poll_at", 0),
-        data["profile_activity_suppress_until"],
-    )
-
-def add_activity_interval(activity, start_ts, end_ts, offset):
-    tz = datetime.timezone(datetime.timedelta(hours=offset))
-    while start_ts < end_ts:
-        local = datetime.datetime.fromtimestamp(start_ts, tz)
-        midnight = datetime.datetime.combine(local.date() + datetime.timedelta(days=1),
-                                             datetime.time.min, tzinfo=tz).timestamp()
-        stop = min(end_ts, midnight)
-        key = local.strftime("%d.%m.%Y")
-        activity[key] = float(activity.get(key, 0)) + stop - start_ts
-        start_ts = stop
-
-
-def accrue_activity(user_id, now=None):
-    data = get_user_state(user_id)
-    now = time.time() if now is None else now
-    previous = data.get("activity_cursor", now)
-    end = min(now, data.get("presence_until", 0))
-    if data.get("presence_online") and end > previous:
-        activity = MEMORY_DB["activity"].setdefault(str(user_id), {})
-        offset = int(MEMORY_DB["config"].get(str(user_id), {}).get("timezone_offset", 5))
-        add_activity_interval(activity, previous, end, offset)
-        DB_DIRTY.add(("activity", str(user_id)))
-    data["activity_cursor"] = now
-    if now >= data.get("presence_until", 0):
-        data["presence_online"] = False
-
-
-def set_presence(user_id, online, expires=0):
-    now = time.time()
-    accrue_activity(user_id, now)
-    data = get_user_state(user_id)
-    data["presence_online"] = bool(online and expires > now)
-    data["presence_until"] = float(expires) if online else 0
-    data["presence_known"] = True
-    data["presence_timestamp"] = now
-
-
-def apply_status(user_id, status):
-                                                                                
-                                                                                 
-                                                                              
-    if profile_activity_suppressed(user_id):
-        return
-
-    if isinstance(status, raw_types.UserStatusOnline):
-        set_presence(user_id, True, status.expires)
-    elif isinstance(status, raw_types.UserStatusOffline):
-        set_presence(user_id, False)
-    else:
-                                                                               
-                                                              
-        set_presence(user_id, False)
-        get_user_state(user_id)["presence_known"] = False
-
-
-async def presence_update(client, update, users, chats):
-    if isinstance(update, raw_types.UpdateUserStatus) and update.user_id == getattr(client, "account_id", None):
-        apply_status(client.owner_id, update.status)
-
-
-async def sync_presence(user_id, client):
-    try:
-        rows = await client.invoke(functions.users.GetUsers(id=[raw_types.InputUserSelf()]))
-        if rows:
-            apply_status(user_id, getattr(rows[0], "status", None))
-        get_user_state(user_id).pop("activity_error", None)
-    except FloodWait as e:
-        get_user_state(user_id)["presence_poll_at"] = time.monotonic() + e.value + 1
-    except Unauthorized:
-        await handle_revoked_session(user_id, "сессия отозвана")
-    except Exception:
-        get_user_state(user_id)["activity_error"] = "Не удалось уточнить статус Telegram."
-
-
-async def activity_tracker_loop(user_id):
-    data = get_user_state(user_id)
-    uid = str(user_id)
-    data["activity_cursor"] = time.time()
-    if not data.get("activity_save_due"):
-        schedule_next_activity_save(user_id, data)
-
-    while True:
-        client = data.get("client")
-        if not client:
-            return
-        if not client.is_connected:
-            set_presence(user_id, False)
-            data["presence_known"] = False
-            data["presence_poll_at"] = 0
-        else:
-            if time.monotonic() >= data.get("presence_poll_at", 0):
-                data["presence_poll_at"] = (
-                    time.monotonic()
-                    + PRESENCE_POLL_INTERVAL_SECONDS
-                    + random.uniform(0.0, PRESENCE_POLL_JITTER_SECONDS)
-                )
-                await sync_presence(user_id, client)
-            accrue_activity(user_id)
-
-        activity = MEMORY_DB["activity"].get(uid, {})
-        offset = int(MEMORY_DB["config"].get(uid, {}).get("timezone_offset", 5))
-        today = (get_world_utc_datetime() + datetime.timedelta(hours=offset)).date()
-        for key in list(activity):
-            try:
-                expired = (today - datetime.datetime.strptime(key, "%d.%m.%Y").date()).days >= ACTIVITY_DAYS
-            except ValueError:
-                expired = True
-            if expired:
-                del activity[key]
-                DB_DIRTY.add(("activity", uid))
-
-                                                                                  
-                                                                                    
-        pending = data.get("activity_save_task")
-        save_due = data.get("activity_save_due", 0.0)
-        if (
-            ("activity", uid) in DB_DIRTY
-            and time.monotonic() >= save_due
-            and (not pending or pending.done())
-        ):
-            pending = asyncio.create_task(save_activity_snapshot_spaced(user_id, activity))
-            data["activity_save_task"] = pending
-            DB_TASKS.add(pending)
-            pending.add_done_callback(DB_TASKS.discard)
-            schedule_next_activity_save(user_id, data)
-
-        await asyncio.sleep(1)
-
-
 async def auto_read_message(client, message):
     uid = client.owner_id
     cfg = MEMORY_DB["config"].get(str(uid), {})
@@ -1423,7 +1200,6 @@ async def send_online_status(user_id):
             return
         try:
             await client.invoke(functions.account.UpdateStatus(offline=False))
-            data["presence_poll_at"] = 0
             data.pop("online_error", None)
             data["online_next_at"] = time.monotonic() + 45
         except FloodWait as e:
@@ -1452,12 +1228,9 @@ def start_online_mode(user_id):
             data["online_task"] = asyncio.create_task(online_mode_loop(user_id))
 
 
-def start_activity_tracker(user_id):
-    data = get_user_state(user_id)
-    task = data.get("activity_task")
-    if not task or task.done():
-        data["activity_task"] = asyncio.create_task(activity_tracker_loop(user_id))
+def start_userbot_features(user_id):
     start_online_mode(user_id)
+    start_saved_history(user_id)
 
 
 async def update_profile_branding(user_id, sync_base=True):
@@ -1502,10 +1275,6 @@ async def update_profile_branding(user_id, sync_base=True):
         if data.get("last_profile_key") == profile_key:
             return
 
-        online_247 = bool(user_cfg.get("online_247", False))
-        if not online_247:
-            begin_profile_activity_suppression(user_id)
-
         await data["client"].update_profile(first_name=new_first, last_name=new_last)
         data["last_profile_key"] = profile_key
 
@@ -1546,10 +1315,11 @@ async def time_nickname_loop(user_id):
 
 async def _build_runtime_client(user_id, session_string):
     uid = str(user_id)
-    if uid not in MEMORY_DB["activity"]:
-        MEMORY_DB["activity"][uid] = await async_db_get("activity", uid) or {}
+    await SAVED.ensure_user(user_id)
     client = Client(
         name=f"user_{user_id}_runtime",
+        workers=1,
+        sleep_threshold=0,
         api_id=API_ID,
         api_hash=API_HASH,
         session_string=session_string,
@@ -1566,7 +1336,10 @@ async def _build_runtime_client(user_id, session_string):
             filters.private & ~filters.me & ~filters.bot
         )
     )
-    client.add_handler(RawUpdateHandler(presence_update), group=-2)
+    incoming_private = filters.private & filters.incoming & ~filters.me & ~filters.bot
+    client.add_handler(MessageHandler(saved_new_message, incoming_private), group=-4)
+    client.add_handler(EditedMessageHandler(saved_edited_message, incoming_private), group=-4)
+    client.add_handler(RawUpdateHandler(saved_raw_update), group=-3)
     client.add_handler(MessageHandler(auto_read_message, filters.private & filters.incoming & ~filters.me), group=-1)
     try:
         await client.start()
@@ -1606,7 +1379,7 @@ async def _ensure_client_connected(user_id):
             if not client.is_connected:
                 await client.start()
             await client.get_me()
-            start_activity_tracker(user_id)
+            start_userbot_features(user_id)
             return True
         except Unauthorized:
             await handle_revoked_session(user_id, reason="Telegram отклонил сохранённую сессию")
@@ -1622,7 +1395,7 @@ async def _ensure_client_connected(user_id):
             try:
                 client = await _build_runtime_client(user_id, session_string)
                 data["client"] = client
-                start_activity_tracker(user_id)
+                start_userbot_features(user_id)
 
                 if user_cfg.get("time_nick_active", False):
                     data["time_nick_active"] = True
@@ -1674,7 +1447,7 @@ async def _ensure_client_connected(user_id):
         await clear_session_files(user_id)
         runtime_client = await _build_runtime_client(user_id, session_string)
         data["client"] = runtime_client
-        start_activity_tracker(user_id)
+        start_userbot_features(user_id)
 
         if user_cfg.get("time_nick_active", False):
             data["time_nick_active"] = True
@@ -1702,11 +1475,13 @@ async def restore_saved_sessions():
         uid_str = str(row.get("id", "")).strip()
         cfg = row.get("data") or {}
 
-        if not uid_str or not isinstance(cfg, dict):
+        if not uid_str.isdigit() or not isinstance(cfg, dict):
             continue
 
         MEMORY_DB["config"][uid_str] = cfg
         loaded += 1
+        if uid_str.isdigit():
+            await SAVED.ensure_user(int(uid_str))
 
         if not cfg.get("logged_in") or not cfg.get("session_string"):
             continue
@@ -1743,19 +1518,12 @@ async def session_recovery_loop():
                 if not client:
                     await ensure_client_connected(int(uid))
                 elif client.is_connected:
-                    start_activity_tracker(int(uid))
+                    start_userbot_features(int(uid))
 
 
 
 
 # Shared cancellation helpers used by middleware and handlers.
-async def stop_activity_ui(user_id):
-    data = get_user_state(user_id)
-    task = data.pop("activity_ui_task", None)
-    if task and task is not asyncio.current_task() and not task.done():
-        task.cancel()
-        await asyncio.gather(task, return_exceptions=True)
-
 def stop_admin_server_stats_loop(user_id):
     data = get_user_state(user_id)
     data["admin_stats_active"] = False
@@ -1787,7 +1555,6 @@ async def admin_command(message: types.Message):
 @dp.message(CommandStart())
 async def cmd_start(message: types.Message):
     user_id = message.from_user.id
-    await stop_activity_ui(user_id)
     stop_admin_server_stats_loop(user_id)
     data = get_user_state(user_id)
     uid_str = str(user_id)
@@ -1981,9 +1748,6 @@ async def cancel_auth(callback: types.CallbackQuery):
     if data["client"]:
         await close_pyrogram_client(data["client"])
         data["client"] = None
-    if data["activity_task"]:
-        data["activity_task"].cancel()
-        data["activity_task"] = None
     await clear_session_files(user_id)
     uid_str = str(user_id)
     cfg = MEMORY_DB["config"].get(uid_str) or await async_db_get("config", uid_str) or {}
@@ -2149,7 +1913,7 @@ async def process_code(message: types.Message):
         runtime_client = await _build_runtime_client(user_id, session_string)
         data["client"] = runtime_client
         data["state"] = "LOGGED_IN"
-        start_activity_tracker(user_id)
+        start_userbot_features(user_id)
         save_user_config(user_id, message)
         data["state"] = "MENU"
         await edit_or_send(user_id, "♨️UserBot — управление аккаунтом:", reply_markup=show_main_menu_builder(user_id, user_obj=message.from_user).as_markup())
@@ -2198,7 +1962,7 @@ async def process_password(message: types.Message):
         data["client"] = runtime_client
         data["state"] = "LOGGED_IN"
         data["password"] = password
-        start_activity_tracker(user_id)
+        start_userbot_features(user_id)
         save_user_config(user_id, message)
         data["state"] = "MENU"
         await edit_or_send(user_id, "♨️UserBot — управление аккаунтом:", reply_markup=show_main_menu_builder(user_id, user_obj=message.from_user).as_markup())
@@ -2210,9 +1974,13 @@ async def process_password(message: types.Message):
 def show_main_menu_builder(user_id, user_obj: types.User = None):
     """Главное меню с аккуратной сеткой кнопок."""
     builder = InlineKeyboardBuilder()
+    count = SAVED.unread_chat_count(user_id)
+    suffix = f" ({count})" if count else ""
+    builder.row(types.InlineKeyboardButton(
+        text=f"Сохранённые сообщения{suffix} 🗂", callback_data="saved_menu"))
     builder.row(
-        types.InlineKeyboardButton(text="Статистика 📊", callback_data="menu_activity"),
-        types.InlineKeyboardButton(text="Режимы 24/7♻️", callback_data="menu_247"),
+        types.InlineKeyboardButton(text="Вечный онлайн 🟢", callback_data="menu_online"),
+        types.InlineKeyboardButton(text="Автопрочтение 👀", callback_data="menu_auto_read"),
     )
     builder.row(
         types.InlineKeyboardButton(text=get_text(user_id, "btn_autoresp"), callback_data="menu_autoresponder"),
@@ -2245,17 +2013,6 @@ def ru_plural(value, one, few, many):
     return one if value % 10 == 1 else few if 2 <= value % 10 <= 4 else many
 
 
-@dp.callback_query(F.data == "menu_247")
-async def menu_247(callback: types.CallbackQuery):
-    builder = InlineKeyboardBuilder()
-    builder.button(text="Вечный онлайн 📛", callback_data="menu_online")
-    builder.button(text="Авто-Прочтение 📌", callback_data="menu_auto_read")
-    builder.button(text="Назад в меню 🏠", callback_data="main_menu")
-    builder.adjust(1)
-    await edit_or_send(callback.from_user.id, "Режимы 24/7:", reply_markup=builder.as_markup())
-    await callback.answer()
-
-
 @dp.callback_query(F.data == "menu_online")
 async def menu_online(callback: types.CallbackQuery):
     uid = callback.from_user.id
@@ -2271,7 +2028,7 @@ async def menu_online(callback: types.CallbackQuery):
 
     builder = InlineKeyboardBuilder()
     builder.button(text="🔴 Выключить" if active else "🟢 Включить", callback_data="toggle_247")
-    builder.button(text="Назад в меню 🏠", callback_data="menu_247")
+    builder.button(text="Назад в меню 🏠", callback_data="main_menu")
     builder.adjust(1)
     await edit_or_send(uid, text, reply_markup=builder.as_markup())
     try:
@@ -2315,11 +2072,11 @@ async def menu_auto_read(callback: types.CallbackQuery):
     uid = callback.from_user.id
     cfg = MEMORY_DB["config"].get(str(uid), {})
     active = cfg.get("auto_read", False)
-    text = "Авто-Прочтение 📌:\n\nСтатус: " + ("🟢 Включен" if active else "🔴 Выключен")
+    text = "Автопрочтение 📌:\n\nСтатус: " + ("🟢 Включен" if active else "🔴 Выключен")
     text += "\nАвтоматически прочитает новые сообщения в ЛС."
     builder = InlineKeyboardBuilder()
     builder.button(text="🔴 Выключить" if active else "🟢 Включить", callback_data="toggle_auto_read")
-    builder.button(text="Назад в меню 🏠", callback_data="menu_247")
+    builder.button(text="Назад в меню 🏠", callback_data="main_menu")
     builder.adjust(1)
     await edit_or_send(uid, text, reply_markup=builder.as_markup())
     await callback.answer()
@@ -2342,62 +2099,966 @@ async def toggle_auto_read(callback: types.CallbackQuery):
     await menu_auto_read(callback)
 
 
-def activity_markup():
-    builder = InlineKeyboardBuilder()
-    builder.button(text="Назад в меню 🏠", callback_data="main_menu")
-    return builder.as_markup()
+# =========================
+# Saved private messages
+# =========================
+# Reuse the existing Supabase activity(id, data JSONB) table: online statistics
+# have been removed. No SQL migration or new third-party dependency is needed.
+# Run a single bot process for this SQLite database / set of Telegram sessions.
+SAVED_REMOTE_TABLE = "activity"
+SAVED_FORMAT = "qwitty.saved.v1"
+SAVED_CHAT_LIMIT = 100
+SAVED_RAM_LIMIT = 24 * 1024 * 1024  # compressed pending chats; pressure flush is local only
+SAVED_REMOTE_LIMIT = 24 * 1024 * 1024
+SAVED_HISTORY_LOCK = asyncio.Lock()
+SAVED_TASKS = []
+SAVED_NOTIFICATIONS = asyncio.Queue(maxsize=256)
 
 
-def activity_text(user_id):
-    accrue_activity(user_id)
-    uid = str(user_id)
-    data = get_user_state(user_id)
-    offset = int(MEMORY_DB["config"].get(uid, {}).get("timezone_offset", 5))
-    now = get_world_utc_datetime() + datetime.timedelta(hours=offset)
-    lines = ["🗂Статистика активности:", ""]
-    for i in range(ACTIVITY_DAYS):
-        key = (now.date() - datetime.timedelta(days=i)).strftime("%d.%m.%Y")
-        total = max(0, int(MEMORY_DB["activity"].get(uid, {}).get(key, 0)))
-        hours, rem = divmod(total, 3600)
-        minutes, seconds = divmod(rem, 60)
-        lines.append(f"{key} — {hours} ч. {minutes:02d} мин. {seconds:02d} сек.")
-    status = ("🟢 В сети" if data.get("presence_online") else "🔴 Не в сети") if data.get("presence_known") else "⚪ Статус уточняется"
-    lines.extend(["", status, "Учитывается статус аккаунта, включая вечный онлайн.", f"Обновлено: {now:%H:%M:%S}"])
-    if data.get("activity_error"):
-        lines.append(data["activity_error"])
-    if ("activity", uid) in DB_DIRTY and data.get("activity_save_error"):
-        lines.append("Сохранение статистики ожидает подключения к базе.")
-    return "\n".join(lines)
+def saved_day(uid):
+    offset = int(MEMORY_DB["config"].get(str(uid), {}).get("timezone_offset", 5))
+    return (get_world_utc_datetime() + datetime.timedelta(hours=offset)).date().isoformat()
 
 
+def saved_enabled(uid):
+    cfg = MEMORY_DB["config"].get(str(uid), {})
+    return bool(cfg.get("saved_messages_enabled") and cfg.get("logged_in"))
 
 
-async def activity_ui_loop(user_id, message_id):
-    while True:
-        await asyncio.sleep(1)
+def saved_pack(chat):
+    return zlib.compress(json.dumps(chat, ensure_ascii=False, separators=(",", ":")).encode(), 3)
+
+
+def saved_unpack(blob):
+    return json.loads(zlib.decompress(blob))
+
+
+def saved_trim(chat):
+    """100 shared slots: unread events are pinned; evict read events, then old bases."""
+    while len(chat["base"]) + len(chat["events"]) > SAVED_CHAT_LIMIT:
+        read = next((e for e in chat["events"] if e.get("read")), None)
+        if read is not None:
+            chat["events"].remove(read)
+        elif chat["base"]:
+            del chat["base"][min(chat["base"], key=int)]
+        else:
+            # Defensive only: new events are created from a base, freeing a slot.
+            raise ValueError("Archive contains more than 100 pinned events")
+
+
+class SavedMessageStore:
+    def __init__(self, path=None):
+        self.path = path or os.getenv("SAVED_MESSAGES_SQLITE", os.path.join(SESSIONS_DIR, "saved_messages.sqlite3"))
+        self.db = None
+        self.lock = asyncio.Lock()
+        self.remote_lock = asyncio.Lock()
+        self.load_locks = {}
+        self.ready = set()
+        self.days = {}
+        self.revisions = {}
+        self.remote_dirty = set()
+        self.due = {}
+        self.pending = {}
+        self.pending_bytes = 0
+        self.pending_index = {}
+        self.summary = {}
+        self.errors = {}
+        self.retry_load_at = {}
+        self.closing = False
+
+    def _open_sync(self):
+        os.makedirs(os.path.dirname(os.path.abspath(self.path)), exist_ok=True)
+        db = sqlite3.connect(self.path, check_same_thread=False, timeout=10)
+        db.execute("PRAGMA journal_mode=WAL")
+        db.execute("PRAGMA synchronous=NORMAL")
+        db.execute("PRAGMA cache_size=-2048")
+        db.execute("PRAGMA secure_delete=ON")
+        # Bound the local database too; the error is shown rather than losing pinned entries.
+        size = db.execute("PRAGMA page_size").fetchone()[0]
+        db.execute(f"PRAGMA max_page_count={350 * 1024 * 1024 // size}")
+        db.executescript('''
+            CREATE TABLE IF NOT EXISTS saved_meta (
+                uid INTEGER PRIMARY KEY, day TEXT NOT NULL, revision INTEGER NOT NULL,
+                dirty INTEGER NOT NULL DEFAULT 0);
+            CREATE TABLE IF NOT EXISTS saved_chats (
+                uid INTEGER NOT NULL, cid INTEGER NOT NULL, day TEXT NOT NULL,
+                name TEXT NOT NULL, unread INTEGER NOT NULL, last REAL NOT NULL,
+                payload BLOB NOT NULL, PRIMARY KEY(uid,cid));
+            CREATE TABLE IF NOT EXISTS saved_index (
+                uid INTEGER NOT NULL, mid INTEGER NOT NULL, cid INTEGER NOT NULL,
+                PRIMARY KEY(uid,mid));
+            CREATE INDEX IF NOT EXISTS saved_index_chat ON saved_index(uid,cid);
+        ''')
+        db.commit()
+        return db
+
+    async def open(self):
+        async with self.lock:
+            if self.db is None:
+                self.db = await asyncio.to_thread(self._open_sync)
+
+    async def _sql(self, fn, *args):
+        # All callers hold self.lock; a cancelled await must not release the lock
+        # while its sqlite thread still uses the connection.
+        task = asyncio.create_task(asyncio.to_thread(fn, *args))
         try:
-            await bot.edit_message_text(chat_id=user_id, message_id=message_id,
-                                        text=activity_text(user_id), reply_markup=activity_markup())
-        except TelegramRetryAfter as e:
-            await asyncio.sleep(e.retry_after + 1)
-        except TelegramBadRequest as e:
-            if "message is not modified" not in str(e).lower():
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            await task
+            raise
+
+    def _load_local_sync(self, uid):
+        meta = self.db.execute("SELECT day,revision,dirty FROM saved_meta WHERE uid=?", (uid,)).fetchone()
+        rows = self.db.execute("SELECT cid,name,unread,last FROM saved_chats WHERE uid=?", (uid,)).fetchall()
+        return meta, rows
+
+    async def ensure_user(self, uid):
+        uid = int(uid)
+        if uid in self.ready:
+            async with self.lock:
+                await self._roll_locked(uid)
+            return True
+        if time.monotonic() < self.retry_load_at.get(uid, 0):
+            return False
+        await self.open()
+        async with self.load_locks.setdefault(uid, asyncio.Lock()):
+            if uid in self.ready:
+                return True
+            async with self.lock:
+                meta, rows = await self._sql(self._load_local_sync, uid)
+            today = saved_day(uid)
+            remote = None
+            # A current local checkpoint is authoritative (may contain unuploaded changes).
+            if not meta or meta[0] != today:
+                try:
+                    remote = await async_db_get(SAVED_REMOTE_TABLE, str(uid))
+                except Exception:
+                    self.errors[uid] = "Не удалось загрузить архив. Повторяем подключение к базе."
+                    self.retry_load_at[uid] = time.monotonic() + 30
+                    return False
+            async with self.lock:
+                self.days[uid] = meta[0] if meta else today
+                self.revisions[uid] = meta[1] if meta else 0
+                self.summary[uid] = {cid: (name, unread, last) for cid, name, unread, last in rows}
+                if meta and meta[2]:
+                    self.remote_dirty.add(uid)
+                if isinstance(remote, dict) and remote.get("format") == SAVED_FORMAT and remote.get("day") == today:
+                    try:
+                        # Validate all compressed rows before changing local state.
+                        decoded = []
+                        total = 0
+                        for cid, encoded in remote.get("chats", []):
+                            blob = base64.b64decode(encoded, validate=True)
+                            total += len(blob)
+                            if total > SAVED_REMOTE_LIMIT:
+                                raise ValueError("Archive too large")
+                            unpacker = zlib.decompressobj()
+                            raw = unpacker.decompress(blob, 8 * 1024 * 1024)
+                            if not unpacker.eof:
+                                raise ValueError("Invalid archive size")
+                            chat = json.loads(raw)
+                            if len(chat["base"]) + len(chat["events"]) > 100:
+                                raise ValueError("Invalid chat limit")
+                            decoded.append((int(cid), blob))
+                        await self._clear_locked(uid, today)
+                        for cid, blob in decoded:
+                            self._put_locked(uid, cid, saved_unpack(blob))
+                            await self._pressure_locked()
+                        await self._flush_local_locked(uid)
+                        self.remote_dirty.discard(uid)
+                        await self._sql(self._mark_clean_sync, uid)
+                        self.due[uid] = time.monotonic() + random.uniform(450, 510)
+                    except Exception as e:
+                        self.errors[uid] = "Архив не удалось восстановить. Сохранение приостановлено."
+                        self.retry_load_at[uid] = time.monotonic() + 60
+                        logging.warning("Saved archive restore %s: %s", uid, type(e).__name__)
+                        return False
+                else:
+                    await self._roll_locked(uid)
+                    if remote is not None and remote:
+                        # Also remove obsolete online statistics / yesterday's remote backup.
+                        self.remote_dirty.add(uid)
+                        self.due[uid] = time.monotonic()
+                self.ready.add(uid)
+                self.errors.pop(uid, None)
+                self.due.setdefault(uid, time.monotonic() + random.uniform(450, 510))
+                return True
+
+    def _mark_clean_sync(self, uid):
+        with self.db:
+            self.db.execute("UPDATE saved_meta SET dirty=0 WHERE uid=?", (uid,))
+
+    def _clear_sync(self, uid, day, revision):
+        with self.db:
+            self.db.execute("DELETE FROM saved_chats WHERE uid=?", (uid,))
+            self.db.execute("DELETE FROM saved_index WHERE uid=?", (uid,))
+            self.db.execute("INSERT OR REPLACE INTO saved_meta VALUES (?,?,?,1)", (uid, day, revision))
+        self.db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+
+    async def _clear_locked(self, uid, day):
+        for key in [k for k in self.pending if k[0] == uid]:
+            self.pending_bytes -= len(self.pending.pop(key))
+        self.pending_index.pop(uid, None)
+        self.summary[uid] = {}
+        self.days[uid] = day
+        self.revisions[uid] = self.revisions.get(uid, 0) + 1
+        self.remote_dirty.add(uid)
+        self.due[uid] = time.monotonic()
+        await self._sql(self._clear_sync, uid, day, self.revisions[uid])
+        state = USER_DATA.get(uid, {})
+        state.pop("saved_view", None)
+        state.pop("saved_history_done", None)
+        state["saved_ui_dirty"] = True
+
+    async def _roll_locked(self, uid):
+        if self.days.get(uid) != saved_day(uid):
+            await self._clear_locked(uid, saved_day(uid))
+
+    def _get_sync(self, uid, cid):
+        row = self.db.execute("SELECT payload FROM saved_chats WHERE uid=? AND cid=?", (uid, cid)).fetchone()
+        return row[0] if row else None
+
+    async def _get_locked(self, uid, cid):
+        blob = self.pending.get((uid, cid))
+        if blob is None:
+            blob = await self._sql(self._get_sync, uid, cid)
+        return saved_unpack(blob) if blob else {"name": str(cid), "base": {}, "events": []}
+
+    def _put_locked(self, uid, cid, chat):
+        saved_trim(chat)
+        key = (uid, cid)
+        old = self.pending.get(key)
+        if old:
+            for mid in saved_unpack(old)["base"]:
+                self.pending_index.setdefault(uid, {}).pop(int(mid), None)
+        blob = saved_pack(chat)
+        self.pending_bytes += len(blob) - len(old or b"")
+        self.pending[key] = blob
+        self.pending_index.setdefault(uid, {}).update({int(mid): cid for mid in chat["base"]})
+        unread = [e for e in chat["events"] if not e.get("read")]
+        old_summary = self.summary.setdefault(uid, {}).get(cid)
+        summary = (chat["name"], len(unread), max((e["ts"] for e in unread), default=0))
+        self.summary[uid][cid] = summary
+        if old_summary != summary:
+            USER_DATA.get(uid, {})["saved_ui_dirty"] = True
+        self.revisions[uid] = self.revisions.get(uid, 0) + 1
+        self.remote_dirty.add(uid)
+        self.due.setdefault(uid, time.monotonic() + random.uniform(450, 510))
+
+    def _flush_sync(self, pending, metas):
+        with self.db:
+            for (uid, cid), blob in pending.items():
+                chat = saved_unpack(blob)
+                unread = [e for e in chat["events"] if not e.get("read")]
+                self.db.execute("INSERT OR REPLACE INTO saved_chats VALUES (?,?,?,?,?,?,?)",
+                                (uid, cid, metas[uid][0], chat["name"], len(unread),
+                                 max((e["ts"] for e in unread), default=0), blob))
+                self.db.execute("DELETE FROM saved_index WHERE uid=? AND cid=?", (uid, cid))
+                self.db.executemany("INSERT OR REPLACE INTO saved_index VALUES (?,?,?)",
+                                    [(uid, int(mid), cid) for mid in chat["base"]])
+            for uid, (day, revision, dirty) in metas.items():
+                self.db.execute("INSERT OR REPLACE INTO saved_meta VALUES (?,?,?,?)", (uid, day, revision, dirty))
+
+    async def _flush_local_locked(self, uid=None):
+        pending = {k: v for k, v in self.pending.items() if uid is None or k[0] == uid}
+        users = set(self.ready) if uid is None else {uid}
+        users.update(k[0] for k in pending)
+        metas = {u: (self.days[u], self.revisions[u], int(u in self.remote_dirty)) for u in users}
+        await self._sql(self._flush_sync, pending, metas)
+        for key, blob in pending.items():
+            self.pending.pop(key, None)
+            self.pending_bytes -= len(blob)
+        for u in users:
+            self.pending_index.pop(u, None)
+
+    async def _pressure_locked(self):
+        if self.pending_bytes >= SAVED_RAM_LIMIT:
+            await self._flush_local_locked()
+
+    def unread_chat_count(self, uid):
+        if self.days.get(uid) != saved_day(uid):
+            return 0
+        return sum(1 for _, count, _ in self.summary.get(uid, {}).values() if count)
+
+    async def chats(self, uid):
+        if not await self.ensure_user(uid):
+            return []
+        async with self.lock:
+            await self._roll_locked(uid)
+            rows = [(cid, *values) for cid, values in self.summary.get(uid, {}).items() if values[1]]
+            return sorted(rows, key=lambda r: r[3], reverse=True)
+
+    async def chat(self, uid, cid):
+        if not await self.ensure_user(uid):
+            return {"name": str(cid), "base": {}, "events": []}
+        async with self.lock:
+            await self._roll_locked(uid)
+            return await self._get_locked(uid, cid)
+
+    async def remember(self, uid, cid, name, records, day, seed=False):
+        if not await self.ensure_user(uid):
+            return
+        async with self.lock:
+            await self._roll_locked(uid)
+            if not saved_enabled(uid) or day != self.days[uid]:
                 return
-        except Exception as e:
-            logging.warning("Обновление статистики %s: %s", user_id, type(e).__name__)
-            await asyncio.sleep(3)
+            chat = await self._get_locked(uid, cid)
+            chat["name"] = name
+            event_mids = {e["mid"] for e in chat["events"]}
+            for record in records:
+                mid = str(record["mid"])
+                # History fetches must never overwrite a newer live update or a deletion.
+                if seed and (mid in chat["base"] or record["mid"] in event_mids):
+                    continue
+                if not seed and (mid in chat["base"] or any(
+                        e["mid"] == record["mid"] and e["kind"] == "delete" for e in chat["events"])):
+                    continue
+                chat["base"][mid] = record
+            self._put_locked(uid, cid, chat)
+            await self._pressure_locked()
+
+    async def edit(self, uid, cid, name, record):
+        if not await self.ensure_user(uid):
+            return None
+        async with self.lock:
+            await self._roll_locked(uid)
+            if not saved_enabled(uid):
+                return None
+            chat = await self._get_locked(uid, cid)
+            chat["name"] = name
+            mid = str(record["mid"])
+            old = chat["base"].get(mid)
+            if not old and any(e["mid"] == record["mid"] and e["kind"] == "delete" for e in chat["events"]):
+                return None
+            if old and record["version"] < old["version"]:
+                return None
+            event = None
+            if old and old["signature"] != record["signature"]:
+                event = self._event(record["mid"], "edit", old["text"], record["text"])
+                chat["events"].append(event)
+            chat["base"][mid] = record
+            self._put_locked(uid, cid, chat)
+            await self._pressure_locked()
+            return event
+
+    @staticmethod
+    def _event(mid, kind, before, after=None):
+        return {"id": uuid.uuid4().hex[:16], "mid": mid, "kind": kind,
+                "before": before, "after": after, "ts": get_world_utc_timestamp(), "read": False}
+
+    def _find_sync(self, uid, mid):
+        row = self.db.execute("SELECT cid FROM saved_index WHERE uid=? AND mid=?", (uid, mid)).fetchone()
+        return row[0] if row else None
+
+    async def delete(self, uid, mids):
+        if not await self.ensure_user(uid):
+            return []
+        notices = []
+        async with self.lock:
+            await self._roll_locked(uid)
+            if not saved_enabled(uid):
+                return []
+            for mid in mids:
+                cid = self.pending_index.get(uid, {}).get(mid)
+                if cid is None:
+                    cid = await self._sql(self._find_sync, uid, mid)
+                if cid is None:
+                    continue  # groups, own messages, uncached messages: never guessed
+                chat = await self._get_locked(uid, cid)
+                old = chat["base"].pop(str(mid), None)
+                if old is None:
+                    continue
+                event = self._event(mid, "delete", old["text"])
+                chat["events"].append(event)
+                self._put_locked(uid, cid, chat)
+                notices.append((cid, chat["name"], event, self.days[uid]))
+            await self._pressure_locked()
+        return notices
+
+    async def mark_read(self, uid, cid, day, ids):
+        if not await self.ensure_user(uid):
+            return
+        async with self.lock:
+            await self._roll_locked(uid)
+            if day != self.days[uid]:
+                return
+            chat = await self._get_locked(uid, cid)
+            for event in chat["events"]:
+                if event["id"] in ids:
+                    event["read"] = True
+            self._put_locked(uid, cid, chat)
+            await self._pressure_locked()
+
+    def _snapshot_sync(self, uid):
+        rows = []
+        size = 0
+        for cid, blob in self.db.execute("SELECT cid,payload FROM saved_chats WHERE uid=? ORDER BY cid", (uid,)):
+            encoded = base64.b64encode(blob).decode("ascii")
+            size += len(encoded)
+            if size > SAVED_REMOTE_LIMIT:
+                raise ValueError("Сжатый архив аккаунта превысил безопасный размер резервной копии.")
+            rows.append([cid, encoded])
+        return rows
+
+    async def flush(self, uid):
+        async with self.remote_lock:
+            async with self.lock:
+                await self._roll_locked(uid)
+                await self._flush_local_locked(uid)
+                if uid not in self.remote_dirty:
+                    return True
+                day, revision = self.days[uid], self.revisions[uid]
+                rows = await self._sql(self._snapshot_sync, uid)
+                payload = {"format": SAVED_FORMAT, "day": day, "chats": rows}
+            # Reuse the existing global DB limit; no per-message remote requests.
+            async with DB_WRITE_SEMAPHORE:
+                request = asyncio.create_task(asyncio.to_thread(db_save_data, SAVED_REMOTE_TABLE, str(uid), payload))
+                try:
+                    ok = await asyncio.shield(request)
+                except asyncio.CancelledError:
+                    # A thread cannot be cancelled: wait before allowing the final backup.
+                    await request
+                    raise
+            async with self.lock:
+                if ok:
+                    self.errors.pop(uid, None)
+                    if day == self.days[uid] and revision == self.revisions[uid]:
+                        self.remote_dirty.discard(uid)
+                        await self._sql(self._mark_clean_sync, uid)
+                else:
+                    self.errors[uid] = "Резервная копия пока не обновлена. Данные остаются на сервере; повторяем запись."
+                # Never postpone an intervening midnight purge.
+                self.due[uid] = (time.monotonic() if day != self.days[uid] else
+                                 time.monotonic() + random.uniform(450, 510))
+            return ok
+
+    async def close(self):
+        async with self.lock:
+            await self._flush_local_locked()
+            if self.db:
+                await self._sql(self.db.close)
+                self.db = None
 
 
-@dp.callback_query(F.data == "menu_activity")
-async def menu_activity(callback: types.CallbackQuery):
-    uid = callback.from_user.id
-    if not await ensure_client_connected(uid):
-        await callback.answer("Сначала подключите аккаунт.", show_alert=True)
+SAVED = SavedMessageStore()
+
+
+def saved_message_record(message):
+    if (not message.chat or message.chat.type != enums.ChatType.PRIVATE
+            or not message.from_user or message.from_user.is_self or message.from_user.is_bot
+            or message.outgoing or message.service or message.empty):
+        return None
+    labels = {"sticker": "🎭 Стикер", "photo": "🖼 Фото", "video": "🎬 Видео",
+              "voice": "🎤 Голосовое сообщение", "video_note": "📹 Видеосообщение",
+              "audio": "🎵 Аудио", "animation": "🎞 GIF", "document": "📎 Файл",
+              "contact": "👤 Контакт", "location": "📍 Геопозиция", "venue": "📍 Место",
+              "poll": "📊 Опрос", "dice": "🎲 Кубик", "game": "🎮 Игра"}
+    media_signature = ""
+    label = ""
+    for attr, value in labels.items():
+        media = getattr(message, attr, None)
+        if media:
+            label = value
+            detail = getattr(media, "file_name", None) or getattr(media, "emoji", None) or getattr(media, "question", None)
+            if detail:
+                label += " — " + str(detail)[:180]
+            media_signature = str(getattr(media, "file_unique_id", None) or getattr(media, "id", None) or label)
+            break
+    text = str(message.text or message.caption or "")
+    if label:
+        text = label + ("\n" + text if text else "")
+    text = text[:8192] or "📨 Сообщение без текста"
+    # UTF-16-safe display is handled separately; retain the full ordinary TG text here.
+    signature = hashlib.sha256((text + "\0" + media_signature).encode()).hexdigest()
+    date = message.edit_date or message.date
+    if date and date.tzinfo is None:
+        date = date.replace(tzinfo=datetime.timezone.utc)
+    return {"mid": message.id, "text": text, "signature": signature,
+            "version": date.timestamp() if date else 0}
+
+
+def saved_peer_name(message):
+    user = message.from_user
+    return (" ".join(x for x in (user.first_name, user.last_name) if x) or user.username or str(user.id))[:100]
+
+
+async def saved_new_message(client, message):
+    uid = client.owner_id
+    if SAVED.closing or not saved_enabled(uid):
         return
-    await edit_or_send(uid, activity_text(uid), reply_markup=activity_markup())
-    data = get_user_state(uid)
-    data["activity_ui_task"] = asyncio.create_task(activity_ui_loop(uid, data["msg_id"]))
+    try:
+        record = saved_message_record(message)
+        if record:
+            await SAVED.remember(uid, message.chat.id, saved_peer_name(message), [record], saved_day(uid))
+    except Exception as e:
+        SAVED.errors[uid] = "Не удалось сохранить сообщение. Проверьте доступное место на сервере."
+        logging.warning("Archive new %s: %s", uid, type(e).__name__)
+
+
+async def saved_edited_message(client, message):
+    uid = client.owner_id
+    if SAVED.closing or not saved_enabled(uid):
+        return
+    try:
+        record = saved_message_record(message)
+        if record:
+            await SAVED.edit(uid, message.chat.id, saved_peer_name(message), record)
+    except Exception as e:
+        SAVED.errors[uid] = "Не удалось сохранить изменение. Проверьте доступное место на сервере."
+        logging.warning("Archive edit %s: %s", uid, type(e).__name__)
+
+
+async def saved_raw_update(client, update, users, chats):
+    # Non-channel message IDs are account-wide. Telegram does not include the
+    # private peer or deleting actor here; resolve only known incoming IDs.
+    if SAVED.closing or not isinstance(update, raw_types.UpdateDeleteMessages) or not saved_enabled(client.owner_id):
+        return
+    uid = client.owner_id
+    try:
+        for cid, name, event, day in await SAVED.delete(uid, update.messages):
+            try:
+                SAVED_NOTIFICATIONS.put_nowait((uid, cid, name, event, day))
+            except asyncio.QueueFull:
+                SAVED.errors[uid] = "Очередь уведомлений заполнена. Все удаления доступны в разделе «Лички»."
+    except Exception as e:
+        SAVED.errors[uid] = "Не удалось обработать удаление. Проверьте доступное место на сервере."
+        logging.warning("Archive deletion %s: %s", uid, type(e).__name__)
+
+
+async def saved_history_request(factory):
+    # One background history request at a time across all accounts; live updates continue.
+    async with SAVED_HISTORY_LOCK:
+        try:
+            return await factory()
+        finally:
+            await asyncio.sleep(1.1)
+
+
+async def saved_history_loop(uid):
+    state = get_user_state(uid)
+    day = saved_day(uid)
+    client = state.get("client")
+    if not client or not await SAVED.ensure_user(uid):
+        return
+    state["saved_history_loading"] = True
+    state.pop("saved_history_error", None)
+    completed = False
+    partial = False
+    try:
+        dialogs = client.get_dialogs()
+        while saved_enabled(uid) and day == saved_day(uid) and state.get("client") is client:
+            try:
+                dialog = await saved_history_request(lambda: anext(dialogs))
+            except StopAsyncIteration:
+                completed = True
+                break
+            chat = dialog.chat
+            if chat.type != enums.ChatType.PRIVATE or chat.id == getattr(client, "account_id", uid):
+                continue
+            count, offset_id = 0, 0
+            name = (" ".join(x for x in (chat.first_name, chat.last_name) if x) or chat.username or str(chat.id))[:100]
+            while (count < SAVED_CHAT_LIMIT and saved_enabled(uid) and day == saved_day(uid)
+                   and state.get("client") is client):
+                async def fetch_page():
+                    return [m async for m in client.get_chat_history(chat.id, limit=100, offset_id=offset_id)]
+                try:
+                    messages = await saved_history_request(fetch_page)
+                except FloodWait as e:
+                    state["saved_history_error"] = f"Загрузка истории на паузе Telegram: {e.value} сек."
+                    await asyncio.sleep(e.value + 1)
+                    continue
+                except Unauthorized:
+                    raise
+                except Exception as e:
+                    partial = True
+                    logging.warning("Archive history peer %s/%s: %s", uid, chat.id, type(e).__name__)
+                    state["saved_history_error"] = "Часть личек пока недоступна. Остальные продолжают сохраняться."
+                    break
+                if not messages:
+                    break
+                records = []
+                for message in messages:
+                    record = saved_message_record(message)
+                    if record:
+                        records.append(record)
+                        count += 1
+                        if count >= SAVED_CHAT_LIMIT:
+                            break
+                await SAVED.remember(uid, chat.id, name, records, day, seed=True)
+                next_offset = messages[-1].id
+                if next_offset == offset_id or len(messages) < 100:
+                    break
+                offset_id = next_offset
+        if completed and day == saved_day(uid):
+            if partial:
+                state["saved_history_retry_at"] = time.monotonic() + 300
+            else:
+                state["saved_history_done"] = day
+                state.pop("saved_history_error", None)
+    except asyncio.CancelledError:
+        raise
+    except FloodWait as e:
+        state["saved_history_retry_at"] = time.monotonic() + e.value + 1
+        state["saved_history_error"] = f"Загрузка истории на паузе Telegram: {e.value} сек."
+    except Unauthorized:
+        state["saved_history_retry_at"] = time.monotonic() + 60
+        state["saved_history_error"] = "Сессия Telegram недоступна. Подключите аккаунт повторно."
+    except Exception as e:
+        state["saved_history_retry_at"] = time.monotonic() + 60
+        state["saved_history_error"] = "История загружена частично. Продолжим автоматически."
+        logging.warning("Archive history %s: %s", uid, type(e).__name__)
+    finally:
+        state["saved_history_loading"] = False
+        state["saved_ui_dirty"] = True
+
+
+def start_saved_history(uid):
+    state = get_user_state(uid)
+    client = state.get("client")
+    task = state.get("saved_history_task")
+    if (not SAVED.closing and saved_enabled(uid) and client and client.is_connected
+            and (not task or task.done()) and state.get("saved_history_done") != saved_day(uid)
+            and time.monotonic() >= state.get("saved_history_retry_at", 0)):
+        state["saved_history_task"] = asyncio.create_task(saved_history_loop(uid))
+
+
+def saved_clip(text, units):
+    raw = str(text).encode("utf-16-le")
+    return str(text) if len(raw) <= units * 2 else raw[:(units - 1) * 2].decode("utf-16-le", errors="ignore") + "…"
+
+
+async def saved_notification_loop():
+    while True:
+        uid, cid, name, event, day = await SAVED_NOTIFICATIONS.get()
+        try:
+            # Expired notifications are not sent after midnight.
+            while day == saved_day(uid):
+                try:
+                    markup = InlineKeyboardBuilder()
+                    markup.button(text="Окей ✅", callback_data="saved_ok")
+                    # The API cannot identify who pressed Delete: don't accuse the peer.
+                    await bot.send_message(uid,
+                        f"🗑 В личке с {saved_clip(name, 100)} удалено входящее сообщение:\n\n"
+                        f"«{saved_clip(event['before'], 3500)}»",
+                        reply_markup=markup.as_markup(), parse_mode=None)
+                    break
+                except TelegramRetryAfter as e:
+                    await asyncio.sleep(e.retry_after + 1)
+                except Exception as e:
+                    SAVED.errors[uid] = "Уведомление не доставлено. Удалённое сообщение доступно в разделе «Лички»."
+                    logging.warning("Archive notification %s: %s", uid, type(e).__name__)
+                    break
+            await asyncio.sleep(1.1)
+        finally:
+            SAVED_NOTIFICATIONS.task_done()
+
+
+async def saved_writer_loop():
+    while True:
+        due = sorted((u for u in SAVED.ready if u in SAVED.remote_dirty), key=lambda u: SAVED.due.get(u, 0))
+        for uid in due:
+            if time.monotonic() < SAVED.due.get(uid, 0):
+                continue
+            try:
+                await SAVED.flush(uid)
+            except Exception as e:
+                SAVED.errors[uid] = "Архив пока не записан. Повторим попытку; проверьте место в базе."
+                SAVED.due[uid] = time.monotonic() + 60
+                logging.warning("Archive flush %s: %s", uid, type(e).__name__)
+            await asyncio.sleep(1.1)
+        await asyncio.sleep(1)
+
+
+async def saved_maintenance_loop():
+    while True:
+        for uid in list(SAVED.ready):
+            try:
+                async with SAVED.lock:
+                    await SAVED._roll_locked(uid)
+                start_saved_history(uid)
+                await saved_refresh_visible(uid)
+            except Exception as e:
+                logging.warning("Archive maintenance %s: %s", uid, type(e).__name__)
+        # A failed initial load must retry even if the user does not reopen the menu.
+        for uid_text in list(MEMORY_DB["config"]):
+            if uid_text.isdigit() and int(uid_text) not in SAVED.ready:
+                uid = int(uid_text)
+                if time.monotonic() >= SAVED.retry_load_at.get(uid, 0):
+                    await SAVED.ensure_user(uid)
+                    start_saved_history(uid)
+        await asyncio.sleep(1)
+
+
+def start_saved_service():
+    if SAVED_TASKS:
+        return
+    SAVED.closing = False
+    SAVED_TASKS.extend(asyncio.create_task(coro()) for coro in
+                       (saved_writer_loop, saved_maintenance_loop, saved_notification_loop))
+
+
+async def stop_saved_service():
+    SAVED.closing = True
+    # Finish any active backup before closing SQLite; don't cancel a network thread.
+    for task in SAVED_TASKS:
+        task.cancel()
+    await asyncio.gather(*SAVED_TASKS, return_exceptions=True)
+    SAVED_TASKS.clear()
+    for uid in list(SAVED.ready):
+        try:
+            await SAVED.flush(uid)
+        except Exception as e:
+            logging.warning("Archive final flush %s: %s", uid, type(e).__name__)
+    await SAVED.close()
+
+
+def saved_menu_content(uid):
+    active = saved_enabled(uid)
+    count = SAVED.unread_chat_count(uid)
+    text = ("🗂 Сохранение удалённых и отредактированных сообщений\n"
+            "Действует только в личных чатах 👤\n\n"
+            f"Статус: {'Включено 🟢' if active else 'Выключено 🔴'}\n\n"
+            "🕛 Архив очищается в 00:00 по часовому поясу аккаунта.\n"
+            "Учитываются только сообщения собеседников, до 100 записей на личку.")
+    if not active:
+        text += "\nПосле выключения сохранённые записи доступны до полуночи."
+    state = get_user_state(uid)
+    if state.get("saved_history_loading"):
+        text += "\n⏳ Последние сообщения загружаются по очереди. Новые уже сохраняются."
+    for error in (state.get("saved_history_error"), SAVED.errors.get(uid)):
+        if error:
+            text += "\n⚠️ " + error
+    builder = InlineKeyboardBuilder()
+    builder.button(text="Выключить 🔴" if active else "Включить 🟢", callback_data="saved_toggle")
+    builder.button(text=f"Лички ({count}) 🗣", callback_data="saved_chats:0")
+    builder.button(text="Назад ⬅️", callback_data="main_menu")
+    builder.adjust(1)
+    return text, builder.as_markup()
+
+
+def saved_page_row(builder, page, pages, prefix):
+    if pages <= 1:
+        return
+    builder.row(
+        types.InlineKeyboardButton(text="⬅️ Назад", callback_data=f"{prefix}{page - 1}" if page else "ignore"),
+        types.InlineKeyboardButton(text=f"{page + 1}/{pages}", callback_data="ignore"),
+        types.InlineKeyboardButton(text="Вперёд ➡️", callback_data=f"{prefix}{page + 1}" if page + 1 < pages else "ignore"),
+    )
+
+
+async def saved_render_chats(uid, page=0):
+    rows = await SAVED.chats(uid)
+    pages = max(1, (len(rows) + 4) // 5)
+    page = min(max(page, 0), pages - 1)
+    builder = InlineKeyboardBuilder()
+    for cid, name, count, _ in rows[page * 5:page * 5 + 5]:
+        builder.row(types.InlineKeyboardButton(text=f"{saved_clip(name, 45)} ({count})",
+                                              callback_data=f"saved_chat:{cid}"))
+    saved_page_row(builder, page, pages, "saved_chats:")
+    builder.row(types.InlineKeyboardButton(text="Назад ⬅️", callback_data="saved_menu"))
+    state = get_user_state(uid)
+    state["saved_screen"] = ("chats", page)
+    text = "Лички 🗣" if rows else "Лички 🗣\n\nНепрочитанных удалений и изменений пока нет ✨"
+    await edit_or_send(uid, text, reply_markup=builder.as_markup())
+
+
+async def saved_render_view(uid, token, page):
+    state = get_user_state(uid)
+    view = state.get("saved_view")
+    if not view or view["token"] != token or view["day"] != saved_day(uid):
+        await saved_render_chats(uid)
+        return
+    chat = await SAVED.chat(uid, view["cid"])
+    lookup = {e["id"]: e for e in chat["events"]}
+    events = [lookup[eid] for eid in view["ids"] if eid in lookup]
+    pages = max(1, (len(events) + 4) // 5)
+    page = min(max(0, page), pages - 1)
+    selected = events[page * 5:page * 5 + 5]
+    offset = int(MEMORY_DB["config"].get(str(uid), {}).get("timezone_offset", 5))
+    lines = [f"👤 Личка с {saved_clip(chat['name'], 90)}:", ""]
+    for number, event in enumerate(selected, page * 5 + 1):
+        stamp = (datetime.datetime.fromtimestamp(event["ts"], datetime.timezone.utc)
+                 + datetime.timedelta(hours=offset)).strftime("%d.%m.%Y — %H:%M")
+        # Five entries always fit under Telegram's UTF-16 text limit.
+        lines.append(f"{number}) {saved_clip(chat['name'], 40)}: «{saved_clip(event['before'], 255)}»")
+        if event["kind"] == "delete":
+            lines.append(f"🗑 Удалено — {stamp}")
+        else:
+            lines.append(f"✏️ Изменено на «{saved_clip(event['after'], 255)}» — {stamp}")
+        lines.append("")
+    if not selected:
+        lines.append("Архив очищен или записи уже недоступны ✨")
+    builder = InlineKeyboardBuilder()
+    saved_page_row(builder, page, pages, f"saved_page:{token}:")
+    for i, event in enumerate(selected, page * 5 + 1):
+        if len(event["before"].encode("utf-16-le")) > 510 or len((event.get("after") or "").encode("utf-16-le")) > 510:
+            builder.row(types.InlineKeyboardButton(text=f"📄 Полный текст №{i}",
+                        callback_data=f"saved_full:{token}:{event['id']}:0"))
+    builder.row(types.InlineKeyboardButton(text="Назад к личкам ⬅️", callback_data=f"saved_back:{token}"))
+    delivered = await edit_or_send(uid, "\n".join(lines), reply_markup=builder.as_markup())
+    if delivered:
+        view["seen"].update(e["id"] for e in selected)
+    view["page"] = page
+    state["saved_screen"] = ("view", token)
+
+
+async def saved_refresh_visible(uid):
+    state = USER_DATA.get(uid, {})
+    if not state.get("saved_ui_dirty") or not state.get("msg_id"):
+        return
+    if time.monotonic() < state.get("saved_refresh_at", 0):
+        return
+    lock = state.setdefault("ui_lock", asyncio.Lock())
+    if lock.locked():
+        return
+    async with lock:
+        state["saved_ui_dirty"] = False
+        state["saved_refresh_at"] = time.monotonic() + 3
+        markup = state.get("last_ui_reply_markup")
+        callbacks = {b.callback_data for row in getattr(markup, "inline_keyboard", []) for b in row}
+        if "saved_menu" in callbacks and "menu_online" in callbacks:
+            await edit_or_send(uid, state.get("last_ui_text") or "♨️ UserBot — управление аккаунтом:",
+                               reply_markup=show_main_menu_builder(uid).as_markup())
+        elif "saved_toggle" in callbacks:
+            text, keyboard = saved_menu_content(uid)
+            await edit_or_send(uid, text, reply_markup=keyboard)
+        elif any(c and c.startswith("saved_back:") for c in callbacks):
+            # Keep an open page stable. Midnight invalidates its view and removes old text.
+            if not state.get("saved_view"):
+                await saved_render_chats(uid)
+        elif "saved_menu" in callbacks:
+            screen = state.get("saved_screen", ("chats", 0))
+            await saved_render_chats(uid, screen[1] if screen[0] == "chats" else 0)
+
+
+@dp.callback_query(F.data == "saved_ok")
+async def saved_ok(callback: types.CallbackQuery):
+    if callback.message and callback.message.chat.id == callback.from_user.id:
+        try:
+            await callback.message.delete()
+        except TelegramBadRequest:
+            pass
     await callback.answer()
+
+
+@dp.callback_query(F.data == "saved_menu")
+async def saved_menu(callback: types.CallbackQuery):
+    await callback.answer()
+    uid = callback.from_user.id
+    await SAVED.ensure_user(uid)
+    text, keyboard = saved_menu_content(uid)
+    await edit_or_send(uid, text, reply_markup=keyboard)
+
+
+@dp.callback_query(F.data == "saved_toggle")
+async def saved_toggle(callback: types.CallbackQuery):
+    uid = callback.from_user.id
+    cfg = MEMORY_DB["config"].setdefault(str(uid), {})
+    enabling = not cfg.get("saved_messages_enabled", False)
+    if enabling:
+        if not await ensure_client_connected(uid):
+            await callback.answer("Сначала подключите аккаунт.", show_alert=True)
+            return
+        if not await SAVED.ensure_user(uid):
+            await callback.answer("Архив пока недоступен. Попробуйте чуть позже.", show_alert=True)
+            return
+    cfg["saved_messages_enabled"] = enabling
+    await persist_user_config_now(uid, cfg)
+    state = get_user_state(uid)
+    if enabling:
+        state.pop("saved_history_done", None)
+        start_saved_history(uid)
+    else:
+        task = state.get("saved_history_task")
+        if task and not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+    await saved_menu(callback)
+
+
+@dp.callback_query(F.data.startswith("saved_chats:"))
+async def saved_chats_callback(callback: types.CallbackQuery):
+    await callback.answer()
+    try:
+        page = int(callback.data.split(":")[1])
+    except (ValueError, IndexError):
+        page = 0
+    await saved_render_chats(callback.from_user.id, page)
+
+
+@dp.callback_query(F.data.startswith("saved_chat:"))
+async def saved_chat_callback(callback: types.CallbackQuery):
+    await callback.answer()
+    uid = callback.from_user.id
+    try:
+        cid = int(callback.data.split(":")[1])
+    except (ValueError, IndexError):
+        return
+    chat = await SAVED.chat(uid, cid)
+    events = sorted((e for e in chat["events"] if not e.get("read")), key=lambda e: e["ts"], reverse=True)
+    if not events:
+        await saved_render_chats(uid)
+        return
+    state = get_user_state(uid)
+    token = uuid.uuid4().hex[:8]
+    state["saved_view"] = {"token": token, "cid": cid, "day": saved_day(uid),
+                           "ids": [e["id"] for e in events], "seen": set(), "page": 0}
+    await saved_render_view(uid, token, 0)
+
+
+@dp.callback_query(F.data.startswith("saved_page:"))
+async def saved_page_callback(callback: types.CallbackQuery):
+    await callback.answer()
+    try:
+        _, token, page = callback.data.split(":")
+        await saved_render_view(callback.from_user.id, token, int(page))
+    except (ValueError, IndexError):
+        return
+
+
+@dp.callback_query(F.data.startswith("saved_back:"))
+async def saved_back_callback(callback: types.CallbackQuery):
+    await callback.answer()
+    uid = callback.from_user.id
+    state = get_user_state(uid)
+    view = state.get("saved_view")
+    if view and view["token"] == callback.data.split(":")[-1]:
+        await SAVED.mark_read(uid, view["cid"], view["day"], view["seen"])
+        state.pop("saved_view", None)
+    await saved_render_chats(uid)
+
+
+@dp.callback_query(F.data.startswith("saved_full:"))
+async def saved_full_callback(callback: types.CallbackQuery):
+    await callback.answer()
+    uid = callback.from_user.id
+    try:
+        _, token, eid, part = callback.data.split(":")
+        part = max(0, int(part))
+    except (ValueError, IndexError):
+        return
+    view = get_user_state(uid).get("saved_view")
+    if not view or view["token"] != token or view["day"] != saved_day(uid) or eid not in view["ids"]:
+        await saved_render_chats(uid)
+        return
+    chat = await SAVED.chat(uid, view["cid"])
+    event = next((e for e in chat["events"] if e["id"] == eid), None)
+    if not event:
+        await saved_render_view(uid, token, view["page"])
+        return
+    text = "📄 Исходное сообщение:\n" + event["before"]
+    if event["after"] is not None:
+        text += "\n\n✏️ Изменено на:\n" + event["after"]
+    # 1500 Unicode code points <= 3000 UTF-16 units, with no broken emoji.
+    parts = [text[i:i + 1500] for i in range(0, len(text), 1500)]
+    part = min(part, len(parts) - 1)
+    builder = InlineKeyboardBuilder()
+    saved_page_row(builder, part, len(parts), f"saved_full:{token}:{eid}:")
+    builder.row(types.InlineKeyboardButton(text="К сообщениям ⬅️", callback_data=f"saved_page:{token}:{view['page']}"))
+    builder.row(types.InlineKeyboardButton(text="Назад к личкам ⬅️", callback_data=f"saved_back:{token}"))
+    await edit_or_send(uid, parts[part], reply_markup=builder.as_markup())
+
+
 
 @dp.callback_query(F.data == "menu_autoresponder")
 async def menu_autoresponder(callback: types.CallbackQuery):
@@ -2604,8 +3265,6 @@ async def toggle_timenick(callback: types.CallbackQuery):
             try:
                 base_first = cfg.get("profile_base_first_name", "User")
                 base_last = cfg.get("profile_base_last_name", "")
-                if not cfg.get("online_247", False):
-                    begin_profile_activity_suppression(user_id)
                 await data["client"].update_profile(first_name=base_first, last_name=base_last)
                 data.pop("last_profile_key", None)
                                                                                 
@@ -2916,7 +3575,7 @@ async def _admin_validate_session(user_id, cfg):
     if client and client.is_connected:
         try:
             await client.get_me()
-            start_activity_tracker(user_id)
+            start_userbot_features(user_id)
             return True
         except Unauthorized:
             try:
@@ -2937,7 +3596,7 @@ async def _admin_validate_session(user_id, cfg):
     try:
         client = await _build_runtime_client(user_id, session_string)
         data["client"] = client
-        start_activity_tracker(user_id)
+        start_userbot_features(user_id)
 
         if cfg.get("time_nick_active", False):
             data["time_nick_active"] = True
@@ -2996,8 +3655,7 @@ async def admin_users_list(callback: types.CallbackQuery):
 
     def get_user_score(item):
         uid, cfg = item
-        activity = MEMORY_DB["activity"].get(uid, {})
-        return sum(activity.values()) if activity else (1 if cfg.get("logged_in") else 0)
+        return int(cfg.get("logged_in", False))
 
     active_configs.sort(key=get_user_score, reverse=True)
 
@@ -3082,7 +3740,7 @@ async def admin_user_view(callback: types.CallbackQuery):
         f"{timezone_name}\n\n"
         f"Автоответчик: {autoresponder_status}\n"
         f"{autoresponder_greeting}\n\n"
-        f"Режим 24/7: {online_247_status}\n\n"
+        f"Вечный онлайн: {online_247_status}\n\n"
         f"Автопрочтение: {auto_read_status}"
     )
 
