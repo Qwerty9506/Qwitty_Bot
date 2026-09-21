@@ -2697,7 +2697,13 @@ async def saved_edited_message(client, message):
     try:
         record = saved_message_record(message)
         if record:
-            await SAVED.edit(uid, message.chat.id, saved_peer_name(message), record)
+            name = saved_peer_name(message)
+            event = await SAVED.edit(uid, message.chat.id, name, record)
+            if event:
+                try:
+                    SAVED_NOTIFICATIONS.put_nowait((uid, message.chat.id, name, event, saved_day(uid)))
+                except asyncio.QueueFull:
+                    SAVED.errors[uid] = "Очередь уведомлений заполнена. Все изменения доступны в разделе «Лички»."
     except Exception as e:
         SAVED.errors[uid] = "Не удалось сохранить изменение. Проверьте доступное место на сервере."
         logging.warning("Archive edit %s: %s", uid, type(e).__name__)
@@ -2823,6 +2829,16 @@ def saved_clip(text, units):
     return str(text) if len(raw) <= units * 2 else raw[:(units - 1) * 2].decode("utf-16-le", errors="ignore") + "…"
 
 
+async def delete_saved_notification_later(chat_id, message_id, delay=300):
+    await asyncio.sleep(delay)
+    try:
+        await bot.delete_message(chat_id=chat_id, message_id=message_id)
+    except TelegramBadRequest:
+        pass
+    except Exception as e:
+        logging.debug("Archive notification auto-delete %s/%s: %s", chat_id, message_id, type(e).__name__)
+
+
 async def saved_notification_loop():
     while True:
         uid, cid, name, event, day = await SAVED_NOTIFICATIONS.get()
@@ -2833,15 +2849,30 @@ async def saved_notification_loop():
                     markup = InlineKeyboardBuilder()
                     markup.button(text="Окей ✅", callback_data="saved_ok")
 
-                    await bot.send_message(uid,
-                        f"🗑 В личке с {saved_clip(name, 100)} удалено входящее сообщение:\n\n"
-                        f"«{saved_clip(event['before'], 3500)}»",
-                        reply_markup=markup.as_markup(), parse_mode=None)
+                    if event.get("kind") == "edit":
+                        notification_text = (
+                            f"✏️ В личке с {saved_clip(name, 100)} отредактировано входящее сообщение:\n\n"
+                            f"Было:\n«{saved_clip(event.get('before', ''), 1700)}»\n\n"
+                            f"Стало:\n«{saved_clip(event.get('after', ''), 1700)}»"
+                        )
+                    else:
+                        notification_text = (
+                            f"🗑 В личке с {saved_clip(name, 100)} удалено входящее сообщение:\n\n"
+                            f"«{saved_clip(event.get('before', ''), 3500)}»"
+                        )
+
+                    notice = await bot.send_message(
+                        uid,
+                        notification_text,
+                        reply_markup=markup.as_markup(),
+                        parse_mode=None
+                    )
+                    asyncio.create_task(delete_saved_notification_later(uid, notice.message_id, 300))
                     break
                 except TelegramRetryAfter as e:
                     await asyncio.sleep(e.retry_after + 1)
                 except Exception as e:
-                    SAVED.errors[uid] = "Уведомление не доставлено. Удалённое сообщение доступно в разделе «Лички»."
+                    SAVED.errors[uid] = "Уведомление не доставлено. Событие доступно в разделе «Лички»."
                     logging.warning("Archive notification %s: %s", uid, type(e).__name__)
                     break
             await asyncio.sleep(1.1)
