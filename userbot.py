@@ -2480,7 +2480,15 @@ class SavedMessageStore:
             return []
         async with self.lock:
             await self._roll_locked(uid)
-            rows = [(cid, *values) for cid, values in self.summary.get(uid, {}).items() if values[1]]
+            # Показываем все лички, где за текущий день есть сохранённые события.
+            # unread теперь влияет только на уведомление/счётчик, а не на срок жизни архива.
+            rows = []
+            for cid, (name, unread, last_unread) in self.summary.get(uid, {}).items():
+                chat = await self._get_locked(uid, cid)
+                if not chat.get("events"):
+                    continue
+                last_event = max((float(e.get("ts", 0) or 0) for e in chat["events"]), default=0.0)
+                rows.append((cid, name, unread, max(float(last_unread or 0), last_event)))
             return sorted(rows, key=lambda r: r[3], reverse=True)
 
     async def chat(self, uid, cid):
@@ -2985,7 +2993,7 @@ async def saved_render_chats(uid, page=0):
     builder.row(types.InlineKeyboardButton(text="Назад ⬅️", callback_data="saved_menu"))
     state = get_user_state(uid)
     state["saved_screen"] = ("chats", page)
-    text = "Лички 🗣" if rows else "Лички 🗣\n\nНепрочитанных удалений и изменений пока нет ✨"
+    text = "Лички 🗣" if rows else "Лички 🗣\n\nСохранённых удалений и изменений за сегодня пока нет ✨"
     await edit_or_send(uid, text, reply_markup=builder.as_markup())
 
 
@@ -3127,10 +3135,17 @@ async def saved_chat_callback(callback: types.CallbackQuery):
     except (ValueError, IndexError):
         return
     chat = await SAVED.chat(uid, cid)
-    events = sorted((e for e in chat["events"] if not e.get("read")), key=lambda e: e["ts"], reverse=True)
+    events = sorted(chat["events"], key=lambda e: e["ts"], reverse=True)
     if not events:
         await saved_render_chats(uid)
         return
+
+    # Открытие конкретной лички снимает только её уведомление/счётчик.
+    # Сами события НЕ удаляются и остаются доступными до смены дня (00:00).
+    unread_ids = {e["id"] for e in events if not e.get("read")}
+    if unread_ids:
+        await SAVED.mark_read(uid, cid, saved_day(uid), unread_ids)
+
     state = get_user_state(uid)
     token = uuid.uuid4().hex[:8]
     state["saved_view"] = {"token": token, "cid": cid, "day": saved_day(uid),
@@ -3155,7 +3170,7 @@ async def saved_back_callback(callback: types.CallbackQuery):
     state = get_user_state(uid)
     view = state.get("saved_view")
     if view and view["token"] == callback.data.split(":")[-1]:
-        await SAVED.mark_read(uid, view["cid"], view["day"], view["seen"])
+        # Уже отмечено прочитанным при открытии лички. Архив сохраняем до полуночи.
         state.pop("saved_view", None)
     await saved_render_chats(uid)
 
