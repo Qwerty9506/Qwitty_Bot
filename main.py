@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import os
 import sys
@@ -397,24 +398,46 @@ async def _clear_restart_pending():
     await async_db_save("config", uid, cfg, max_attempts=3, background_on_fail=False)
 
 
-async def _render_restart_service():
+async def _render_clean_deploy():
     if not RENDER_API_KEY:
         raise RuntimeError("Не задан RENDER_API_KEY в Environment Render.")
     if not RENDER_SERVICE_ID:
         raise RuntimeError("Render не передал RENDER_SERVICE_ID этому сервису.")
 
-    url = f"https://api.render.com/v1/services/{RENDER_SERVICE_ID}/restart"
+    # Это именно аналог Dashboard -> Manual Deploy -> Clear build cache & deploy.
+    # /restart лишь перезапускает уже существующий deploy и build-cache не чистит.
+    url = f"https://api.render.com/v1/services/{RENDER_SERVICE_ID}/deploys"
     headers = {
         "Authorization": f"Bearer {RENDER_API_KEY}",
         "Accept": "application/json",
+        "Content-Type": "application/json",
     }
-    timeout = aiohttp.ClientTimeout(total=20)
+    payload = {"clearCache": "clear"}
+    timeout = aiohttp.ClientTimeout(total=30)
+
     async with aiohttp.ClientSession(timeout=timeout) as session:
-        async with session.post(url, headers=headers) as response:
+        async with session.post(url, headers=headers, json=payload) as response:
             body = await response.text()
-            if response.status not in (200, 201, 202):
-                body = body.strip().replace("\n", " ")[:250]
-                raise RuntimeError(f"Render API вернул HTTP {response.status}: {body or 'без описания'}")
+            if response.status not in (201, 202):
+                body = body.strip().replace("\n", " ")[:500]
+                raise RuntimeError(
+                    f"Render Deploy API вернул HTTP {response.status}: {body or 'без описания'}"
+                )
+
+            deploy_id = None
+            if body.strip():
+                try:
+                    data = json.loads(body)
+                    if isinstance(data, dict):
+                        deploy_id = data.get("id") or data.get("deploy", {}).get("id")
+                except Exception:
+                    pass
+
+            logging.info(
+                "♻️ Render clean deploy запрошен%s",
+                f" (deploy_id={deploy_id})" if deploy_id else "",
+            )
+            return deploy_id
 
 
 async def _restart_wait_animation(chat_id: int, message_id: int):
@@ -497,7 +520,7 @@ async def admin_restart_confirm(callback: types.CallbackQuery):
     RESTART_ANIMATION_TASKS[user_id] = asyncio.create_task(_restart_wait_animation(user_id, message_id))
 
     try:
-        await _render_restart_service()
+        await _render_clean_deploy()
     except Exception as e:
         _cancel_restart_animation(user_id)
         await _clear_restart_pending()
