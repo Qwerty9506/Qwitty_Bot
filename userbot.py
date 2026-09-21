@@ -1604,21 +1604,6 @@ def stop_admin_server_stats_loop(user_id):
     data["admin_stats_task"] = None
 
 
-@dp.message(F.text.casefold() == "admin")
-async def admin_command(message: types.Message):
-
-    if not is_admin(message.from_user):
-        return
-
-    stop_admin_server_stats_loop(message.from_user.id)
-    data = get_user_state(message.from_user.id)
-    data["state"] = "ADMIN"
-    await edit_or_send(
-        message.from_user.id,
-        "Админ меню:",
-        reply_markup=build_admin_menu_markup(),
-    )
-
 @dp.message(CommandStart())
 async def cmd_start(message: types.Message):
     user_id = message.from_user.id
@@ -1667,14 +1652,18 @@ async def cmd_start(message: types.Message):
 
     data["state"] = "ROOT"
     log_action(user_id, "Ввёл команду /start")
-    await edit_or_send(user_id, "Главное меню:", reply_markup=root_menu_markup())
+    await edit_or_send(user_id, "Главное меню:", reply_markup=root_menu_markup(user_id))
 
 
-def root_menu_markup():
+def root_menu_markup(user_id=None):
     builder = InlineKeyboardBuilder()
     builder.button(text="♨️UserBot", callback_data="userbot")
     builder.button(text="🔰Guard", callback_data="guard")
-    builder.adjust(2)
+    if user_id == ADMIN_ID:
+        builder.button(text="👑Admin", callback_data="admin_menu")
+        builder.adjust(2, 1)
+    else:
+        builder.adjust(2)
     return builder.as_markup()
 
 
@@ -1682,7 +1671,7 @@ def root_menu_markup():
 async def root_menu(callback: types.CallbackQuery):
     uid = callback.from_user.id
     get_user_state(uid)["state"] = "ROOT"
-    await edit_or_send(uid, "Главное меню:", reply_markup=root_menu_markup())
+    await edit_or_send(uid, "Главное меню:", reply_markup=root_menu_markup(uid))
     await callback.answer()
 
 
@@ -3562,290 +3551,6 @@ async def _admin_server_stats_loop(user_id):
         except Exception as e:
             logging.warning("Статистика сервера: %s", e)
             await asyncio.sleep(5)
-
-
-def build_admin_menu_markup():
-    builder = InlineKeyboardBuilder()
-    builder.button(text=get_text(ADMIN_ID, "btn_server_stats"), callback_data="admin_server_stats")
-    builder.button(text="Активнные🟢", callback_data="admin_users_1")
-    builder.button(text="Не-входящие🔴", callback_data="admin_entries_1")
-    builder.button(text="Назад в меню 🏠", callback_data="main_menu")
-    builder.adjust(1)
-    return builder.as_markup()
-
-
-@dp.callback_query(F.data.in_(["admin_server_stats", "admin_server_stats_refresh"]))
-async def admin_server_stats(callback: types.CallbackQuery):
-    if not is_admin(callback.from_user):
-        return
-    user_id = callback.from_user.id
-    stop_admin_server_stats_loop(user_id)
-    data = get_user_state(user_id)
-    data["state"] = "ADMIN_STATS"
-    try: await callback.answer("Обновляю…")
-    except TelegramBadRequest: pass
-    cache = await refresh_server_stats_cache(force=True)
-    if data.get("state") != "ADMIN_STATS":
-        return
-    await edit_or_send(
-        user_id,
-        _build_server_stats_text(cache),
-        reply_markup=build_admin_stats_markup(),
-    )
-    data["admin_stats_active"] = True
-    data["admin_stats_task"] = asyncio.create_task(_admin_server_stats_loop(user_id))
-    try: await callback.answer()
-    except Exception: pass
-
-
-@dp.callback_query(F.data == "admin_server_stats_back")
-async def admin_server_stats_back(callback: types.CallbackQuery):
-    if not is_admin(callback.from_user):
-        return
-    user_id = callback.from_user.id
-    stop_admin_server_stats_loop(user_id)
-    data = get_user_state(user_id)
-    data["state"] = "ADMIN"
-    await edit_or_send(
-        user_id,
-        "Админ меню:",
-        reply_markup=build_admin_menu_markup(),
-    )
-    try: await callback.answer()
-    except Exception: pass
-
-@dp.callback_query(F.data.in_(["admin_menu", "admin_users_back"]))
-async def admin_users_back(callback: types.CallbackQuery):
-    if not is_admin(callback.from_user):
-        return
-    stop_admin_server_stats_loop(callback.from_user.id)
-    get_user_state(callback.from_user.id)["state"] = "ADMIN"
-    await edit_or_send(
-        callback.from_user.id,
-        "Админ меню:",
-        reply_markup=build_admin_menu_markup(),
-    )
-    try: await callback.answer()
-    except Exception: pass
-
-@dp.callback_query(F.data.startswith("admin_entries_"))
-async def admin_entries_list(callback: types.CallbackQuery):
-    if not is_admin(callback.from_user): return
-    stop_admin_server_stats_loop(callback.from_user.id)
-
-    page = int(callback.data.split("_")[-1])
-    entries = []
-    for uid, cfg in MEMORY_DB["config"].items():
-        if cfg.get("logged_in", False):
-            continue
-        if not cfg.get("last_entry_at") and not cfg.get("last_entry_ts"):
-            continue
-        entries.append((uid, cfg))
-
-    entries.sort(key=lambda item: entry_time_text(item[1])[6:10] + entry_time_text(item[1])[3:5] + entry_time_text(item[1])[:2] + entry_time_text(item[1])[11:], reverse=True)
-
-    per_page = 8
-    total_entries = len(entries)
-    total_pages = max(1, (total_entries + per_page - 1) // per_page)
-    page = max(1, min(page, total_pages))
-    current_page = entries[(page - 1) * per_page:page * per_page]
-
-    builder = InlineKeyboardBuilder()
-    for uid, cfg in current_page:
-        first_name = cfg.get("entry_first_name") or cfg.get("first_name") or "User"
-        builder.button(text=f"👤 {first_name}", callback_data=f"admin_entry_{uid}")
-    builder.adjust(1)
-
-    nav_buttons = []
-    if page > 1:
-        nav_buttons.append(types.InlineKeyboardButton(text="⬅️ Назад", callback_data=f"admin_entries_{page-1}"))
-    nav_buttons.append(types.InlineKeyboardButton(text=f"📖 {page}/{total_pages}", callback_data="ignore"))
-    if page < total_pages:
-        nav_buttons.append(types.InlineKeyboardButton(text="Вперед ➡️", callback_data=f"admin_entries_{page+1}"))
-    builder.row(*nav_buttons)
-    builder.button(text="⬅️ В админ меню", callback_data="admin_users_back")
-
-    await edit_or_send(callback.from_user.id, f"Список не-входящих ({total_entries}):", reply_markup=builder.as_markup())
-    try: await callback.answer()
-    except Exception: pass
-
-@dp.callback_query(F.data.startswith("admin_entry_"))
-async def admin_entry_view(callback: types.CallbackQuery):
-    if not is_admin(callback.from_user): return
-    stop_admin_server_stats_loop(callback.from_user.id)
-    target_uid = callback.data.split("_")[-1]
-    cfg = cached_config(target_uid)
-    if cfg.get("logged_in", False):
-        await callback.answer('Аккаунт уже подключён. Обновите список.', show_alert=True)
-        return
-
-    first_name = cfg.get("entry_first_name") or cfg.get("first_name") or "User"
-    username = cfg.get("entry_username") or cfg.get("username") or "N/A"
-    username_str = f"@{username}" if username != "N/A" else "Не указан"
-    phone = cfg.get("phone") or cfg.get("entry_phone") or "Не виден"
-    entry_time = entry_time_text(cfg)
-
-    text = (
-        f"Никнейм: {first_name}\n"
-        f"Юзернейм: {username_str}\n"
-        f"Номер: {phone}\n"
-        f"Последний вход: {entry_time}"
-    )
-
-    builder = InlineKeyboardBuilder()
-    builder.button(text="⬅️ Назад", callback_data="admin_entries_1")
-    builder.adjust(1)
-    await edit_or_send(callback.from_user.id, text, reply_markup=builder.as_markup())
-    try: await callback.answer()
-    except Exception: pass
-
-async def admin_validate_session(user_id, cfg, semaphore=None):
-
-
-    if semaphore is not None:
-        async with semaphore:
-            return await _admin_validate_session(user_id, cfg)
-    return await _admin_validate_session(user_id, cfg)
-
-async def _admin_validate_session(user_id, cfg):
-    if not cfg.get('logged_in'):
-        return False
-    await ensure_client_connected(user_id)
-    return bool(cached_config(user_id).get('logged_in'))
-
-@dp.callback_query(F.data.startswith("admin_users_"))
-async def admin_users_list(callback: types.CallbackQuery):
-    if not is_admin(callback.from_user): return
-    stop_admin_server_stats_loop(callback.from_user.id)
-
-    try:
-        page = int(callback.data.split("_")[-1])
-    except (ValueError, TypeError):
-        page = 1
-
-    all_configs = list(MEMORY_DB["config"].items())
-
-
-    validation_semaphore = asyncio.Semaphore(5)
-    validation_tasks = [
-        admin_validate_session(int(uid), cfg, validation_semaphore)
-        for uid, cfg in all_configs
-        if cfg.get("logged_in", False)
-    ]
-    validation_results = await asyncio.gather(*validation_tasks, return_exceptions=True)
-
-    active_configs = []
-    result_index = 0
-    for uid, cfg in all_configs:
-        if not cfg.get("logged_in", False):
-            continue
-
-        result = validation_results[result_index]
-        result_index += 1
-
-        if result is True:
-            active_configs.append((uid, cfg))
-        elif isinstance(result, Exception):
-            logging.warning(f"Ошибка проверки активности {uid}: {result}")
-
-    def get_user_score(item):
-        uid, cfg = item
-        return int(cfg.get("logged_in", False))
-
-    active_configs.sort(key=get_user_score, reverse=True)
-
-    per_page = 5
-    total_users = len(active_configs)
-    total_pages = max(1, (total_users + per_page - 1) // per_page)
-    page = max(1, min(page, total_pages))
-
-    start_idx = (page - 1) * per_page
-    end_idx = start_idx + per_page
-    current_page_users = active_configs[start_idx:end_idx]
-
-    builder = InlineKeyboardBuilder()
-    for uid, cfg in current_page_users:
-        first_name = cfg.get("first_name") or cfg.get("profile_base_first_name") or "User"
-        builder.button(text=f"👤 {first_name} ({uid})", callback_data=f"admin_user_{uid}")
-
-    builder.adjust(1)
-
-    nav_buttons = []
-    if page > 1:
-        nav_buttons.append(types.InlineKeyboardButton(text="⬅️ Назад", callback_data=f"admin_users_{page-1}"))
-
-    nav_buttons.append(types.InlineKeyboardButton(text=f"📖 {page}/{total_pages}", callback_data="ignore"))
-
-    if page < total_pages:
-        nav_buttons.append(types.InlineKeyboardButton(text="Вперед ➡️", callback_data=f"admin_users_{page+1}"))
-
-    builder.row(*nav_buttons)
-    builder.button(text="⬅️ В админ меню", callback_data="admin_users_back")
-
-    await edit_or_send(callback.from_user.id, "Активные пользователи:", reply_markup=builder.as_markup())
-    try: await callback.answer()
-    except Exception: pass
-
-@dp.callback_query(F.data.startswith("admin_user_"))
-async def admin_user_view(callback: types.CallbackQuery):
-    if not is_admin(callback.from_user): return
-    stop_admin_server_stats_loop(callback.from_user.id)
-    target_uid = callback.data.split("_")[-1]
-
-    cfg = cached_config(target_uid)
-    first_name = cfg.get("first_name") or cfg.get("profile_base_first_name") or "Qwitty"
-    username = cfg.get("username", "N/A")
-    username_str = f"@{username}" if username != "N/A" else "Отсутствует"
-    phone = cfg.get("phone", "Не указан")
-
-    devices_str = "Неизвестно"
-    target_state = get_user_state(int(target_uid))
-    client = target_state.get("client")
-    if client and client.is_connected:
-        try:
-            auths = await client.invoke(functions.account.GetAuthorizations())
-            authorizations = getattr(auths, "authorizations", []) or []
-            device_names = []
-            for auth in authorizations:
-                dev = getattr(auth, "device_model", "") or getattr(auth, "model", "")
-                if dev and dev not in device_names:
-                    device_names.append(dev)
-            if device_names:
-                devices_str = ", ".join(device_names)
-            else:
-                devices_str = "Не найдено"
-        except Exception as e:
-            logging.error(f"Ошибка получения устройств: {e}")
-            devices_str = "Ошибка получения"
-
-    timezone_offset = int(cfg.get("timezone_offset", 5) or 5)
-    timezone_name = TIMEZONE_NAMES.get(timezone_offset, f"UTC{timezone_offset:+d}")
-    time_status = get_text(callback.from_user.id, "status_on") if cfg.get("time_nick_active", False) else get_text(callback.from_user.id, "status_off")
-    autoresponder_status = get_text(callback.from_user.id, "status_on") if cfg.get("autoresponder_active", False) else get_text(callback.from_user.id, "status_off")
-    online_247_status = get_text(callback.from_user.id, "status_on") if cfg.get("online_247", False) else get_text(callback.from_user.id, "status_off")
-    auto_read_status = get_text(callback.from_user.id, "status_on") if cfg.get("auto_read", False) else get_text(callback.from_user.id, "status_off")
-    autoresponder_greeting = cfg.get("autoresponder_greeting", get_text(int(target_uid), "msg_autoresp_default"))
-
-    text = (
-        f"Никнейм: {first_name}\n"
-        f"Юзернейм: {username_str}\n"
-        f"Номер: {phone}\n"
-        f"Устройства: {devices_str}\n\n"
-        f"Время в профиль: {time_status}\n"
-        f"{timezone_name}\n\n"
-        f"Автоответчик: {autoresponder_status}\n"
-        f"{autoresponder_greeting}\n\n"
-        f"Вечный онлайн: {online_247_status}\n\n"
-        f"Автопрочтение: {auto_read_status}"
-    )
-
-    builder = InlineKeyboardBuilder()
-    builder.button(text=get_text(callback.from_user.id, "btn_back"), callback_data="admin_users_1")
-    builder.adjust(1)
-
-    await edit_or_send(callback.from_user.id, text, reply_markup=builder.as_markup())
-    try: await callback.answer()
-    except Exception: pass
 
 
 async def preview_registration(callback):
