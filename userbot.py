@@ -2954,7 +2954,7 @@ def saved_menu_content(uid):
             text += "\n⚠️ " + error
     builder = InlineKeyboardBuilder()
     builder.button(text="Выключить 🔴" if active else "Включить 🟢", callback_data="saved_toggle")
-    builder.button(text=f"Лички ({count}) 🗣", callback_data="saved_chats:0")
+    builder.button(text=(f"Лички ({count}) 🗣" if count else "Лички 🗣"), callback_data="saved_chats:0")
     builder.button(text="Назад ⬅️", callback_data="main_menu")
     builder.adjust(1)
     return text, builder.as_markup()
@@ -2976,7 +2976,8 @@ async def saved_render_chats(uid, page=0):
     page = min(max(page, 0), pages - 1)
     builder = InlineKeyboardBuilder()
     for cid, name, count, _ in rows[page * 5:page * 5 + 5]:
-        builder.row(types.InlineKeyboardButton(text=f"{saved_clip(name, 45)} ({count})",
+        chat_label = f"{saved_clip(name, 45)} ({count})" if count else saved_clip(name, 45)
+        builder.row(types.InlineKeyboardButton(text=chat_label,
                                               callback_data=f"saved_chat:{cid}"))
     saved_page_row(builder, page, pages, "saved_chats:")
     builder.row(types.InlineKeyboardButton(text="Назад ⬅️", callback_data="saved_menu"))
@@ -3576,7 +3577,7 @@ async def render_userbot_preview(callback):
         text = ('🗂 Сохранение удалённых и отредактированных сообщений\n'
                 'Действует только в личных чатах 👤\n\nСтатус: Выключено 🔴')
         builder.button(text='Включить 🟢', callback_data='saved_toggle')
-        builder.button(text='Лички (0) 🗣', callback_data='saved_chats:0')
+        builder.button(text='Лички 🗣', callback_data='saved_chats:0')
         builder.button(text='Назад ⬅️', callback_data='main_menu')
         builder.adjust(1)
     elif action.startswith(('saved_chats:', 'saved_chat:', 'saved_page:', 'saved_back:', 'saved_full:')):
