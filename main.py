@@ -53,7 +53,9 @@ RENDER_API_KEY = os.getenv("RENDER_API_KEY", "").strip()
 RENDER_SERVICE_ID = os.getenv("RENDER_SERVICE_ID", "").strip()
 RENDER_INSTANCE_ID = os.getenv("RENDER_INSTANCE_ID", "").strip()
 RESTART_PENDING_KEY = "server_restart_pending"
+RESTART_SUCCESS_AFTER_SECONDS = 45
 RESTART_ANIMATION_TASKS = {}
+RESTART_FINALIZE_TASKS = set()
 
 
 def build_admin_menu_markup():
@@ -521,6 +523,9 @@ async def admin_restart_confirm(callback: types.CallbackQuery):
 
     try:
         await _render_clean_deploy()
+        # Фолбэк в текущем процессе. Если Render успеет убить его раньше,
+        # новый процесс подхватит тот же pending из Supabase при старте.
+        _start_restart_finalizer()
     except Exception as e:
         _cancel_restart_animation(user_id)
         await _clear_restart_pending()
@@ -545,14 +550,17 @@ async def admin_restart_ok(callback: types.CallbackQuery):
 
 
 async def finalize_pending_server_restart():
+    """
+    Завершает экран перезапуска через фиксированные ~45 секунд от момента запроса.
+
+    Важно: задача может стартовать как в старом процессе сразу после запроса deploy,
+    так и в новом процессе после запуска. В обоих случаях requested_at из Supabase
+    позволяет досчитать только оставшееся время и не оставлять "Подождите." навсегда.
+    """
     uid = str(ADMIN_ID)
     cfg = MEMORY_DB["config"].get(uid) or {}
     pending = cfg.get(RESTART_PENDING_KEY)
     if not isinstance(pending, dict):
-        return
-
-    old_instance = str(pending.get("instance_id") or "")
-    if RENDER_INSTANCE_ID and old_instance and RENDER_INSTANCE_ID == old_instance:
         return
 
     try:
@@ -561,6 +569,27 @@ async def finalize_pending_server_restart():
     except (TypeError, ValueError):
         await _clear_restart_pending()
         return
+
+    remaining = float(RESTART_SUCCESS_AFTER_SECONDS)
+    requested_at = pending.get("requested_at")
+    if requested_at:
+        try:
+            requested_dt = userbot.datetime.datetime.fromisoformat(str(requested_at))
+            if requested_dt.tzinfo is None:
+                requested_dt = requested_dt.replace(tzinfo=userbot.datetime.timezone.utc)
+            elapsed = (userbot.get_world_utc_datetime() - requested_dt).total_seconds()
+            remaining = max(0.0, float(RESTART_SUCCESS_AFTER_SECONDS) - elapsed)
+        except Exception:
+            logging.debug("Не удалось вычислить оставшееся время рестарта", exc_info=True)
+
+    if remaining > 0:
+        try:
+            await asyncio.sleep(remaining)
+        except asyncio.CancelledError:
+            raise
+
+    # Если старый процесс всё ещё жив, не даём анимации перезаписать финальный текст.
+    _cancel_restart_animation(ADMIN_ID)
 
     try:
         await bot.edit_message_text(
@@ -579,6 +608,13 @@ async def finalize_pending_server_restart():
         logging.warning("Не удалось завершить экран перезапуска: %s", e)
     finally:
         await _clear_restart_pending()
+
+
+def _start_restart_finalizer():
+    task = asyncio.create_task(finalize_pending_server_restart())
+    RESTART_FINALIZE_TASKS.add(task)
+    task.add_done_callback(RESTART_FINALIZE_TASKS.discard)
+    return task
 
 
 async def handle_ping(request):
@@ -615,7 +651,8 @@ async def main():
     await restore_saved_sessions()
     recovery_task = asyncio.create_task(session_recovery_loop())
 
-    await finalize_pending_server_restart()
+    # Не блокируем старт polling на 45 секунд: финализатор работает отдельно.
+    _start_restart_finalizer()
     logging.info("🚀 Бот успешно запущен!")
 
     try:
@@ -652,6 +689,12 @@ async def main():
         for task in (recovery_task, db_task, ntp_task):
             task.cancel()
         await asyncio.gather(recovery_task, db_task, ntp_task, return_exceptions=True)
+
+        restart_finalize_tasks = list(RESTART_FINALIZE_TASKS)
+        for task in restart_finalize_tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*restart_finalize_tasks, return_exceptions=True)
 
         for data in USER_DATA.values():
             if data.get("client"):
