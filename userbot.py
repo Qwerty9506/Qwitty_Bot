@@ -2569,17 +2569,48 @@ class SavedMessageStore:
 
     async def mark_read(self, uid, cid, day, ids):
         if not await self.ensure_user(uid):
-            return
+            return False
+
+        changed = False
         async with self.lock:
             await self._roll_locked(uid)
             if day != self.days[uid]:
-                return
+                return False
+
             chat = await self._get_locked(uid, cid)
             for event in chat["events"]:
-                if event["id"] in ids:
+                if event["id"] in ids and not event.get("read"):
                     event["read"] = True
+                    changed = True
+
+            if not changed:
+                return True
+
+            # read-флаг обязан пережить даже внезапный рестарт Render.
+            # _put_locked помечает архив dirty, а flush ниже сразу пишет
+            # новое состояние сначала в SQLite, затем в Supabase.
             self._put_locked(uid, cid, chat)
+            self.due[uid] = time.monotonic()
             await self._pressure_locked()
+
+        # Не ждём обычного фонового интервала 7-8 минут: просмотр лички
+        # сохраняем в удалённую БД немедленно. Короткие ретраи прикрывают
+        # временный сетевой сбой Supabase.
+        for attempt, delay in enumerate((0.0, 0.35, 0.9)):
+            if delay:
+                await asyncio.sleep(delay)
+            try:
+                if await self.flush(uid):
+                    return True
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logging.warning("Не удалось сразу сохранить read-state %s/%s (попытка %s): %s",
+                                uid, cid, attempt + 1, type(e).__name__)
+
+        # remote_dirty остаётся выставленным, поэтому фоновый writer продолжит
+        # повторять сохранение даже если все быстрые попытки не удались.
+        return False
 
     def _snapshot_sync(self, uid):
         rows = []
