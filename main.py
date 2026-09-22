@@ -1,4 +1,5 @@
 import asyncio
+import html
 import json
 import logging
 import os
@@ -49,6 +50,22 @@ from userbot import (
 )
 
 ADMIN_ID = userbot.ADMIN_ID
+
+
+def _html(value):
+    return html.escape(str(value), quote=False)
+
+
+def _display_phone(value):
+    phone = str(value or "").strip()
+    if not phone or phone in {"Не указан", "Не виден", "N/A"}:
+        return phone or "Не указан"
+    if phone.startswith("+"):
+        return phone
+    if phone[0].isdigit():
+        return "+" + phone
+    return phone
+
 RENDER_API_KEY = os.getenv("RENDER_API_KEY", "").strip()
 RENDER_SERVICE_ID = os.getenv("RENDER_SERVICE_ID", "").strip()
 RENDER_INSTANCE_ID = os.getenv("RENDER_INSTANCE_ID", "").strip()
@@ -61,9 +78,9 @@ RESTART_FINALIZE_TASKS = set()
 def build_admin_menu_markup():
     builder = InlineKeyboardBuilder()
     builder.button(text=userbot.get_text(ADMIN_ID, "btn_server_stats"), callback_data="admin_server_stats")
-    builder.button(text="Активнные🟢", callback_data="admin_users_1")
-    builder.button(text="Не-входящие🔴", callback_data="admin_entries_1")
-    builder.button(text="Перезапуск сервера♻️", callback_data="admin_restart_server")
+    builder.button(text="Активные 🟢", callback_data="admin_users_1")
+    builder.button(text="Не-входящие 🔴", callback_data="admin_entries_1")
+    builder.button(text="Перезапуск сервера ♻️", callback_data="admin_restart_server")
     builder.button(text="Назад в главное меню 🏠", callback_data="root_menu")
     builder.adjust(1)
     return builder.as_markup()
@@ -88,7 +105,7 @@ async def open_admin_menu_for(user_id: int):
     userbot.stop_admin_server_stats_loop(user_id)
     data = userbot.get_user_state(user_id)
     data["state"] = "ADMIN"
-    await userbot.edit_or_send(user_id, "Админ меню:", reply_markup=build_admin_menu_markup())
+    await userbot.edit_or_send(user_id, "<b>👑 Админ-меню</b>\n<i>Управление сервером и пользователями</i>", reply_markup=build_admin_menu_markup(), parse_mode="HTML")
 
 
 @dp.message(F.text.casefold() == "admin")
@@ -194,8 +211,9 @@ async def admin_entries_list(callback: types.CallbackQuery):
 
     await userbot.edit_or_send(
         callback.from_user.id,
-        f"Список не-входящих ({total_entries}):",
+        f"<b>🔴 Не-входящие</b>\n<i>Всего: {total_entries}</i>",
         reply_markup=builder.as_markup(),
+        parse_mode="HTML",
     )
     try:
         await callback.answer()
@@ -220,17 +238,19 @@ async def admin_entry_view(callback: types.CallbackQuery):
     phone = cfg.get("phone") or cfg.get("entry_phone") or "Не виден"
     entry_time = userbot.entry_time_text(cfg)
 
+    phone = _display_phone(phone)
     text = (
-        f"Никнейм: {first_name}\n"
-        f"Юзернейм: {username_str}\n"
-        f"Номер: {phone}\n"
-        f"Последний вход: {entry_time}"
+        "<b>👤 Профиль пользователя</b>\n\n"
+        f"<b>Никнейм:</b> {_html(first_name)}\n"
+        f"<b>Юзернейм:</b> {_html(username_str)}\n"
+        f"<b>Номер:</b> {_html(phone)}\n"
+        f"<b>Последний вход:</b> <i>{_html(entry_time)}</i>"
     )
 
     builder = InlineKeyboardBuilder()
     builder.button(text="⬅️ Назад", callback_data="admin_entries_1")
     builder.adjust(1)
-    await userbot.edit_or_send(callback.from_user.id, text, reply_markup=builder.as_markup())
+    await userbot.edit_or_send(callback.from_user.id, text, reply_markup=builder.as_markup(), parse_mode="HTML")
     try:
         await callback.answer()
     except Exception:
@@ -350,7 +370,7 @@ async def admin_users_list(callback: types.CallbackQuery):
     builder.row(*nav_buttons)
     builder.button(text="⬅️ В админ меню", callback_data="admin_users_back")
 
-    await userbot.edit_or_send(callback.from_user.id, "Активные пользователи:", reply_markup=builder.as_markup())
+    await userbot.edit_or_send(callback.from_user.id, f"<b>🟢 Активные пользователи</b>\n<i>Всего: {total_users}</i>", reply_markup=builder.as_markup(), parse_mode="HTML")
     try:
         await callback.answer()
     except Exception:
@@ -373,7 +393,7 @@ async def admin_user_view(callback: types.CallbackQuery):
     first_name = cfg.get("first_name") or cfg.get("profile_base_first_name") or "Qwitty"
     username = cfg.get("username")
     username_str = f"@{username}" if username else "Отсутствует"
-    phone = cfg.get("phone") or "Не указан"
+    phone = _display_phone(cfg.get("phone") or "Не указан")
     devices_str = devices_str or "Неизвестно"
 
     timezone_offset = int(cfg.get("timezone_offset", 5) or 5)
@@ -385,22 +405,24 @@ async def admin_user_view(callback: types.CallbackQuery):
     autoresponder_greeting = cfg.get("autoresponder_greeting", userbot.get_text(int(target_uid), "msg_autoresp_default"))
 
     text = (
-        f"Никнейм: {first_name}\n"
-        f"Юзернейм: {username_str}\n"
-        f"Номер: {phone}\n"
-        f"Устройства: {devices_str}\n\n"
-        f"Время в профиль: {time_status}\n"
-        f"{timezone_name}\n\n"
-        f"Автоответчик: {autoresponder_status}\n"
-        f"{autoresponder_greeting}\n\n"
-        f"Вечный онлайн: {online_247_status}\n\n"
-        f"Автопрочтение: {auto_read_status}"
+        "<b>👤 Профиль</b>\n"
+        f"<b>Никнейм:</b> {_html(first_name)}\n"
+        f"<b>Юзернейм:</b> {_html(username_str)}\n"
+        f"<b>Номер:</b> {_html(phone)}\n"
+        f"<b>Устройства:</b> <i>{_html(devices_str)}</i>\n\n"
+        "<b>⚙️ Функции</b>\n"
+        f"<b>Время в профиль:</b> {_html(time_status)}\n"
+        f"<i>{_html(timezone_name)}</i>\n\n"
+        f"<b>Автоответчик:</b> {_html(autoresponder_status)}\n"
+        f"<i>{_html(autoresponder_greeting)}</i>\n\n"
+        f"<b>Вечный онлайн:</b> {_html(online_247_status)}\n\n"
+        f"<b>Автопрочтение:</b> {_html(auto_read_status)}"
     )
 
     builder = InlineKeyboardBuilder()
     builder.button(text=userbot.get_text(callback.from_user.id, "btn_back"), callback_data="admin_users_1")
     builder.adjust(1)
-    await userbot.edit_or_send(callback.from_user.id, text, reply_markup=builder.as_markup())
+    await userbot.edit_or_send(callback.from_user.id, text, reply_markup=builder.as_markup(), parse_mode="HTML")
     try:
         await callback.answer()
     except Exception:
@@ -484,7 +506,8 @@ async def _restart_wait_animation(chat_id: int, message_id: int):
                 await bot.edit_message_text(
                     chat_id=chat_id,
                     message_id=message_id,
-                    text=f"Подождите{dots[index]}",
+                    text=f"<b>♻️ Перезапуск сервера</b>\n\n<i>Подождите{dots[index]}</i>",
+                    parse_mode="HTML",
                 )
             except TelegramRetryAfter as e:
                 await asyncio.sleep(e.retry_after + 0.2)
@@ -513,8 +536,9 @@ async def admin_restart_server(callback: types.CallbackQuery):
     userbot.get_user_state(callback.from_user.id)["state"] = "ADMIN_RESTART_CONFIRM"
     await userbot.edit_or_send(
         callback.from_user.id,
-        "Вы уверены что хотите перезапустить сервер?",
+        "<b>♻️ Перезапуск сервера</b>\n\n<i>Вы уверены, что хотите перезапустить сервер?</i>",
         reply_markup=build_restart_confirm_markup(),
+        parse_mode="HTML",
     )
     try:
         await callback.answer()
@@ -537,7 +561,7 @@ async def admin_restart_confirm(callback: types.CallbackQuery):
     except Exception:
         pass
 
-    await userbot.edit_or_send(user_id, "Подождите.", reply_markup=None)
+    await userbot.edit_or_send(user_id, "<b>♻️ Перезапуск сервера</b>\n\n<i>Подождите…</i>", reply_markup=None, parse_mode="HTML")
     message_id = userbot.get_user_state(user_id).get("msg_id")
     if not message_id:
         await open_admin_menu_for(user_id)
@@ -628,7 +652,8 @@ async def finalize_pending_server_restart():
         await bot.edit_message_text(
             chat_id=chat_id,
             message_id=message_id,
-            text="Сервер успешно перезапущен✅",
+            text="<b>✅ Сервер успешно перезапущен</b>",
+            parse_mode="HTML",
             reply_markup=build_restart_done_markup(),
         )
         state = userbot.get_user_state(ADMIN_ID)
@@ -751,4 +776,3 @@ async def main():
 
 if __name__ == "__main__":
     loop.run_until_complete(main())
- 
