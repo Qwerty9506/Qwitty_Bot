@@ -237,6 +237,50 @@ async def admin_entry_view(callback: types.CallbackQuery):
         pass
 
 
+async def refresh_admin_user_snapshot(user_id: int, include_devices: bool = False):
+    """Refresh admin-visible account data from Telegram and immediately queue it for Supabase."""
+    if not await userbot.ensure_client_connected(user_id, force_check=True):
+        return None, None
+
+    state = userbot.get_user_state(user_id)
+    client = state.get("client")
+    if not client or not client.is_connected:
+        return None, None
+
+    cfg = userbot.cached_config(str(user_id))
+    devices_str = cfg.get("admin_devices") or "Неизвестно"
+
+    try:
+        me = await client.get_me()
+        if me:
+            cfg["first_name"] = ((getattr(me, "first_name", None) or "User").strip() or "User")[:64]
+            cfg["last_name"] = (getattr(me, "last_name", None) or "").strip()[:64]
+            cfg["username"] = getattr(me, "username", None) or None
+            live_phone = getattr(me, "phone_number", None)
+            cfg["phone"] = live_phone or None
+    except Exception as e:
+        logging.warning("Не удалось обновить профиль пользователя %s: %s", user_id, type(e).__name__)
+
+    if include_devices:
+        try:
+            auths = await client.invoke(functions.account.GetAuthorizations())
+            authorizations = getattr(auths, "authorizations", []) or []
+            device_names = []
+            for auth in authorizations:
+                dev = getattr(auth, "device_model", "") or getattr(auth, "model", "")
+                if dev and dev not in device_names:
+                    device_names.append(dev)
+            devices_str = ", ".join(device_names) if device_names else "Не найдено"
+            cfg["admin_devices"] = devices_str
+        except Exception as e:
+            logging.warning("Не удалось обновить устройства пользователя %s: %s", user_id, type(e).__name__)
+            devices_str = cfg.get("admin_devices") or "Ошибка получения"
+
+    MEMORY_DB["config"][str(user_id)] = cfg
+    await userbot.persist_user_config_now(user_id, cfg)
+    return cfg, devices_str
+
+
 async def admin_validate_session(user_id, cfg, semaphore=None):
     if semaphore is not None:
         async with semaphore:
@@ -247,8 +291,8 @@ async def admin_validate_session(user_id, cfg, semaphore=None):
 async def _admin_validate_session(user_id, cfg):
     if not cfg.get("logged_in"):
         return False
-    await userbot.ensure_client_connected(user_id)
-    return bool(userbot.cached_config(user_id).get("logged_in"))
+    fresh_cfg, _ = await refresh_admin_user_snapshot(user_id, include_devices=False)
+    return bool(fresh_cfg and fresh_cfg.get("logged_in"))
 
 
 @dp.callback_query(F.data.startswith("admin_users_"))
@@ -294,7 +338,7 @@ async def admin_users_list(callback: types.CallbackQuery):
     builder = InlineKeyboardBuilder()
     for uid, cfg in current_page_users:
         first_name = cfg.get("first_name") or cfg.get("profile_base_first_name") or "User"
-        builder.button(text=f"👤 {first_name} ({uid})", callback_data=f"admin_user_{uid}")
+        builder.button(text=f"👤 {first_name}", callback_data=f"admin_user_{uid}")
     builder.adjust(1)
 
     nav_buttons = []
@@ -320,28 +364,17 @@ async def admin_user_view(callback: types.CallbackQuery):
     userbot.stop_admin_server_stats_loop(callback.from_user.id)
     target_uid = callback.data.split("_")[-1]
 
-    cfg = userbot.cached_config(target_uid)
-    first_name = cfg.get("first_name") or cfg.get("profile_base_first_name") or "Qwitty"
-    username = cfg.get("username", "N/A")
-    username_str = f"@{username}" if username != "N/A" else "Отсутствует"
-    phone = cfg.get("phone", "Не указан")
+    fresh_cfg, devices_str = await refresh_admin_user_snapshot(int(target_uid), include_devices=True)
+    if fresh_cfg is None:
+        await callback.answer("Сессия пользователя сейчас недоступна. Обновите список.", show_alert=True)
+        return
 
-    devices_str = "Неизвестно"
-    target_state = userbot.get_user_state(int(target_uid))
-    client = target_state.get("client")
-    if client and client.is_connected:
-        try:
-            auths = await client.invoke(functions.account.GetAuthorizations())
-            authorizations = getattr(auths, "authorizations", []) or []
-            device_names = []
-            for auth in authorizations:
-                dev = getattr(auth, "device_model", "") or getattr(auth, "model", "")
-                if dev and dev not in device_names:
-                    device_names.append(dev)
-            devices_str = ", ".join(device_names) if device_names else "Не найдено"
-        except Exception as e:
-            logging.error("Ошибка получения устройств: %s", e)
-            devices_str = "Ошибка получения"
+    cfg = fresh_cfg
+    first_name = cfg.get("first_name") or cfg.get("profile_base_first_name") or "Qwitty"
+    username = cfg.get("username")
+    username_str = f"@{username}" if username else "Отсутствует"
+    phone = cfg.get("phone") or "Не указан"
+    devices_str = devices_str or "Неизвестно"
 
     timezone_offset = int(cfg.get("timezone_offset", 5) or 5)
     timezone_name = userbot.TIMEZONE_NAMES.get(timezone_offset, f"UTC{timezone_offset:+d}")
