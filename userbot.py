@@ -3,6 +3,7 @@ import struct
 import binascii
 import base64
 import hashlib
+import html
 import json
 import sqlite3
 import uuid
@@ -1668,15 +1669,15 @@ async def cmd_start(message: types.Message):
 
     data["state"] = "ROOT"
     log_action(user_id, "Ввёл команду /start")
-    await edit_or_send(user_id, "Главное меню:", reply_markup=root_menu_markup(user_id))
+    await edit_or_send(user_id, "<b>🏠 Главное меню</b>\n<i>Выберите раздел:</i>", reply_markup=root_menu_markup(user_id), parse_mode="HTML")
 
 
 def root_menu_markup(user_id=None):
     builder = InlineKeyboardBuilder()
-    builder.button(text="♨️UserBot", callback_data="userbot")
-    builder.button(text="🔰Guard", callback_data="guard")
+    builder.button(text="♨️ UserBot", callback_data="userbot")
+    builder.button(text="🔰 Guard", callback_data="guard")
     if user_id == ADMIN_ID:
-        builder.button(text="👑Admin", callback_data="admin_menu")
+        builder.button(text="👑 Admin", callback_data="admin_menu")
         builder.adjust(2, 1)
     else:
         builder.adjust(2)
@@ -1687,7 +1688,7 @@ def root_menu_markup(user_id=None):
 async def root_menu(callback: types.CallbackQuery):
     uid = callback.from_user.id
     get_user_state(uid)["state"] = "ROOT"
-    await edit_or_send(uid, "Главное меню:", reply_markup=root_menu_markup(uid))
+    await edit_or_send(uid, "<b>🏠 Главное меню</b>\n<i>Выберите раздел:</i>", reply_markup=root_menu_markup(uid), parse_mode="HTML")
     await callback.answer()
 
 
@@ -1712,7 +1713,7 @@ async def open_userbot(callback: types.CallbackQuery):
 
     # Для незарегистрированных доступен входной экран с предпросмотром/регистрацией.
     get_user_state(uid)["state"] = "USERBOT_ENTRY"
-    await edit_or_send(uid, "♨️UserBot", reply_markup=userbot_entry_markup())
+    await edit_or_send(uid, "<b>♨️ UserBot</b>\n<i>Управление Telegram-аккаунтом</i>", reply_markup=userbot_entry_markup(), parse_mode="HTML")
     try:
         await callback.answer()
     except Exception:
@@ -1732,8 +1733,9 @@ async def open_userbot_preview(callback: types.CallbackQuery):
     get_user_state(uid)["state"] = "PREVIEW"
     await edit_or_send(
         uid,
-        "♨️UserBot — управление аккаунтом:",
-        reply_markup=show_main_menu_builder(uid, user_obj=callback.from_user).as_markup()
+        "<b>♨️ UserBot</b>\n<i>Управление аккаунтом</i>",
+        reply_markup=show_main_menu_builder(uid, user_obj=callback.from_user).as_markup(),
+        parse_mode="HTML",
     )
     try:
         await callback.answer()
@@ -2022,7 +2024,7 @@ async def process_code(message: types.Message):
         start_userbot_features(user_id)
         save_user_config(user_id, message)
         data["state"] = "MENU"
-        await edit_or_send(user_id, "♨️UserBot — управление аккаунтом:", reply_markup=show_main_menu_builder(user_id, user_obj=message.from_user).as_markup())
+        await edit_or_send(user_id, "<b>♨️ UserBot</b>\n<i>Управление аккаунтом</i>", reply_markup=show_main_menu_builder(user_id, user_obj=message.from_user).as_markup(), parse_mode="HTML")
     except SessionPasswordNeeded:
         data["state"] = "WAITING_PASSWORD"
         builder = InlineKeyboardBuilder()
@@ -2071,7 +2073,7 @@ async def process_password(message: types.Message):
         start_userbot_features(user_id)
         save_user_config(user_id, message)
         data["state"] = "MENU"
-        await edit_or_send(user_id, "♨️UserBot — управление аккаунтом:", reply_markup=show_main_menu_builder(user_id, user_obj=message.from_user).as_markup())
+        await edit_or_send(user_id, "<b>♨️ UserBot</b>\n<i>Управление аккаунтом</i>", reply_markup=show_main_menu_builder(user_id, user_obj=message.from_user).as_markup(), parse_mode="HTML")
     except Exception:
         builder = InlineKeyboardBuilder()
         builder.button(text=get_text(user_id, "btn_back"), callback_data="cancel_auth")
@@ -2108,7 +2110,7 @@ async def main_menu(callback: types.CallbackQuery):
 
     data = get_user_state(user_id)
     data["state"] = "MENU"
-    await edit_or_send(user_id, "♨️UserBot — управление аккаунтом:", reply_markup=show_main_menu_builder(user_id, user_obj=callback.from_user).as_markup())
+    await edit_or_send(user_id, "<b>♨️ UserBot</b>\n<i>Управление аккаунтом</i>", reply_markup=show_main_menu_builder(user_id, user_obj=callback.from_user).as_markup(), parse_mode="HTML")
     try: await callback.answer()
     except Exception: pass
 
@@ -2127,16 +2129,16 @@ async def menu_online(callback: types.CallbackQuery):
         return
     cfg = MEMORY_DB["config"].get(str(uid), {})
     active = cfg.get("online_247", False)
-    text = "Вечный онлайн 📊:\n\nСтатус: " + ("🟢 Включен" if active else "🔴 Выключен")
-    text += "\nПоддерживает статус вечного «в сети»."
+    text = "<b>📊 Вечный онлайн</b>\n\n<b>Статус:</b> " + ("🟢 <b>Включен</b>" if active else "🔴 <b>Выключен</b>")
+    text += "\n<i>Поддерживает статус постоянного «в сети».</i>"
     if get_user_state(uid).get("online_error") and active:
-        text += "\n⚠️ " + get_user_state(uid)["online_error"]
+        text += "\n⚠️ " + html.escape(str(get_user_state(uid)["online_error"]), quote=False)
 
     builder = InlineKeyboardBuilder()
     builder.button(text="🔴 Выключить" if active else "🟢 Включить", callback_data="toggle_247")
     builder.button(text="Назад в меню 🏠", callback_data="main_menu")
     builder.adjust(1)
-    await edit_or_send(uid, text, reply_markup=builder.as_markup())
+    await edit_or_send(uid, text, reply_markup=builder.as_markup(), parse_mode="HTML")
     try:
         await callback.answer()
     except TelegramBadRequest:
@@ -2178,13 +2180,13 @@ async def menu_auto_read(callback: types.CallbackQuery):
     uid = callback.from_user.id
     cfg = MEMORY_DB["config"].get(str(uid), {})
     active = cfg.get("auto_read", False)
-    text = "Автопрочтение 👀:\n\nСтатус: " + ("🟢 Включен" if active else "🔴 Выключен")
-    text += "\nАвтоматически прочитает новые сообщения в ЛС."
+    text = "<b>👀 Автопрочтение</b>\n\n<b>Статус:</b> " + ("🟢 <b>Включен</b>" if active else "🔴 <b>Выключен</b>")
+    text += "\n<i>Автоматически отмечает новые сообщения в ЛС прочитанными.</i>"
     builder = InlineKeyboardBuilder()
     builder.button(text="🔴 Выключить" if active else "🟢 Включить", callback_data="toggle_auto_read")
     builder.button(text="Назад в меню 🏠", callback_data="main_menu")
     builder.adjust(1)
-    await edit_or_send(uid, text, reply_markup=builder.as_markup())
+    await edit_or_send(uid, text, reply_markup=builder.as_markup(), parse_mode="HTML")
     await callback.answer()
 
 
