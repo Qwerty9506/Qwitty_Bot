@@ -2209,7 +2209,7 @@ async def toggle_auto_read(callback: types.CallbackQuery):
 
 SAVED_REMOTE_TABLE = "activity"
 SAVED_FORMAT = "qwitty.saved.v1"
-SAVED_CHAT_LIMIT = 100
+SAVED_CHAT_LIMIT = 20
 SAVED_RAM_LIMIT = 24 * 1024 * 1024
 SAVED_REMOTE_LIMIT = 24 * 1024 * 1024
 SAVED_HISTORY_LOCK = asyncio.Lock()
@@ -2238,14 +2238,19 @@ def saved_unpack(blob):
 def saved_trim(chat):
 
     while len(chat["base"]) + len(chat["events"]) > SAVED_CHAT_LIMIT:
+        # Сначала убираем уже просмотренные события, затем самые старые обычные
+        # сообщения. Если остались только непросмотренные события, всё равно
+        # держим строгий лимит и удаляем самое старое из них.
         read = next((e for e in chat["events"] if e.get("read")), None)
         if read is not None:
             chat["events"].remove(read)
         elif chat["base"]:
             del chat["base"][min(chat["base"], key=int)]
+        elif chat["events"]:
+            oldest = min(chat["events"], key=lambda e: float(e.get("ts", 0) or 0))
+            chat["events"].remove(oldest)
         else:
-
-            raise ValueError("Archive contains more than 100 pinned events")
+            break
 
 
 class SavedMessageStore:
@@ -2359,9 +2364,12 @@ class SavedMessageStore:
                             if not unpacker.eof:
                                 raise ValueError("Invalid archive size")
                             chat = json.loads(raw)
-                            if len(chat["base"]) + len(chat["events"]) > 100:
-                                raise ValueError("Invalid chat limit")
-                            decoded.append((int(cid), blob))
+                            # Старые архивы могли содержать до 100 записей на личку.
+                            # При загрузке мягко мигрируем их на новый лимит, не ломая восстановление.
+                            if len(chat.get("base", {})) + len(chat.get("events", [])) > 100:
+                                raise ValueError("Invalid legacy chat limit")
+                            saved_trim(chat)
+                            decoded.append((int(cid), saved_pack(chat)))
                         await self._clear_locked(uid, today)
                         for cid, blob in decoded:
                             self._put_locked(uid, cid, saved_unpack(blob))
@@ -2755,6 +2763,26 @@ async def saved_edited_message(client, message):
         logging.warning("Archive edit %s: %s", uid, type(e).__name__)
 
 
+async def saved_chat_is_empty(client, cid):
+    """Проверяет сам Telegram-диалог, а не локальный архив последних сообщений.
+
+    Если проверка временно недоступна, возвращаем False: лучше показать обычное
+    уведомление, чем ошибочно скрыть реальное удаление.
+    """
+    try:
+        async for _message in client.get_chat_history(cid, limit=1):
+            return False
+        return True
+    except Unauthorized:
+        raise
+    except FloodWait as e:
+        logging.debug("Archive empty-chat check FloodWait %s/%s: %s", client.owner_id, cid, e.value)
+        return False
+    except Exception as e:
+        logging.debug("Archive empty-chat check %s/%s: %s", client.owner_id, cid, type(e).__name__)
+        return False
+
+
 async def saved_raw_update(client, update, users, chats):
 
 
@@ -2762,7 +2790,19 @@ async def saved_raw_update(client, update, users, chats):
         return
     uid = client.owner_id
     try:
-        for cid, name, event, day in await SAVED.delete(uid, update.messages):
+        notices = await SAVED.delete(uid, update.messages)
+        if not notices:
+            return
+
+        # При полном удалении лички Telegram может прислать пачку удалений.
+        # События всё равно остаются в архиве, но если сам диалог уже реально пуст,
+        # уведомление не отправляем. Проверяем каждый затронутый чат только один раз.
+        empty_chats = {}
+        for cid, name, event, day in notices:
+            if cid not in empty_chats:
+                empty_chats[cid] = await saved_chat_is_empty(client, cid)
+            if empty_chats[cid]:
+                continue
             try:
                 SAVED_NOTIFICATIONS.put_nowait((uid, cid, name, event, day))
             except asyncio.QueueFull:
@@ -2807,7 +2847,7 @@ async def saved_history_loop(uid):
             while (count < SAVED_CHAT_LIMIT and saved_enabled(uid) and day == saved_day(uid)
                    and state.get("client") is client):
                 async def fetch_page():
-                    return [m async for m in client.get_chat_history(chat.id, limit=100, offset_id=offset_id)]
+                    return [m async for m in client.get_chat_history(chat.id, limit=SAVED_CHAT_LIMIT, offset_id=offset_id)]
                 try:
                     messages = await saved_history_request(fetch_page)
                 except FloodWait as e:
@@ -2833,7 +2873,7 @@ async def saved_history_loop(uid):
                             break
                 await SAVED.remember(uid, chat.id, name, records, day, seed=True)
                 next_offset = messages[-1].id
-                if next_offset == offset_id or len(messages) < 100:
+                if next_offset == offset_id or len(messages) < SAVED_CHAT_LIMIT:
                     break
                 offset_id = next_offset
         if completed and day == saved_day(uid):
@@ -3059,7 +3099,7 @@ def saved_menu_content(uid):
             "Действует только в личных чатах 👤\n\n"
             f"Статус: {'Включено 🟢' if active else 'Выключено 🔴'}\n\n"
             "🕛 Архив очищается в 00:00 по часовому поясу аккаунта.\n"
-            "Учитываются только сообщения собеседников, до 100 записей на личку.")
+            f"Учитываются только сообщения собеседников, до {SAVED_CHAT_LIMIT} записей на личку.")
     if not active:
         text += "\nПосле выключения сохранённые записи доступны до полуночи."
     state = get_user_state(uid)
