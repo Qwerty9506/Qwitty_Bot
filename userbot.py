@@ -179,6 +179,7 @@ TIMEZONE_NAMES = {
 
 REGISTRATION_FLOOD_SECONDS_DEFAULT = 0
 USER_MESSAGE_DELETE_DELAY = 3
+UI_INLINE_MAX_AGE_SECONDS = 15 * 60
 
 
 def format_remaining_time(seconds):
@@ -824,6 +825,7 @@ def get_user_state(user_id):
         cfg = MEMORY_DB["config"].get(uid_str) or {}
         USER_DATA[user_id] = {
             "msg_id": cfg.get("msg_id"),
+            "ui_message_created_ts": float(cfg.get("ui_message_created_ts", 0.0) or 0.0),
             "phone": cfg.get("phone"),
             "password": cfg.get("password"),
             "phone_code_hash": None,
@@ -922,6 +924,11 @@ class RestartMiddleware(BaseMiddleware):
                 stop_admin_server_stats_loop(user_id)
                 await asyncio.gather(stats_task, return_exceptions=True)
             u_state["msg_id"] = event.message.message_id
+            if getattr(event.message, "date", None):
+                message_date = event.message.date
+                if message_date.tzinfo is None:
+                    message_date = message_date.replace(tzinfo=datetime.timezone.utc)
+                u_state["ui_message_created_ts"] = message_date.timestamp()
             action = event.data or ''
             if is_preview(user_id) and preview_action(action):
                 return await render_userbot_preview(event)
@@ -931,10 +938,6 @@ class RestartMiddleware(BaseMiddleware):
                         return await preview_registration(event)
                     await event.answer('Соединение временно недоступно. Повторите позже.', show_alert=True)
                     return
-            if event.data not in ("guard", "ignore"):
-                u_state["ui_action_count"] = u_state.get("ui_action_count", 0) + 1
-                u_state["recreate_pending"] = u_state["ui_action_count"] % 5 == 0
-
             if u_state["state"] == "START":
                 uid_str = str(user_id)
                 cfg = cached_config(uid_str)
@@ -973,7 +976,6 @@ def start_ui_refresh_task(user_id):
 async def edit_or_send(user_id, text, reply_markup=None, parse_mode=None):
     data = get_user_state(user_id)
 
-
     if is_preview(user_id) and data.get('state') not in ('ROOT', 'USERBOT_ENTRY', 'ADMIN', 'ADMIN_STATS'):
         text = '#Предпросмотр\n\n' + text.removeprefix('#Предпросмотр\n\n')
     clean_text = text
@@ -985,14 +987,22 @@ async def edit_or_send(user_id, text, reply_markup=None, parse_mode=None):
     data["last_ui_parse_mode"] = parse_mode
     start_ui_refresh_task(user_id)
 
-    force_new_message = data.pop("recreate_pending", False)
-    if force_new_message and data.get("msg_id"):
-        try:
-            await bot.delete_message(chat_id=user_id, message_id=data["msg_id"])
-        except TelegramBadRequest:
-            pass
-        data["msg_id"] = None
-
+    # Пока UI-сообщению меньше 15 минут, всё обновляется обычным editMessageText.
+    # После 15 минут старое сообщение удаляется и создаётся новое, чтобы интерфейс
+    # не оставался далеко в истории чата. Если возраст старого сохранённого msg_id
+    # неизвестен (например, после обновления со старой версией), пересоздаём его один раз.
+    if data.get("msg_id"):
+        created_ts = float(data.get("ui_message_created_ts", 0.0) or 0.0)
+        message_age = time.time() - created_ts if created_ts > 0 else UI_INLINE_MAX_AGE_SECONDS + 1
+        if message_age >= UI_INLINE_MAX_AGE_SECONDS:
+            try:
+                await bot.delete_message(chat_id=user_id, message_id=data["msg_id"])
+            except TelegramBadRequest:
+                pass
+            except Exception as e:
+                logging.debug("Не удалось удалить устаревшее UI-сообщение %s: %s", user_id, type(e).__name__)
+            data["msg_id"] = None
+            data["ui_message_created_ts"] = 0.0
 
     if data.get("msg_id"):
         try:
@@ -1008,8 +1018,6 @@ async def edit_or_send(user_id, text, reply_markup=None, parse_mode=None):
             error_text = str(e).lower()
             if "message is not modified" in error_text:
                 return True
-
-
             if "message to edit not found" not in error_text and "message identifier is not specified" not in error_text:
                 logging.warning(f"Не удалось изменить UI-сообщение {user_id}: {e}")
                 return False
@@ -1017,6 +1025,7 @@ async def edit_or_send(user_id, text, reply_markup=None, parse_mode=None):
             logging.warning(f"Не удалось изменить UI-сообщение {user_id}: {e}")
             return False
         data["msg_id"] = None
+        data["ui_message_created_ts"] = 0.0
 
     msg = await bot.send_message(
         chat_id=user_id,
@@ -1025,14 +1034,21 @@ async def edit_or_send(user_id, text, reply_markup=None, parse_mode=None):
         parse_mode=parse_mode,
     )
     data["msg_id"] = msg.message_id
+    msg_date = getattr(msg, "date", None)
+    if msg_date is not None:
+        if msg_date.tzinfo is None:
+            msg_date = msg_date.replace(tzinfo=datetime.timezone.utc)
+        data["ui_message_created_ts"] = msg_date.timestamp()
+    else:
+        data["ui_message_created_ts"] = time.time()
 
     uid_str = str(user_id)
     if uid_str in MEMORY_DB["config"]:
         MEMORY_DB["config"][uid_str]["msg_id"] = msg.message_id
+        MEMORY_DB["config"][uid_str]["ui_message_created_ts"] = data["ui_message_created_ts"]
         queue_db_save("config", uid_str, MEMORY_DB["config"][uid_str])
 
-    if force_new_message:
-        data["ui_action_count"] = 0
+    data["ui_action_count"] = 0
     return True
 
 
@@ -2867,45 +2883,112 @@ async def delete_saved_notification_later(chat_id, message_id, delay=300):
         logging.debug("Archive notification auto-delete %s/%s: %s", chat_id, message_id, type(e).__name__)
 
 
+def build_saved_notification_text(events):
+    valid = [(name, event) for name, event in events if isinstance(event, dict)]
+    if not valid:
+        return "🔔 В сохранённых личках произошли изменения."
+
+    deletes = [(name, event) for name, event in valid if event.get("kind") != "edit"]
+    edits = [(name, event) for name, event in valid if event.get("kind") == "edit"]
+
+    if len(valid) == 1:
+        name, event = valid[0]
+        if event.get("kind") == "edit":
+            return (
+                f"✏️ В личке с {saved_clip(name, 100)} отредактировано входящее сообщение:\n\n"
+                f"Было:\n«{saved_clip(event.get('before', ''), 1700)}»\n\n"
+                f"Стало:\n«{saved_clip(event.get('after', ''), 1700)}»"
+            )
+        return (
+            f"🗑 В личке с {saved_clip(name, 100)} удалено входящее сообщение:\n\n"
+            f"«{saved_clip(event.get('before', ''), 3500)}»"
+        )
+
+    if deletes and not edits:
+        title = f"🗑 Удалено входящих сообщений: {len(deletes)}"
+    elif edits and not deletes:
+        title = f"✏️ Отредактировано входящих сообщений: {len(edits)}"
+    else:
+        title = f"🔔 Изменений в сохранённых личках: {len(valid)}"
+
+    parts = [title]
+    shown = 0
+    for name, event in valid:
+        if event.get("kind") == "edit":
+            block = (
+                f"✏️ {saved_clip(name, 80)}\n"
+                f"Было: «{saved_clip(event.get('before', ''), 520)}»\n"
+                f"Стало: «{saved_clip(event.get('after', ''), 520)}»"
+            )
+        else:
+            block = (
+                f"🗑 {saved_clip(name, 80)}\n"
+                f"«{saved_clip(event.get('before', ''), 760)}»"
+            )
+        candidate = "\n\n".join(parts + [block])
+        if len(candidate) > 3850:
+            break
+        parts.append(block)
+        shown += 1
+
+    hidden = len(valid) - shown
+    if hidden > 0:
+        parts.append(f"…и ещё {hidden} событий. Все они сохранены в разделе «Лички».")
+    return "\n\n".join(parts)
+
+
 async def saved_notification_loop():
     while True:
-        uid, cid, name, event, day = await SAVED_NOTIFICATIONS.get()
+        first = await SAVED_NOTIFICATIONS.get()
+        batch = [first]
+
+        # Массовые удаления Telegram часто приходят несколькими соседними update.
+        # Небольшое окно собирает их в один пакет вместо очереди отдельных уведомлений.
+        deadline = time.monotonic() + 0.8
+        while len(batch) < 80:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            try:
+                item = await asyncio.wait_for(SAVED_NOTIFICATIONS.get(), timeout=remaining)
+            except asyncio.TimeoutError:
+                break
+            else:
+                batch.append(item)
+
+        grouped = {}
+        for uid, cid, name, event, day in batch:
+            if day != saved_day(uid):
+                continue
+            grouped.setdefault(uid, []).append((cid, name, event, day))
+
         try:
-
-            while day == saved_day(uid):
-                try:
-                    markup = InlineKeyboardBuilder()
-                    markup.button(text="Окей ✅", callback_data="saved_ok")
-
-                    if event.get("kind") == "edit":
-                        notification_text = (
-                            f"✏️ В личке с {saved_clip(name, 100)} отредактировано входящее сообщение:\n\n"
-                            f"Было:\n«{saved_clip(event.get('before', ''), 1700)}»\n\n"
-                            f"Стало:\n«{saved_clip(event.get('after', ''), 1700)}»"
+            for uid, items in grouped.items():
+                while True:
+                    try:
+                        markup = InlineKeyboardBuilder()
+                        markup.button(text="Окей ✅", callback_data="saved_ok")
+                        notification_text = build_saved_notification_text(
+                            [(name, event) for _cid, name, event, _day in items]
                         )
-                    else:
-                        notification_text = (
-                            f"🗑 В личке с {saved_clip(name, 100)} удалено входящее сообщение:\n\n"
-                            f"«{saved_clip(event.get('before', ''), 3500)}»"
+                        notice = await bot.send_message(
+                            uid,
+                            notification_text,
+                            reply_markup=markup.as_markup(),
+                            parse_mode=None,
                         )
-
-                    notice = await bot.send_message(
-                        uid,
-                        notification_text,
-                        reply_markup=markup.as_markup(),
-                        parse_mode=None
-                    )
-                    asyncio.create_task(delete_saved_notification_later(uid, notice.message_id, 300))
-                    break
-                except TelegramRetryAfter as e:
-                    await asyncio.sleep(e.retry_after + 1)
-                except Exception as e:
-                    SAVED.errors[uid] = "Уведомление не доставлено. Событие доступно в разделе «Лички»."
-                    logging.warning("Archive notification %s: %s", uid, type(e).__name__)
-                    break
-            await asyncio.sleep(1.1)
+                        asyncio.create_task(delete_saved_notification_later(uid, notice.message_id, 300))
+                        break
+                    except TelegramRetryAfter as e:
+                        await asyncio.sleep(e.retry_after + 1)
+                    except Exception as e:
+                        SAVED.errors[uid] = "Уведомление не доставлено. Событие доступно в разделе «Лички»."
+                        logging.warning("Archive notification %s: %s", uid, type(e).__name__)
+                        break
+                await asyncio.sleep(1.1)
         finally:
-            SAVED_NOTIFICATIONS.task_done()
+            for _ in batch:
+                SAVED_NOTIFICATIONS.task_done()
 
 
 async def saved_writer_loop():
