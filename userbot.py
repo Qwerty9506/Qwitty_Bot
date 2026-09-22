@@ -238,7 +238,7 @@ TEXTS = {
     "btn_im_sure": "Я уверен 👍",
     "btn_register": "Регистрироваться 📝",
     "msg_start": "Здравствуйте!\nДобро пожаловать в бота автоматизированного управления аккаунтом.\nОзнакомьтесь с правилами.",
-    "msg_start_register": "Чтобы зарегистрироваться заново, нажмите кнопку ниже 👇",
+    "msg_start_register": "Перед началом ознакомьтесь с правилами ниже 👇",
     "msg_menu": "Доступные нам функции управления вашим аккаунтом:",
     "msg_rules_text": (
         "**🛡 Правила бота**\n\n"
@@ -1358,11 +1358,16 @@ def cached_config(uid):
 
 
 def is_preview(uid):
+    """True only while the user is inside the real feature preview.
+
+    Registration, rules, authorization and the "connect Telegram" screen are
+    normal bot flows and must never be marked with #Предпросмотр.
+    """
     try:
         state = USER_DATA.get(int(uid), {}).get('state')
     except (TypeError, ValueError):
         state = None
-    return state == 'PREVIEW' or not cached_config(uid).get('logged_in', False)
+    return state == 'PREVIEW'
 
 
 def entry_time_text(cfg):
