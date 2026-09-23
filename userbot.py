@@ -806,6 +806,43 @@ def get_text(user_id, key, *args):
             return text
     return text
 
+
+def format_plain_ui_html(text):
+    """Safely prettify plain UI text without ever treating user text as HTML."""
+    escaped = html.escape(str(text or ""), quote=False)
+    lines = escaped.split("\n")
+
+    # The first non-empty line is the screen/message title.
+    for index, line in enumerate(lines):
+        if line.strip():
+            lines[index] = f"<b>{line}</b>"
+            break
+
+    label_re = re.compile(
+        r"^(Статус|Предпросмотр|Смещение часового пояса|Часовой пояс|"
+        r"Текст приветствия|Подсказка|Сброс лимита|До сброса|"
+        r"Аптайм процесса|База|Было|Стало):\s*(.*)$"
+    )
+    italic_prefixes = (
+        "Действует только", "Учитываются только", "После выключения",
+        "Последние сообщения", "Новые уже", "Сохранённых сообщений пока",
+        "Сохранённых удалений", "Для включения функций",
+        "Ответы: только", "Архив очищен",
+    )
+
+    for index, line in enumerate(lines):
+        # Skip markup already added to the title.
+        if line.startswith("<b>"):
+            continue
+        match = label_re.match(line)
+        if match:
+            label, value = match.groups()
+            lines[index] = f"<b>{label}:</b> {value}"
+        elif line.startswith(italic_prefixes):
+            lines[index] = f"<i>{line}</i>"
+
+    return "\n".join(lines)
+
 def log_action(user_id, action_text):
     uid_str = str(user_id)
     if uid_str not in MEMORY_DB["logs"]:
@@ -979,6 +1016,14 @@ async def edit_or_send(user_id, text, reply_markup=None, parse_mode=None):
 
     if is_preview(user_id) and data.get('state') not in ('ROOT', 'USERBOT_ENTRY', 'ADMIN', 'ADMIN_STATS'):
         text = '#Предпросмотр\n\n' + text.removeprefix('#Предпросмотр\n\n')
+
+    # Plain screens are escaped first and then decorated with safe HTML.
+    # This gives the whole bot consistent bold/italic typography while
+    # preventing names, deleted messages, greetings, etc. from injecting tags.
+    if parse_mode is None:
+        text = format_plain_ui_html(text)
+        parse_mode = "HTML"
+
     clean_text = text
     display_text = clean_text
     if data.get("save_error"):
@@ -2209,18 +2254,12 @@ async def toggle_auto_read(callback: types.CallbackQuery):
 
 SAVED_REMOTE_TABLE = "activity"
 SAVED_FORMAT = "qwitty.saved.v1"
-SAVED_CHAT_LIMIT = 20
-SAVED_NOTIFICATION_EVENT_LIMIT = 20
+SAVED_CHAT_LIMIT = 100
 SAVED_RAM_LIMIT = 24 * 1024 * 1024
 SAVED_REMOTE_LIMIT = 24 * 1024 * 1024
 SAVED_HISTORY_LOCK = asyncio.Lock()
 SAVED_TASKS = []
 SAVED_NOTIFICATIONS = asyncio.Queue(maxsize=256)
-# Одно активное уведомление на пользователя. Пока пользователь не нажал «Окей»,
-# новые удаления/редактирования дописываются в это же сообщение.
-SAVED_ACTIVE_NOTIFICATIONS = {}
-SAVED_NOTIFICATION_LOCKS = {}
-SAVED_NOTIFICATION_TTL_SECONDS = 300
 
 
 def saved_day(uid):
@@ -2242,50 +2281,16 @@ def saved_unpack(blob):
 
 
 def saved_trim(chat):
-    """Держит кольцевой архив: новые записи всегда принимаются, самые старые удаляются."""
-    base = chat.setdefault("base", {})
-    events = chat.setdefault("events", [])
 
-    while len(base) + len(events) > SAVED_CHAT_LIMIT:
-        oldest_kind = None
-        oldest_key = None
-        oldest_ts = float("inf")
-
-        # Обычные входящие сообщения хранят время последней версии в record["version"].
-        for mid, record in base.items():
-            try:
-                ts = float((record or {}).get("version", 0) or 0)
-            except (TypeError, ValueError):
-                ts = 0.0
-            if ts < oldest_ts:
-                oldest_ts = ts
-                oldest_kind = "base"
-                oldest_key = mid
-
-        # Удаления/редактирования имеют собственный timestamp. Не важно, прочитано
-        # событие или нет: при переполнении вылетает именно самое старое, поэтому
-        # лимит никогда больше не блокирует сохранение новых событий.
-        for index, event in enumerate(events):
-            try:
-                ts = float((event or {}).get("ts", 0) or 0)
-            except (TypeError, ValueError):
-                ts = 0.0
-            if ts < oldest_ts:
-                oldest_ts = ts
-                oldest_kind = "event"
-                oldest_key = index
-
-        if oldest_kind == "base" and oldest_key is not None:
-            base.pop(str(oldest_key), None)
-        elif oldest_kind == "event" and oldest_key is not None:
-            events.pop(int(oldest_key))
-        elif base:
-            # Защита для повреждённой/старой записи без timestamp.
-            base.pop(next(iter(base)), None)
-        elif events:
-            events.pop(0)
+    while len(chat["base"]) + len(chat["events"]) > SAVED_CHAT_LIMIT:
+        read = next((e for e in chat["events"] if e.get("read")), None)
+        if read is not None:
+            chat["events"].remove(read)
+        elif chat["base"]:
+            del chat["base"][min(chat["base"], key=int)]
         else:
-            break
+
+            raise ValueError("Archive contains more than 100 pinned events")
 
 
 class SavedMessageStore:
@@ -2399,13 +2404,8 @@ class SavedMessageStore:
                             if not unpacker.eof:
                                 raise ValueError("Invalid archive size")
                             chat = json.loads(raw)
-                            # Старые резервные копии могли содержать больше текущего
-                            # кольцевого лимита. При восстановлении принимаем их и ниже
-                            # автоматически обрезаем до последних SAVED_CHAT_LIMIT записей.
-                            if len(chat.get("base", {})) + len(chat.get("events", [])) > 5000:
+                            if len(chat["base"]) + len(chat["events"]) > 100:
                                 raise ValueError("Invalid chat limit")
-                            saved_trim(chat)
-                            blob = saved_pack(chat)
                             decoded.append((int(cid), blob))
                         await self._clear_locked(uid, today)
                         for cid, blob in decoded:
@@ -2920,242 +2920,73 @@ def saved_clip(text, units):
     return str(text) if len(raw) <= units * 2 else raw[:(units - 1) * 2].decode("utf-16-le", errors="ignore") + "…"
 
 
-async def _saved_notification_expire(uid, message_id, delay=SAVED_NOTIFICATION_TTL_SECONDS):
+async def delete_saved_notification_later(chat_id, message_id, delay=300):
+    await asyncio.sleep(delay)
     try:
-        await asyncio.sleep(delay)
-    except asyncio.CancelledError:
-        return
-
-    lock = SAVED_NOTIFICATION_LOCKS.setdefault(uid, asyncio.Lock())
-    async with lock:
-        state = SAVED_ACTIVE_NOTIFICATIONS.get(uid)
-        if not state or state.get("message_id") != message_id:
-            return
-
-        SAVED_ACTIVE_NOTIFICATIONS.pop(uid, None)
-        try:
-            await bot.delete_message(chat_id=uid, message_id=message_id)
-        except TelegramBadRequest:
-            pass
-        except Exception as e:
-            logging.debug(
-                "Archive notification auto-delete %s/%s: %s",
-                uid,
-                message_id,
-                type(e).__name__,
-            )
-
-
-def _saved_notification_peer_link(cid, name):
-    safe_name = html.escape(saved_clip(name or str(cid), 100))
-    try:
-        peer_id = int(cid)
-    except (TypeError, ValueError):
-        return safe_name
-    return f'<a href="tg://user?id={peer_id}">{safe_name}</a>'
-
-
-def _saved_notification_event_id(cid, event):
-    event_id = event.get("id") if isinstance(event, dict) else None
-    if event_id:
-        return str(event_id)
-    if not isinstance(event, dict):
-        return f"{cid}:invalid:{id(event)}"
-    return "|".join((
-        str(cid),
-        str(event.get("kind", "")),
-        str(event.get("mid", "")),
-        str(event.get("ts", "")),
-    ))
+        await bot.delete_message(chat_id=chat_id, message_id=message_id)
+    except TelegramBadRequest:
+        pass
+    except Exception as e:
+        logging.debug("Archive notification auto-delete %s/%s: %s", chat_id, message_id, type(e).__name__)
 
 
 def build_saved_notification_text(events):
-    """Собирает компактное HTML-уведомление, группируя события по личке."""
-    valid = []
-    for item in events:
-        if not isinstance(item, (tuple, list)) or len(item) != 3:
-            continue
-        cid, name, event = item
-        if isinstance(event, dict):
-            valid.append((cid, name, event))
-
+    valid = [(name, event) for name, event in events if isinstance(event, dict)]
     if not valid:
-        return "🔔 В сохранённых личках произошли изменения."
+        return "<b>🔔 Изменения в сохранённых личках</b>"
 
-    # Сохраняем порядок появления личек, но не повторяем имя для каждого события.
-    grouped = {}
-    order = []
-    for cid, name, event in valid:
-        key = int(cid) if isinstance(cid, int) or str(cid).lstrip("-").isdigit() else str(cid)
-        if key not in grouped:
-            grouped[key] = {"cid": cid, "name": name, "delete": [], "edit": []}
-            order.append(key)
-        kind = "edit" if event.get("kind") == "edit" else "delete"
-        grouped[key][kind].append(event)
+    def esc(value, units):
+        return html.escape(saved_clip(value, units), quote=False)
 
-    parts = []
-    shown_event_ids = set()
-    max_html_len = 3850
+    deletes = [(name, event) for name, event in valid if event.get("kind") != "edit"]
+    edits = [(name, event) for name, event in valid if event.get("kind") == "edit"]
 
-    def try_add(block, event_ids):
-        candidate = "\n\n".join(parts + [block])
-        if len(candidate) > max_html_len:
-            return False
-        parts.append(block)
-        shown_event_ids.update(event_ids)
-        return True
-
-    for key in order:
-        group = grouped[key]
-        peer = _saved_notification_peer_link(group["cid"], group["name"])
-
-        deletes = group["delete"]
-        if deletes:
-            heading = f"🗑 Лс с {peer} - Удалено входящих сообщений: {len(deletes)}"
-            lines = [heading]
-            ids = []
-            for event in deletes:
-                event_id = _saved_notification_event_id(group["cid"], event)
-                message_text = html.escape(saved_clip(event.get("before", ""), 720))
-                next_lines = lines + [f"«{message_text}»"]
-                candidate_block = "\n".join(next_lines)
-                candidate_full = "\n\n".join(parts + [candidate_block])
-                if len(candidate_full) > max_html_len:
-                    break
-                lines = next_lines
-                ids.append(event_id)
-            if len(lines) > 1:
-                try_add("\n".join(lines), ids)
-
-        edits = group["edit"]
-        if edits:
-            heading = f"✏️ Лс с {peer} - Отредактировано входящих сообщений: {len(edits)}"
-            lines = [heading]
-            ids = []
-            for event in edits:
-                event_id = _saved_notification_event_id(group["cid"], event)
-                before = html.escape(saved_clip(event.get("before", ""), 390))
-                after = html.escape(saved_clip(event.get("after", ""), 390))
-                event_lines = [f"Было: «{before}»", f"Стало: «{after}»"]
-                next_lines = lines + event_lines
-                candidate_block = "\n".join(next_lines)
-                candidate_full = "\n\n".join(parts + [candidate_block])
-                if len(candidate_full) > max_html_len:
-                    break
-                lines = next_lines
-                ids.append(event_id)
-            if len(lines) > 1:
-                try_add("\n".join(lines), ids)
-
-    hidden = sum(
-        1 for cid, _name, event in valid
-        if _saved_notification_event_id(cid, event) not in shown_event_ids
-    )
-    if hidden:
-        tail = f"…и ещё {hidden} событий. Все они сохранены в разделе «Лички»."
-        candidate = "\n\n".join(parts + [tail])
-        if len(candidate) <= 4050:
-            parts.append(tail)
-
-    return "\n\n".join(parts) or "🔔 В сохранённых личках произошли изменения."
-
-
-def _restart_saved_notification_expiry(uid, state):
-    old_task = state.get("expire_task")
-    if old_task and not old_task.done():
-        old_task.cancel()
-    state["expire_task"] = asyncio.create_task(
-        _saved_notification_expire(uid, state.get("message_id"), SAVED_NOTIFICATION_TTL_SECONDS)
-    )
-
-
-async def _upsert_saved_notification(uid, items):
-    """Добавляет события в одно активное уведомление пользователя и редактирует его."""
-    lock = SAVED_NOTIFICATION_LOCKS.setdefault(uid, asyncio.Lock())
-    async with lock:
-        current_day = saved_day(uid)
-        state = SAVED_ACTIVE_NOTIFICATIONS.get(uid)
-
-        # После смены дня старый пакет больше не смешиваем с новым.
-        if state and state.get("day") != current_day:
-            old_task = state.get("expire_task")
-            if old_task and not old_task.done():
-                old_task.cancel()
-            old_message_id = state.get("message_id")
-            SAVED_ACTIVE_NOTIFICATIONS.pop(uid, None)
-            if old_message_id:
-                try:
-                    await bot.delete_message(chat_id=uid, message_id=old_message_id)
-                except Exception:
-                    pass
-            state = None
-
-        if state is None:
-            state = {
-                "message_id": None,
-                "day": current_day,
-                "events": [],
-                "event_ids": set(),
-                "expire_task": None,
-            }
-            SAVED_ACTIVE_NOTIFICATIONS[uid] = state
-
-        for cid, name, event, day in items:
-            if day != current_day or not isinstance(event, dict):
-                continue
-            event_id = _saved_notification_event_id(cid, event)
-            if event_id in state["event_ids"]:
-                continue
-            state["event_ids"].add(event_id)
-            state["events"].append((cid, name, event))
-
-            # Активное уведомление тоже кольцевое. После 20 событий новое
-            # не перестаёт обновляться: самое старое событие исчезает из
-            # уведомления, а свежее гарантированно появляется.
-            while len(state["events"]) > SAVED_NOTIFICATION_EVENT_LIMIT:
-                old_cid, _old_name, old_event = state["events"].pop(0)
-                state["event_ids"].discard(_saved_notification_event_id(old_cid, old_event))
-
-        if not state["events"]:
-            return
-
-        markup = InlineKeyboardBuilder()
-        markup.button(text="Окей ✅", callback_data="saved_ok")
-        notification_text = build_saved_notification_text(state["events"])
-
-        message_id = state.get("message_id")
-        if message_id:
-            try:
-                await bot.edit_message_text(
-                    chat_id=uid,
-                    message_id=message_id,
-                    text=notification_text,
-                    reply_markup=markup.as_markup(),
-                    parse_mode="HTML",
-                )
-                _restart_saved_notification_expiry(uid, state)
-                return
-            except TelegramBadRequest as e:
-                error_text = str(e).lower()
-                if "message is not modified" in error_text:
-                    _restart_saved_notification_expiry(uid, state)
-                    return
-                if "message to edit not found" not in error_text and "message identifier is not specified" not in error_text:
-                    raise
-                # Сообщение удалили вручную или оно уже исчезло. Ни одно событие не теряем:
-                # ниже создадим новое уведомление с накопленным пакетом.
-                state["message_id"] = None
-            except Exception:
-                raise
-
-        notice = await bot.send_message(
-            uid,
-            notification_text,
-            reply_markup=markup.as_markup(),
-            parse_mode="HTML",
+    if len(valid) == 1:
+        name, event = valid[0]
+        peer = esc(name, 100)
+        if event.get("kind") == "edit":
+            return (
+                f"<b>✏️ В личке с {peer} отредактировано входящее сообщение</b>\n\n"
+                f"<i>Было:</i>\n«{esc(event.get('before', ''), 1700)}»\n\n"
+                f"<i>Стало:</i>\n«{esc(event.get('after', ''), 1700)}»"
+            )
+        return (
+            f"<b>🗑 В личке с {peer} удалено входящее сообщение</b>\n\n"
+            f"«{esc(event.get('before', ''), 3500)}»"
         )
-        state["message_id"] = notice.message_id
-        _restart_saved_notification_expiry(uid, state)
+
+    if deletes and not edits:
+        title = f"🗑 Удалено входящих сообщений: {len(deletes)}"
+    elif edits and not deletes:
+        title = f"✏️ Отредактировано входящих сообщений: {len(edits)}"
+    else:
+        title = f"🔔 Изменений в сохранённых личках: {len(valid)}"
+
+    parts = [f"<b>{title}</b>"]
+    shown = 0
+    for name, event in valid:
+        peer = esc(name, 80)
+        if event.get("kind") == "edit":
+            block = (
+                f"✏️ <b>{peer}</b>\n"
+                f"<i>Было:</i> «{esc(event.get('before', ''), 520)}»\n"
+                f"<i>Стало:</i> «{esc(event.get('after', ''), 520)}»"
+            )
+        else:
+            block = (
+                f"🗑 <b>{peer}</b>\n"
+                f"«{esc(event.get('before', ''), 760)}»"
+            )
+        candidate = "\n\n".join(parts + [block])
+        if len(candidate) > 3850:
+            break
+        parts.append(block)
+        shown += 1
+
+    hidden = len(valid) - shown
+    if hidden > 0:
+        parts.append(f"<i>…и ещё {hidden} событий. Все они сохранены в разделе «Лички».</i>")
+    return "\n\n".join(parts)
 
 
 async def saved_notification_loop():
@@ -3163,8 +2994,8 @@ async def saved_notification_loop():
         first = await SAVED_NOTIFICATIONS.get()
         batch = [first]
 
-        # Короткое окно сгребает массовые удаления/редактирования в один апдейт,
-        # а дальнейшие события всё равно попадут в то же активное уведомление.
+        # Массовые удаления Telegram часто приходят несколькими соседними update.
+        # Небольшое окно собирает их в один пакет вместо очереди отдельных уведомлений.
         deadline = time.monotonic() + 0.8
         while len(batch) < 80:
             remaining = deadline - time.monotonic()
@@ -3187,7 +3018,18 @@ async def saved_notification_loop():
             for uid, items in grouped.items():
                 while True:
                     try:
-                        await _upsert_saved_notification(uid, items)
+                        markup = InlineKeyboardBuilder()
+                        markup.button(text="Окей ✅", callback_data="saved_ok")
+                        notification_text = build_saved_notification_text(
+                            [(name, event) for _cid, name, event, _day in items]
+                        )
+                        notice = await bot.send_message(
+                            uid,
+                            notification_text,
+                            reply_markup=markup.as_markup(),
+                            parse_mode="HTML",
+                        )
+                        asyncio.create_task(delete_saved_notification_later(uid, notice.message_id, 300))
                         break
                     except TelegramRetryAfter as e:
                         await asyncio.sleep(e.retry_after + 1)
@@ -3263,19 +3105,21 @@ async def stop_saved_service():
 def saved_menu_content(uid):
     active = saved_enabled(uid)
     count = SAVED.unread_chat_count(uid)
-    text = ("🗂 Сохранение удалённых и отредактированных сообщений\n"
-            "Действует только в личных чатах 👤\n\n"
-            f"Статус: {'Включено 🟢' if active else 'Выключено 🔴'}\n\n"
-            "🕛 Архив очищается в 00:00 по часовому поясу аккаунта.\n"
-            "Учитываются только сообщения собеседников: хранятся последние 20 записей на личку, старые удаляются автоматически.")
+    text = (
+        "<b>🗂 Сохранённые сообщения</b>\n"
+        "<i>Удалённые и отредактированные сообщения из личных чатов 👤</i>\n\n"
+        f"<b>Статус:</b> {'🟢 Включено' if active else '🔴 Выключено'}\n\n"
+        "🕛 <i>Архив очищается в 00:00 по часовому поясу аккаунта.</i>\n"
+        "<i>На каждую личку хранится до 100 записей.</i>"
+    )
     if not active:
-        text += "\nПосле выключения сохранённые записи доступны до полуночи."
+        text += "\n<i>После выключения уже сохранённые записи доступны до полуночи.</i>"
     state = get_user_state(uid)
     if state.get("saved_history_loading"):
-        text += "\n⏳ Последние сообщения загружаются по очереди. Новые уже сохраняются."
+        text += "\n⏳ <i>Последние сообщения загружаются по очереди. Новые уже сохраняются.</i>"
     for error in (state.get("saved_history_error"), SAVED.errors.get(uid)):
         if error:
-            text += "\n⚠️ " + error
+            text += "\n⚠️ " + html.escape(str(error), quote=False)
     builder = InlineKeyboardBuilder()
     builder.button(text="Выключить 🔴" if active else "Включить 🟢", callback_data="saved_toggle")
     builder.button(text=(f"Лички ({count}) 🗣" if count else "Лички 🗣"), callback_data="saved_chats:0")
@@ -3366,11 +3210,15 @@ async def saved_refresh_visible(uid):
         markup = state.get("last_ui_reply_markup")
         callbacks = {b.callback_data for row in getattr(markup, "inline_keyboard", []) for b in row}
         if "saved_menu" in callbacks and "menu_online" in callbacks:
-            await edit_or_send(uid, state.get("last_ui_text") or "♨️ UserBot — управление аккаунтом:",
-                               reply_markup=show_main_menu_builder(uid).as_markup())
+            await edit_or_send(
+                uid,
+                state.get("last_ui_text") or "<b>♨️ UserBot</b>\n<i>Управление аккаунтом</i>",
+                reply_markup=show_main_menu_builder(uid).as_markup(),
+                parse_mode=state.get("last_ui_parse_mode") or "HTML",
+            )
         elif "saved_toggle" in callbacks:
             text, keyboard = saved_menu_content(uid)
-            await edit_or_send(uid, text, reply_markup=keyboard)
+            await edit_or_send(uid, text, reply_markup=keyboard, parse_mode="HTML")
         elif any(c and c.startswith("saved_back:") for c in callbacks):
 
             if not state.get("saved_view"):
@@ -3382,28 +3230,11 @@ async def saved_refresh_visible(uid):
 
 @dp.callback_query(F.data == "saved_ok")
 async def saved_ok(callback: types.CallbackQuery):
-    uid = callback.from_user.id
-    message_id = callback.message.message_id if callback.message else None
-    lock = SAVED_NOTIFICATION_LOCKS.setdefault(uid, asyncio.Lock())
-
-    async with lock:
-        state = SAVED_ACTIVE_NOTIFICATIONS.get(uid)
-        # Сбрасываем накопленный пакет только если нажата кнопка именно
-        # у текущего активного уведомления. Старое сообщение не может стереть новый пакет.
-        if state and state.get("message_id") == message_id:
-            expire_task = state.get("expire_task")
-            if expire_task and not expire_task.done():
-                expire_task.cancel()
-            SAVED_ACTIVE_NOTIFICATIONS.pop(uid, None)
-
-        if callback.message and callback.message.chat.id == uid:
-            try:
-                await callback.message.delete()
-            except TelegramBadRequest:
-                pass
-            except Exception as e:
-                logging.debug("Archive notification delete on OK %s: %s", uid, type(e).__name__)
-
+    if callback.message and callback.message.chat.id == callback.from_user.id:
+        try:
+            await callback.message.delete()
+        except TelegramBadRequest:
+            pass
     await callback.answer()
 
 
@@ -3413,7 +3244,7 @@ async def saved_menu(callback: types.CallbackQuery):
     uid = callback.from_user.id
     await SAVED.ensure_user(uid)
     text, keyboard = saved_menu_content(uid)
-    await edit_or_send(uid, text, reply_markup=keyboard)
+    await edit_or_send(uid, text, reply_markup=keyboard, parse_mode="HTML")
 
 
 @dp.callback_query(F.data == "saved_toggle")
@@ -3553,7 +3384,13 @@ async def menu_autoresponder(callback: types.CallbackQuery):
     status_str = get_text(user_id, "status_on") if is_active else get_text(user_id, "status_off")
     greeting = cfg.get("autoresponder_greeting", get_text(user_id, "msg_autoresp_default"))
 
-    text = get_text(user_id, "msg_autoresp_text", greeting, status_str)
+    text = (
+        "<b>🤖 Автоответчик</b>\n"
+        "<i>Отвечает только новым собеседникам 👤</i>\n\n"
+        f"<b>Статус:</b> {html.escape(status_str, quote=False)}\n\n"
+        "<b>Текст приветствия:</b>\n"
+        f"💬 «{html.escape(greeting, quote=False)}»"
+    )
 
     builder = InlineKeyboardBuilder()
     btn_toggle_text = get_text(user_id, "btn_turn_off") if is_active else get_text(user_id, "btn_turn_on")
@@ -3562,7 +3399,7 @@ async def menu_autoresponder(callback: types.CallbackQuery):
     builder.button(text=get_text(user_id, "btn_back_menu"), callback_data="main_menu")
     builder.adjust(1)
 
-    await edit_or_send(user_id, text, reply_markup=builder.as_markup(), parse_mode="Markdown")
+    await edit_or_send(user_id, text, reply_markup=builder.as_markup(), parse_mode="HTML")
     try: await callback.answer()
     except Exception: pass
 
@@ -3640,7 +3477,13 @@ async def menu_timenick(callback: types.CallbackQuery, sync_base=True):
     profile_preview = get_current_styled_profile_preview(base_first, base_last, offset, include_time=True, style=cfg.get("time_style", 1))
     sign_str = f"+{offset}" if offset >= 0 else str(offset)
 
-    text = get_text(user_id, "msg_timenick_text", status_str, profile_preview, sign_str)
+    text = (
+        "<b>⏰ Время в профиле</b>\n"
+        "<i>Автоматически добавляет текущее время в имя профиля.</i>\n\n"
+        f"<b>Статус:</b> {html.escape(status_str, quote=False)}\n"
+        f"<b>Предпросмотр:</b>\n{html.escape(profile_preview, quote=False)}\n"
+        f"<b>Часовой пояс:</b> UTC{html.escape(sign_str, quote=False)}"
+    )
 
     builder = InlineKeyboardBuilder()
     btn_toggle_text = get_text(user_id, "btn_turn_off") if is_active else get_text(user_id, "btn_turn_on")
@@ -3650,7 +3493,7 @@ async def menu_timenick(callback: types.CallbackQuery, sync_base=True):
     builder.button(text=get_text(user_id, "btn_back_menu"), callback_data="main_menu")
     builder.adjust(1)
 
-    await edit_or_send(user_id, text, reply_markup=builder.as_markup())
+    await edit_or_send(user_id, text, reply_markup=builder.as_markup(), parse_mode="HTML")
     try: await callback.answer()
     except Exception: pass
 
@@ -3690,8 +3533,12 @@ async def time_styles(callback: types.CallbackQuery):
             return
     cfg = MEMORY_DB["config"].get(str(uid), {})
     now = get_world_utc_datetime() + datetime.timedelta(hours=int(cfg.get("timezone_offset", 5)))
-    await edit_or_send(uid, "Выберите стиль:",
-                       reply_markup=build_time_styles_markup(now.strftime("%H:%M"), page))
+    await edit_or_send(
+        uid,
+        "<b>🎨 Стили времени</b>\n<i>Выберите оформление часов:</i>",
+        reply_markup=build_time_styles_markup(now.strftime("%H:%M"), page),
+        parse_mode="HTML",
+    )
     await callback.answer()
 
 
@@ -3766,7 +3613,12 @@ async def tz_select(callback: types.CallbackQuery):
     builder.button(text=get_text(user_id, "btn_back"), callback_data="menu_timenick")
     builder.adjust(2)
 
-    await edit_or_send(user_id, get_text(user_id, "msg_tz_select"), reply_markup=builder.as_markup())
+    await edit_or_send(
+        user_id,
+        "<b>🌐 Часовой пояс</b>\n<i>Выберите свой часовой пояс:</i>",
+        reply_markup=builder.as_markup(),
+        parse_mode="HTML",
+    )
     try: await callback.answer()
     except Exception: pass
 
@@ -3857,14 +3709,20 @@ async def refresh_server_stats_cache(force=False):
 def _build_server_stats_text(cache):
     now = datetime.datetime.now(datetime.timezone.utc)
     reset = _next_render_reset_utc(now)
-    lines = ["Статистика сервера:", "", "🟣 Render",
-             f"Сброс лимита: {reset.strftime('%d.%m.%Y %H:%M UTC')}",
-             f"До сброса: {format_remaining_time((reset - now).total_seconds())}",
-             f"Аптайм процесса: {format_remaining_time(time.monotonic() - PROCESS_STARTED_AT)}",
-             "", "🟢 Supabase"]
     size = cache.get("supabase_db_mb")
-    lines.append(f"База: {size:.1f} / {SUPABASE_DB_LIMIT_MB:g} MB" if size is not None else "База: данные недоступны")
-    return "\n".join(lines)
+    db_line = (
+        f"<b>База:</b> {size:.1f} / {SUPABASE_DB_LIMIT_MB:g} MB"
+        if size is not None else "<b>База:</b> данные недоступны"
+    )
+    return (
+        "<b>🖥 Статистика сервера</b>\n\n"
+        "<b>🟣 Render</b>\n"
+        f"<b>Сброс лимита:</b> {reset.strftime('%d.%m.%Y %H:%M UTC')}\n"
+        f"<b>До сброса:</b> {format_remaining_time((reset - now).total_seconds())}\n"
+        f"<b>Аптайм процесса:</b> {format_remaining_time(time.monotonic() - PROCESS_STARTED_AT)}\n\n"
+        "<b>🟢 Supabase</b>\n"
+        + db_line
+    )
 
 
 def build_admin_stats_markup():
@@ -3881,7 +3739,8 @@ async def _admin_server_stats_loop(user_id):
             return
         try:
             await bot.edit_message_text(chat_id=user_id, message_id=data["msg_id"],
-                text=_build_server_stats_text(SERVER_STATS_CACHE), reply_markup=build_admin_stats_markup())
+                text=_build_server_stats_text(SERVER_STATS_CACHE), reply_markup=build_admin_stats_markup(),
+                parse_mode="HTML")
         except TelegramRetryAfter as e:
             await asyncio.sleep(e.retry_after + 1)
         except TelegramBadRequest as e:
@@ -3912,38 +3771,50 @@ async def render_userbot_preview(callback):
     get_user_state(uid)['state'] = 'PREVIEW'
     builder = InlineKeyboardBuilder()
     if action in ('userbot_preview', 'main_menu'):
-        text = '♨️UserBot — управление аккаунтом:'
+        text = '<b>♨️ UserBot</b>\n<i>Управление аккаунтом</i>'
         builder = show_main_menu_builder(uid)
     elif action == 'saved_menu':
-        text = ('🗂 Сохранение удалённых и отредактированных сообщений\n'
-                'Действует только в личных чатах 👤\n\nСтатус: Выключено 🔴')
+        text = ('<b>🗂 Сохранённые сообщения</b>\n'
+                '<i>Удалённые и отредактированные сообщения из личных чатов 👤</i>\n\n'
+                '<b>Статус:</b> 🔴 Выключено')
         builder.button(text='Включить 🟢', callback_data='saved_toggle')
         builder.button(text='Лички 🗣', callback_data='saved_chats:0')
         builder.button(text='Назад ⬅️', callback_data='main_menu')
         builder.adjust(1)
     elif action.startswith(('saved_chats:', 'saved_chat:', 'saved_page:', 'saved_back:', 'saved_full:')):
-        text = 'Лички 🗣\n\nСохранённых сообщений пока нет ✨'
+        text = '<b>🗣 Лички</b>\n\n<i>Сохранённых сообщений пока нет ✨</i>'
         builder.button(text='Назад ⬅️', callback_data='saved_menu')
     elif action in ('menu_online', 'menu_auto_read'):
         online = action == 'menu_online'
-        text = ('Вечный онлайн 📊' if online else 'Автопрочтение 👀') + '\n\nСтатус: Выключено 🔴'
+        text = (
+            '<b>📊 Вечный онлайн</b>' if online else '<b>👀 Автопрочтение</b>'
+        ) + '\n\n<b>Статус:</b> 🔴 Выключено'
         builder.button(text='Включить 🟢', callback_data='toggle_247' if online else 'toggle_auto_read')
         builder.button(text='Назад ⬅️', callback_data='main_menu')
         builder.adjust(1)
     elif action == 'menu_autoresponder':
-        text = get_text(uid, 'msg_autoresp_text', get_text(uid, 'msg_autoresp_default'), 'Выключен 🔴')
+        preview_greeting = html.escape(get_text(uid, 'msg_autoresp_default'), quote=False)
+        text = (
+            '<b>🤖 Автоответчик</b>\n'
+            '<i>Отвечает только новым собеседникам 👤</i>\n\n'
+            '<b>Статус:</b> 🔴 Выключен\n\n'
+            '<b>Текст приветствия:</b>\n'
+            f'💬 «{preview_greeting}»'
+        )
         builder.button(text='Включить 🟢', callback_data='toggle_autoresponder')
         builder.button(text='Изменить текст ✏️', callback_data='autoresp_setup')
         builder.button(text='Назад ⬅️', callback_data='main_menu')
         builder.adjust(1)
     elif action == 'menu_timenick':
-        text = 'Время в профиле ⏰\n\nСтатус: Выключено 🔴\nЧасовой пояс: UTC+5'
+        text = ('<b>⏰ Время в профиле</b>\n'
+                '<i>Автоматически добавляет текущее время в имя профиля.</i>\n\n'
+                '<b>Статус:</b> 🔴 Выключено\n<b>Часовой пояс:</b> UTC+5')
         for label, cb in [('Включить 🟢', 'toggle_timenick'), ('Выбрать часовой пояс 🌐', 'tz_select'),
                           ('Стили 🎨', 'time_styles'), ('Назад ⬅️', 'main_menu')]:
             builder.button(text=label, callback_data=cb)
         builder.adjust(1)
     elif action == 'tz_select':
-        text = 'Выберите часовой пояс 🌐'
+        text = '<b>🌐 Часовой пояс</b>\n<i>Выберите свой часовой пояс:</i>'
         for offset, name in TIMEZONE_NAMES.items():
             builder.button(text=name, callback_data=f'set_tz_{offset}')
         builder.adjust(2)
@@ -3953,15 +3824,15 @@ async def render_userbot_preview(callback):
             page = int(action.rsplit('_', 1)[-1]) if action.startswith('time_styles_page_') else 0
         except ValueError:
             page = 0
-        text = 'Стили времени 🎨'
+        text = '<b>🎨 Стили времени</b>\n<i>Выберите оформление часов:</i>'
         clock = (get_world_utc_datetime() + datetime.timedelta(hours=5)).strftime('%H:%M')
-        await edit_or_send(uid, text, reply_markup=build_time_styles_markup(clock, page))
+        await edit_or_send(uid, text, reply_markup=build_time_styles_markup(clock, page), parse_mode="HTML")
         await callback.answer()
         return
     else:
         await preview_registration(callback)
         return
-    await edit_or_send(uid, text, reply_markup=builder.as_markup())
+    await edit_or_send(uid, text, reply_markup=builder.as_markup(), parse_mode="HTML")
     await callback.answer()
 
 
