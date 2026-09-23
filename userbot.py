@@ -2260,6 +2260,9 @@ SAVED_REMOTE_LIMIT = 24 * 1024 * 1024
 SAVED_HISTORY_LOCK = asyncio.Lock()
 SAVED_TASKS = []
 SAVED_NOTIFICATIONS = asyncio.Queue(maxsize=256)
+SAVED_NOTIFICATION_TTL_SECONDS = 60.0
+SAVED_NOTIFICATION_ACTIVE = {}
+SAVED_NOTIFICATION_LOCKS = {}
 
 
 def saved_day(uid):
@@ -2920,15 +2923,87 @@ def saved_clip(text, units):
     return str(text) if len(raw) <= units * 2 else raw[:(units - 1) * 2].decode("utf-16-le", errors="ignore") + "…"
 
 
-async def delete_saved_notification_later(chat_id, message_id, delay=300):
-    await asyncio.sleep(delay)
+async def _delete_saved_notification_message(chat_id, message_id):
     try:
         await bot.delete_message(chat_id=chat_id, message_id=message_id)
     except TelegramBadRequest:
         pass
     except Exception as e:
-        logging.debug("Archive notification auto-delete %s/%s: %s", chat_id, message_id, type(e).__name__)
+        logging.debug("Archive notification delete %s/%s: %s", chat_id, message_id, type(e).__name__)
 
+
+def _saved_notification_lock(uid):
+    return SAVED_NOTIFICATION_LOCKS.setdefault(uid, asyncio.Lock())
+
+
+async def saved_notification_expiry_loop(uid, message_id, token):
+    """
+    Keep one aggregate Telegram notification alive while at least one event is fresh.
+
+    Every saved-message event has its own 60-second lifetime. When an individual
+    event expires, only that event disappears from the aggregate notification.
+    The Telegram message itself is deleted only after the last event expires.
+    """
+    try:
+        while True:
+            lock = _saved_notification_lock(uid)
+            sleep_for = SAVED_NOTIFICATION_TTL_SECONDS
+
+            async with lock:
+                state = SAVED_NOTIFICATION_ACTIVE.get(uid)
+                if not state:
+                    return
+                if state.get("message_id") != message_id or state.get("token") != token:
+                    return
+
+                now = time.monotonic()
+                old_events = list(state.get("events", []))
+                active_events = [
+                    item for item in old_events
+                    if len(item) >= 3 and float(item[2]) > now
+                ]
+
+                if not active_events:
+                    SAVED_NOTIFICATION_ACTIVE.pop(uid, None)
+                    await _delete_saved_notification_message(uid, message_id)
+                    return
+
+                if len(active_events) != len(old_events):
+                    state["events"] = active_events
+                    markup = InlineKeyboardBuilder()
+                    markup.button(text="Окей ✅", callback_data="saved_ok")
+                    notification_text = build_saved_notification_text(
+                        [(name, event) for name, event, _expires_at in active_events]
+                    )
+                    try:
+                        await bot.edit_message_text(
+                            chat_id=uid,
+                            message_id=message_id,
+                            text=notification_text,
+                            reply_markup=markup.as_markup(),
+                            parse_mode="HTML",
+                        )
+                    except TelegramBadRequest as e:
+                        error_text = str(e).lower()
+                        if "message is not modified" not in error_text:
+                            SAVED_NOTIFICATION_ACTIVE.pop(uid, None)
+                            return
+                    except Exception as e:
+                        logging.debug(
+                            "Archive notification expiry refresh %s/%s: %s",
+                            uid,
+                            message_id,
+                            type(e).__name__,
+                        )
+                        SAVED_NOTIFICATION_ACTIVE.pop(uid, None)
+                        return
+
+                next_expires_at = min(float(item[2]) for item in active_events)
+                sleep_for = max(0.01, next_expires_at - time.monotonic())
+
+            await asyncio.sleep(sleep_for)
+    except asyncio.CancelledError:
+        return
 
 def build_saved_notification_text(events):
     valid = [(name, event) for name, event in events if isinstance(event, dict)]
@@ -2989,13 +3064,94 @@ def build_saved_notification_text(events):
     return "\n\n".join(parts)
 
 
+async def _replace_saved_notification(uid, new_events):
+    """
+    Keep one rolling notification per user while every event keeps its own TTL.
+
+    A newly arrived event causes the old aggregate Telegram message to be removed
+    and a fresh one to be sent at the bottom of the chat with all still-active
+    events plus the new ones. Existing events DO NOT get another 60 seconds.
+    Expired items are removed individually by saved_notification_expiry_loop().
+    """
+    lock = _saved_notification_lock(uid)
+    async with lock:
+        now = time.monotonic()
+        state = SAVED_NOTIFICATION_ACTIVE.get(uid)
+
+        active_existing = []
+        if state:
+            for item in state.get("events", []):
+                if len(item) >= 3 and float(item[2]) > now:
+                    active_existing.append(item)
+
+        timed_new_events = [
+            (name, event, now + SAVED_NOTIFICATION_TTL_SECONDS)
+            for name, event in new_events
+            if isinstance(event, dict)
+        ]
+        combined = active_existing + timed_new_events
+
+        # Keep RAM bounded. This only affects the temporary notification view;
+        # the permanent saved-message archive still keeps its own full limits.
+        if len(combined) > 256:
+            combined = combined[-256:]
+
+        if state:
+            old_task = state.get("expiry_task")
+            if old_task and not old_task.done():
+                old_task.cancel()
+            old_message_id = state.get("message_id")
+            if old_message_id:
+                await _delete_saved_notification_message(uid, old_message_id)
+            SAVED_NOTIFICATION_ACTIVE.pop(uid, None)
+
+        if not combined:
+            return
+
+        markup = InlineKeyboardBuilder()
+        markup.button(text="Окей ✅", callback_data="saved_ok")
+        notification_text = build_saved_notification_text(
+            [(name, event) for name, event, _expires_at in combined]
+        )
+
+        while True:
+            try:
+                notice = await bot.send_message(
+                    uid,
+                    notification_text,
+                    reply_markup=markup.as_markup(),
+                    parse_mode="HTML",
+                )
+                break
+            except TelegramRetryAfter as e:
+                await asyncio.sleep(e.retry_after + 1)
+            except Exception as e:
+                SAVED_NOTIFICATION_ACTIVE.pop(uid, None)
+                SAVED.errors[uid] = "Уведомление не доставлено. Событие доступно в разделе «Лички»."
+                logging.warning("Archive notification %s: %s", uid, type(e).__name__)
+                return
+
+        token = uuid.uuid4().hex
+        state = {
+            "message_id": notice.message_id,
+            "token": token,
+            "events": combined,
+            "expiry_task": None,
+        }
+        SAVED_NOTIFICATION_ACTIVE[uid] = state
+        state["expiry_task"] = asyncio.create_task(
+            saved_notification_expiry_loop(uid, notice.message_id, token)
+        )
+
+
 async def saved_notification_loop():
     while True:
         first = await SAVED_NOTIFICATIONS.get()
         batch = [first]
 
         # Массовые удаления Telegram часто приходят несколькими соседними update.
-        # Небольшое окно собирает их в один пакет вместо очереди отдельных уведомлений.
+        # Небольшое окно собирает их сразу. Затем события показываются в одном
+        # уведомлении, но у каждого события остаётся собственный TTL 60 секунд.
         deadline = time.monotonic() + 0.8
         while len(batch) < 80:
             remaining = deadline - time.monotonic()
@@ -3016,27 +3172,10 @@ async def saved_notification_loop():
 
         try:
             for uid, items in grouped.items():
-                while True:
-                    try:
-                        markup = InlineKeyboardBuilder()
-                        markup.button(text="Окей ✅", callback_data="saved_ok")
-                        notification_text = build_saved_notification_text(
-                            [(name, event) for _cid, name, event, _day in items]
-                        )
-                        notice = await bot.send_message(
-                            uid,
-                            notification_text,
-                            reply_markup=markup.as_markup(),
-                            parse_mode="HTML",
-                        )
-                        asyncio.create_task(delete_saved_notification_later(uid, notice.message_id, 300))
-                        break
-                    except TelegramRetryAfter as e:
-                        await asyncio.sleep(e.retry_after + 1)
-                    except Exception as e:
-                        SAVED.errors[uid] = "Уведомление не доставлено. Событие доступно в разделе «Лички»."
-                        logging.warning("Archive notification %s: %s", uid, type(e).__name__)
-                        break
+                await _replace_saved_notification(
+                    uid,
+                    [(name, event) for _cid, name, event, _day in items],
+                )
                 await asyncio.sleep(1.1)
         finally:
             for _ in batch:
@@ -3094,6 +3233,18 @@ async def stop_saved_service():
         task.cancel()
     await asyncio.gather(*SAVED_TASKS, return_exceptions=True)
     SAVED_TASKS.clear()
+
+    notification_tasks = []
+    for state in list(SAVED_NOTIFICATION_ACTIVE.values()):
+        task = state.get("expiry_task")
+        if task and not task.done():
+            task.cancel()
+            notification_tasks.append(task)
+    if notification_tasks:
+        await asyncio.gather(*notification_tasks, return_exceptions=True)
+    SAVED_NOTIFICATION_ACTIVE.clear()
+    SAVED_NOTIFICATION_LOCKS.clear()
+
     for uid in list(SAVED.ready):
         try:
             await SAVED.flush(uid)
@@ -3230,11 +3381,24 @@ async def saved_refresh_visible(uid):
 
 @dp.callback_query(F.data == "saved_ok")
 async def saved_ok(callback: types.CallbackQuery):
-    if callback.message and callback.message.chat.id == callback.from_user.id:
-        try:
-            await callback.message.delete()
-        except TelegramBadRequest:
-            pass
+    uid = callback.from_user.id
+    message_id = callback.message.message_id if callback.message else None
+
+    lock = _saved_notification_lock(uid)
+    async with lock:
+        state = SAVED_NOTIFICATION_ACTIVE.get(uid)
+        if state and (message_id is None or state.get("message_id") == message_id):
+            task = state.get("expiry_task")
+            if task and not task.done():
+                task.cancel()
+            SAVED_NOTIFICATION_ACTIVE.pop(uid, None)
+
+        if callback.message and callback.message.chat.id == uid:
+            try:
+                await callback.message.delete()
+            except TelegramBadRequest:
+                pass
+
     await callback.answer()
 
 
