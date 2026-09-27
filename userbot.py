@@ -271,7 +271,7 @@ TEXTS = {
     "msg_check_pwd": "⏳ Проверка 2FA...\n⏱ Осталось: {0} сек.",
     "msg_pwd_wrong": "❌ Неверный пароль!\nВведите заново:",
     "msg_pwd_ok": "Пароль принят!\nЮзербот успешно запущен.",
-    "msg_timenick_text": "Вывод текущего времени в имя профиля.\n\nТекущий статус: {0}\nПредпросмотр: {1}\nСмещение часового пояса: UTC{2}",
+    "msg_timenick_text": "Вывод текущего времени в имя профиля.\n\nТекущий статус: {0}\nТекущий вид: {1}\nСмещение часового пояса: UTC{2}",
     "msg_tz_select": "Выберите ваш часовой пояс🌐",
     "msg_tz_saved": "Часовой пояс изменен на UTC{0}!",
     "msg_autoresp_text": "🤖 **Автоответчик**\n\nСтатус: {1}\nОтветы: только новым собеседникам 👤\n\nТекст приветствия:\n💬 \"{0}\"",
@@ -367,8 +367,49 @@ def _time_style_suffix_match(value, style_index):
     return text[:match.start()].rstrip(), True
 
 
-def strip_profile_time_suffix(value, preferred_style=None):
+def _generic_profile_time_suffix_match(value):
+    """Fallback for old/deprecated Qwitty decorations around a valid HH:MM suffix."""
+    text = (value or "").rstrip()
+    if not text:
+        return text, False
 
+    digit_map = {}
+    decoration_chars = {" ", "\t", "ミ", "彡"}
+    colon_chars = set()
+    for digits, left, right, colon in TIME_STYLES:
+        for pos, char in enumerate(digits):
+            digit_map[char] = str(pos)
+        decoration_chars.update(left)
+        decoration_chars.update(right)
+        colon_chars.add(colon)
+
+    digit_class = re.escape("".join(digit_map.keys()))
+    colon_class = re.escape("".join(colon_chars))
+    decoration_class = re.escape("".join(decoration_chars))
+    pattern = re.compile(
+        rf"[{decoration_class}]*"
+        rf"([{digit_class}]{{2}})"
+        rf"([{colon_class}])"
+        rf"([{digit_class}]{{2}})"
+        rf"[{decoration_class}]*$"
+    )
+    match = pattern.search(text)
+    if not match:
+        return text, False
+
+    try:
+        hour = int("".join(digit_map[ch] for ch in match.group(1)))
+        minute = int("".join(digit_map[ch] for ch in match.group(3)))
+    except (KeyError, ValueError):
+        return text, False
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        return text, False
+
+    return text[:match.start()].rstrip(), True
+
+
+def strip_profile_time_suffix(value, preferred_style=None):
+    """Remove every trailing Qwitty time marker, including leftovers from old styles."""
     order = []
     try:
         preferred = int(preferred_style)
@@ -378,11 +419,28 @@ def strip_profile_time_suffix(value, preferred_style=None):
         pass
     order.extend(index for index in range(len(TIME_STYLES)) if index not in order)
 
-    for index in order:
-        base, matched = _time_style_suffix_match(value, index)
-        if matched:
-            return base, True
-    return (value or "").rstrip(), False
+    text = (value or "").rstrip()
+    removed_any = False
+    # A duplicated suffix can contain several different styles in a row.
+    # Strip from the end until only the real nickname remains.
+    for _ in range(12):
+        matched_this_round = False
+        for index in order:
+            base, matched = _time_style_suffix_match(text, index)
+            if matched:
+                text = base.rstrip()
+                removed_any = True
+                matched_this_round = True
+                break
+        if not matched_this_round:
+            base, matched = _generic_profile_time_suffix_match(text)
+            if matched:
+                text = base.rstrip()
+                removed_any = True
+                matched_this_round = True
+        if not matched_this_round:
+            break
+    return text, removed_any
 
 
 def format_profile_time(raw_time, style=1):
@@ -754,32 +812,16 @@ async def sync_profile_base_from_telegram(user_id: int, cfg=None, me=None, persi
 
     if cfg.get("time_nick_active", False):
         preferred_style = cfg.get("time_style", 1)
-        stored_first = ((cfg.get("profile_base_first_name") or "User").strip() or "User")[:64]
-        stored_last = (cfg.get("profile_base_last_name") or "").strip()[:64]
 
-
-        if (current_first, current_last) != (stored_first, stored_last):
-            last_profile_key = data.get("last_profile_key")
-            if last_profile_key and len(last_profile_key) == 2:
-
-
-                if current_last == last_profile_key[1]:
-                    clean_last, last_had_time = strip_profile_time_suffix(current_last, preferred_style)
-                    if last_had_time:
-                        base_last = clean_last
-                if current_first == last_profile_key[0]:
-                    clean_first, first_had_time = strip_profile_time_suffix(current_first, preferred_style)
-                    if first_had_time:
-                        base_first = clean_first or "User"
-            else:
-
-
-                clean_last, last_had_time = strip_profile_time_suffix(current_last, preferred_style)
-                clean_first, first_had_time = strip_profile_time_suffix(current_first, preferred_style)
-                if last_had_time:
-                    base_last = clean_last
-                elif first_had_time:
-                    base_first = clean_first or "User"
+        # Telegram is the source of truth for the real nickname. While the feature
+        # is active, remove every Qwitty time suffix from BOTH name fields first.
+        # This also heals old broken values such as:
+        #   Archi ミ 17∶21 彡 １７：２１
+        # without touching the actual nickname before those suffixes.
+        clean_first, _ = strip_profile_time_suffix(current_first, preferred_style)
+        clean_last, _ = strip_profile_time_suffix(current_last, preferred_style)
+        base_first = clean_first or "User"
+        base_last = clean_last
 
     base_first = (base_first.strip() or "User")[:64]
     base_last = base_last.strip()[:64]
@@ -1004,17 +1046,42 @@ class IncomingUserMessageCleanupMiddleware(BaseMiddleware):
 dp.callback_query.middleware(RestartMiddleware())
 dp.message.middleware(IncomingUserMessageCleanupMiddleware())
 
-def start_ui_refresh_task(user_id):
+TIMENICK_UI_REFRESH_LOCK = asyncio.Lock()
+TIMENICK_UI_REFRESH_GAP_SECONDS = 1.0
+TIMENICK_UI_LAST_REFRESH_MONOTONIC = 0.0
 
-    task = get_user_state(user_id).get("ui_refresh_task")
+
+def _timenick_screen_is_open(user_id):
+    data = get_user_state(user_id)
+    text = str(data.get("last_ui_text") or "")
+    return (
+        not is_preview(user_id)
+        and bool(data.get("msg_id"))
+        and "<b>⏰ Время в профиле</b>" in text
+    )
+
+
+def start_ui_refresh_task(user_id):
+    data = get_user_state(user_id)
+    task = data.get("ui_refresh_task")
+
+    if not _timenick_screen_is_open(user_id):
+        if task and not task.done() and task is not asyncio.current_task():
+            task.cancel()
+        if task is not asyncio.current_task():
+            data["ui_refresh_task"] = None
+        return
+
     if task and not task.done():
-        task.cancel()
+        return
+
+    data["ui_refresh_task"] = asyncio.create_task(timenick_ui_refresh_loop(user_id))
 
 
 async def edit_or_send(user_id, text, reply_markup=None, parse_mode=None):
     data = get_user_state(user_id)
 
-    if is_preview(user_id) and data.get('state') not in ('ROOT', 'USERBOT_ENTRY', 'ADMIN', 'ADMIN_STATS'):
+    if data.get('state') == 'PREVIEW':
         text = '#Предпросмотр\n\n' + text.removeprefix('#Предпросмотр\n\n')
 
     # Plain screens are escaped first and then decorated with safe HTML.
@@ -1472,7 +1539,7 @@ async def _drop_invalid_session(uid, reason):
                 'saved_history_done', 'temp_greeting', 'last_profile_key', 'session_invalid',
                 'session_backup_attempted', 'session_retry_at'):
         data.pop(key, None)
-    data.update(client=None, state='PREVIEW', time_nick_active=False, autoresponder_active=False)
+    data.update(client=None, state='SESSION_MISSING', time_nick_active=False, autoresponder_active=False)
     data['session_error'] = reason
     MEMORY_DB['logs'][str(uid)] = []
     queue_db_save('logs', str(uid), [])
@@ -3600,7 +3667,7 @@ async def process_autoresp_text(message: types.Message):
     user_id = message.from_user.id
     data = get_user_state(user_id)
     if is_preview(user_id):
-        data['state'] = 'PREVIEW'
+        data['state'] = 'SESSION_MISSING'
         await edit_or_send(user_id, 'Сначала подключите аккаунт 👤', reply_markup=get_missing_session_markup(user_id))
         return
     new_text = message.text.strip() if message.text else ""
@@ -3617,6 +3684,78 @@ async def process_autoresp_text(message: types.Message):
     builder.button(text=get_text(user_id, "btn_back"), callback_data="menu_autoresponder")
     await edit_or_send(user_id, get_text(user_id, "msg_autoresp_saved"), reply_markup=builder.as_markup())
 
+def build_timenick_screen(user_id, cfg):
+    is_active = cfg.get("time_nick_active", False)
+    status_str = get_text(user_id, "status_on") if is_active else get_text(user_id, "status_off")
+    offset = int(cfg.get("timezone_offset", 5))
+    base_first = cfg.get("profile_base_first_name", "User")
+    base_last = cfg.get("profile_base_last_name", "")
+
+    current_view = get_current_styled_profile_preview(
+        base_first, base_last, offset, include_time=True, style=cfg.get("time_style", 1)
+    )
+    sign_str = f"+{offset}" if offset >= 0 else str(offset)
+
+    text = (
+        "<b>⏰ Время в профиле</b>\n"
+        "<i>Автоматически добавляет текущее время в имя профиля.</i>\n\n"
+        f"<b>Статус:</b> {html.escape(status_str, quote=False)}\n"
+        f"<b>Текущий вид:</b>\n{html.escape(current_view, quote=False)}\n"
+        f"<b>Часовой пояс:</b> UTC{html.escape(sign_str, quote=False)}"
+    )
+
+    builder = InlineKeyboardBuilder()
+    btn_toggle_text = get_text(user_id, "btn_turn_off") if is_active else get_text(user_id, "btn_turn_on")
+    builder.button(text=btn_toggle_text, callback_data="toggle_timenick")
+    builder.button(text=get_text(user_id, "btn_tz_select"), callback_data="tz_select")
+    builder.button(text="Стили 🎨", callback_data="time_styles")
+    builder.button(text=get_text(user_id, "btn_back_menu"), callback_data="main_menu")
+    builder.adjust(1)
+    return text, builder.as_markup()
+
+
+async def queued_timenick_ui_refresh(user_id):
+    global TIMENICK_UI_LAST_REFRESH_MONOTONIC
+
+    async with TIMENICK_UI_REFRESH_LOCK:
+        if not _timenick_screen_is_open(user_id):
+            return
+
+        wait_for = (
+            TIMENICK_UI_LAST_REFRESH_MONOTONIC
+            + TIMENICK_UI_REFRESH_GAP_SECONDS
+            - time.monotonic()
+        )
+        if wait_for > 0:
+            await asyncio.sleep(wait_for)
+
+        if not _timenick_screen_is_open(user_id):
+            return
+
+
+        cfg = cached_config(str(user_id))
+        text, markup = build_timenick_screen(user_id, cfg)
+        await edit_or_send(user_id, text, reply_markup=markup, parse_mode="HTML")
+        TIMENICK_UI_LAST_REFRESH_MONOTONIC = time.monotonic()
+
+
+async def timenick_ui_refresh_loop(user_id):
+    data = get_user_state(user_id)
+    try:
+        while _timenick_screen_is_open(user_id):
+            await sleep_until_next_world_minute()
+            if not _timenick_screen_is_open(user_id):
+                break
+            await queued_timenick_ui_refresh(user_id)
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        logging.warning("Обновление экрана времени %s: %s", user_id, type(e).__name__)
+    finally:
+        if data.get("ui_refresh_task") is asyncio.current_task():
+            data["ui_refresh_task"] = None
+
+
 @dp.callback_query(F.data == "menu_timenick")
 async def menu_timenick(callback: types.CallbackQuery, sync_base=True):
     user_id = callback.from_user.id
@@ -3631,33 +3770,9 @@ async def menu_timenick(callback: types.CallbackQuery, sync_base=True):
     cfg = cached_config(uid_str)
     if sync_base:
         cfg = await sync_profile_base_from_telegram(user_id, cfg, persist=True)
-    is_active = cfg.get("time_nick_active", False)
-    status_str = get_text(user_id, "status_on") if is_active else get_text(user_id, "status_off")
-    offset = cfg.get("timezone_offset", 5)
 
-    base_first = cfg.get("profile_base_first_name", "User")
-    base_last = cfg.get("profile_base_last_name", "")
-
-    profile_preview = get_current_styled_profile_preview(base_first, base_last, offset, include_time=True, style=cfg.get("time_style", 1))
-    sign_str = f"+{offset}" if offset >= 0 else str(offset)
-
-    text = (
-        "<b>⏰ Время в профиле</b>\n"
-        "<i>Автоматически добавляет текущее время в имя профиля.</i>\n\n"
-        f"<b>Статус:</b> {html.escape(status_str, quote=False)}\n"
-        f"<b>Предпросмотр:</b>\n{html.escape(profile_preview, quote=False)}\n"
-        f"<b>Часовой пояс:</b> UTC{html.escape(sign_str, quote=False)}"
-    )
-
-    builder = InlineKeyboardBuilder()
-    btn_toggle_text = get_text(user_id, "btn_turn_off") if is_active else get_text(user_id, "btn_turn_on")
-    builder.button(text=btn_toggle_text, callback_data="toggle_timenick")
-    builder.button(text=get_text(user_id, "btn_tz_select"), callback_data="tz_select")
-    builder.button(text="Стили 🎨", callback_data="time_styles")
-    builder.button(text=get_text(user_id, "btn_back_menu"), callback_data="main_menu")
-    builder.adjust(1)
-
-    await edit_or_send(user_id, text, reply_markup=builder.as_markup(), parse_mode="HTML")
+    text, markup = build_timenick_screen(user_id, cfg)
+    await edit_or_send(user_id, text, reply_markup=markup, parse_mode="HTML")
     try: await callback.answer()
     except Exception: pass
 
