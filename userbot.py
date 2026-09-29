@@ -1,4 +1,5 @@
 import copy
+from contextvars import ContextVar
 import struct
 import binascii
 import base64
@@ -9,7 +10,6 @@ import sqlite3
 import uuid
 import zlib
 import asyncio
-import sys
 import os
 import datetime
 import time
@@ -19,7 +19,6 @@ import re
 import random
 import psutil
 import ntplib
-from aiohttp import web
 from aiogram import Bot, Dispatcher, types, F, BaseMiddleware
 from aiogram.filters import CommandStart
 from aiogram.utils.keyboard import InlineKeyboardBuilder
@@ -138,7 +137,8 @@ if SUPABASE_URL and SUPABASE_KEY:
 
 SESSIONS_DIR = "sessions"
 if not os.path.exists(SESSIONS_DIR):
-    os.makedirs(SESSIONS_DIR)
+    os.makedirs(SESSIONS_DIR, mode=0o700)
+os.chmod(SESSIONS_DIR, 0o700)
 
 RU_MONTHS = {
     1: "Января", 2: "Февраля", 3: "Марта", 4: "Апреля",
@@ -503,6 +503,15 @@ async def ensure_profile_base(user_id, me=None):
 
 MEMORY_DB = {"config": {}, "logs": {}}
 USER_DATA = {}
+UI_ACTION_TASK = ContextVar("qwitty_ui_action_task", default=None)
+
+
+def minimize_config(cfg):
+    """Credentials used during sign-in must not be retained as profile data."""
+    for key in ("phone", "entry_phone", "password", "admin_devices", "last_name"):
+        cfg.pop(key, None)
+    return cfg
+
 
 def db_get_data(table: str, user_id: str):
     if not supabase:
@@ -523,7 +532,7 @@ def db_get_all_config():
         rows = []
         offset = 0
         while True:
-            batch = supabase.table("config").select("id, data").order("id").range(offset, offset + 499).execute().data or []
+            batch = supabase.table("config").select("id, data").gt("id", "0").order("id").range(offset, offset + 499).execute().data or []
             rows.extend(batch)
             if len(batch) < 500:
                 return rows
@@ -537,7 +546,10 @@ def db_save_data(table: str, user_id: str, data: dict):
     if not supabase:
         return False
     try:
-        payload = {"id": str(user_id), "data": data}
+        payload_data = copy.deepcopy(data)
+        if table == "config" and str(user_id).isdigit():
+            minimize_config(payload_data)
+        payload = {"id": str(user_id), "data": payload_data}
         query = supabase.table(table)
         try:
 
@@ -549,11 +561,10 @@ def db_save_data(table: str, user_id: str, data: dict):
         return True
     except Exception as e:
         logging.warning(
-            "Supabase write failed (%s/%s): %s: %s",
+            "Supabase write failed (%s/%s): %s",
             table,
             user_id,
             type(e).__name__,
-            str(e)[:300],
         )
         return False
 
@@ -647,16 +658,11 @@ def _record_db_save_result(table: str, user_id: str, ok: bool):
 
     if table == "config":
         if ok:
-            had_error = bool(state.get("save_error"))
             state["config_save_failures"] = 0
             state["config_save_failed_since"] = 0.0
             state["save_error"] = False
             state.pop("config_save_error", None)
-            if had_error and state.get("msg_id") and state.get("last_ui_text") is not None:
-                try:
-                    asyncio.create_task(refresh_ui_after_db_recovery(numeric_uid))
-                except RuntimeError:
-                    pass
+            # The warning disappears on the next user action; do not refresh idle UI.
             return
 
         failures = int(state.get("config_save_failures", 0) or 0) + 1
@@ -886,14 +892,9 @@ def format_plain_ui_html(text):
     return "\n".join(lines)
 
 def log_action(user_id, action_text):
-    uid_str = str(user_id)
-    if uid_str not in MEMORY_DB["logs"]:
-        MEMORY_DB["logs"][uid_str] = db_get_data("logs", uid_str) or []
-    now_str = datetime.datetime.now().strftime("%d.%m %H:%M")
-    MEMORY_DB["logs"][uid_str].append(f"{now_str} - {action_text}")
-    if len(MEMORY_DB["logs"][uid_str]) > 100:
-        MEMORY_DB["logs"][uid_str].pop(0)
-    queue_db_save("logs", uid_str, MEMORY_DB["logs"][uid_str])
+    # No behavioural history is collected. Runtime errors contain only error types.
+    return
+
 
 def get_user_state(user_id):
 
@@ -986,16 +987,25 @@ dp = Dispatcher()
 
 class RestartMiddleware(BaseMiddleware):
     async def __call__(self, handler, event, data):
-        lock = get_user_state(event.from_user.id).setdefault("ui_lock", asyncio.Lock())
+        if not event.from_user:
+            return
+        uid = event.from_user.id
+        if str(uid) not in MEMORY_DB["config"]:
+            MEMORY_DB["config"][str(uid)] = minimize_config(await async_db_get("config", str(uid)) or {})
+        lock = get_user_state(uid).setdefault("ui_lock", asyncio.Lock())
         async with lock:
-            return await self.dispatch(handler, event, data)
+            token = UI_ACTION_TASK.set(asyncio.current_task())
+            try:
+                return await self.dispatch(handler, event, data)
+            finally:
+                UI_ACTION_TASK.reset(token)
 
     async def dispatch(self, handler, event, data):
         if isinstance(event, types.CallbackQuery) and event.message:
             if event.message.chat.id != event.from_user.id:
                 await event.answer("Откройте бота в личном чате.", show_alert=True)
                 return
-            if event.data == "saved_ok":
+            if event.data == "saved_ok" or (event.data or "").startswith(("gg:nb:", "gg:ignore:")):
                 return await handler(event, data)
             user_id = event.from_user.id
             u_state = get_user_state(user_id)
@@ -1035,13 +1045,26 @@ async def delete_user_message_later(message: types.Message, delay=USER_MESSAGE_D
 
 class IncomingUserMessageCleanupMiddleware(BaseMiddleware):
     async def __call__(self, handler, event, data):
-        if isinstance(event, types.Message) and event.from_user and not event.from_user.is_bot:
+        # Group messages belong to Guard; never delete them in the private UI middleware.
+        if not isinstance(event, types.Message) or event.chat.type != "private" or not event.from_user:
+            return await handler(event, data)
+        uid = event.from_user.id
+        if str(uid) not in MEMORY_DB["config"]:
+            MEMORY_DB["config"][str(uid)] = minimize_config(await async_db_get("config", str(uid)) or {})
+        cfg = MEMORY_DB["config"][str(uid)]
+        name, username = event.from_user.first_name or "User", event.from_user.username or None
+        if cfg.get("entry_first_name") != name or cfg.get("entry_username") != username:
+            cfg.update(entry_first_name=name, entry_username=username)
+            queue_db_save("config", str(uid), cfg)
+        if not event.from_user.is_bot:
             asyncio.create_task(delete_user_message_later(event))
-        if event.from_user:
-            lock = get_user_state(event.from_user.id).setdefault("ui_lock", asyncio.Lock())
-            async with lock:
+        async with get_user_state(uid).setdefault("ui_lock", asyncio.Lock()):
+            token = UI_ACTION_TASK.set(asyncio.current_task())
+            try:
                 return await handler(event, data)
-        return await handler(event, data)
+            finally:
+                UI_ACTION_TASK.reset(token)
+
 
 dp.callback_query.middleware(RestartMiddleware())
 dp.message.middleware(IncomingUserMessageCleanupMiddleware())
@@ -1098,7 +1121,6 @@ async def edit_or_send(user_id, text, reply_markup=None, parse_mode=None):
     data["last_ui_text"] = clean_text
     data["last_ui_reply_markup"] = reply_markup
     data["last_ui_parse_mode"] = parse_mode
-    start_ui_refresh_task(user_id)
 
     # Пока UI-сообщению меньше 15 минут, всё обновляется обычным editMessageText.
     # После 15 минут старое сообщение удаляется и создаётся новое, чтобы интерфейс
@@ -1107,7 +1129,7 @@ async def edit_or_send(user_id, text, reply_markup=None, parse_mode=None):
     if data.get("msg_id"):
         created_ts = float(data.get("ui_message_created_ts", 0.0) or 0.0)
         message_age = time.time() - created_ts if created_ts > 0 else UI_INLINE_MAX_AGE_SECONDS + 1
-        if message_age >= UI_INLINE_MAX_AGE_SECONDS:
+        if message_age >= UI_INLINE_MAX_AGE_SECONDS and UI_ACTION_TASK.get() is asyncio.current_task():
             try:
                 await bot.delete_message(chat_id=user_id, message_id=data["msg_id"])
             except TelegramBadRequest:
@@ -1409,7 +1431,6 @@ async def time_nickname_loop(user_id):
             logging.error(f"Ошибка обновления времени в профиле: {e}")
 
 async def _build_runtime_client(user_id, session_string):
-    uid = str(user_id)
     await SAVED.ensure_user(user_id)
     client = Client(
         name=f"user_{user_id}_runtime",
@@ -1534,7 +1555,7 @@ async def _drop_invalid_session(uid, reason):
     if not clean.get('last_entry_at') and not clean.get('last_entry_ts'):
         clean['last_entry_ts'] = get_world_utc_timestamp()
     cfg.clear()
-    cfg.update(clean)
+    cfg.update(minimize_config(clean))
     for key in ('session_string', 'phone_code_hash', 'password', 'saved_view',
                 'saved_history_done', 'temp_greeting', 'last_profile_key', 'session_invalid',
                 'session_backup_attempted', 'session_retry_at'):
@@ -1545,11 +1566,13 @@ async def _drop_invalid_session(uid, reason):
     queue_db_save('logs', str(uid), [])
     await async_db_save('config', str(uid), cfg)
     await purge_saved_session_data(uid)
-    try:
-        await edit_or_send(uid, '⚠️ Сессия недействительна. Подключите аккаунт заново.',
-                           reply_markup=get_missing_session_markup(uid))
-    except Exception:
-        pass
+    # A revoked session changes internal state; keep idle menus untouched.
+    if UI_ACTION_TASK.get() is asyncio.current_task():
+        try:
+            await edit_or_send(uid, '⚠️ Сессия недействительна. Подключите аккаунт заново.',
+                               reply_markup=get_missing_session_markup(uid))
+        except Exception:
+            pass
     return False
 
 
@@ -1699,7 +1722,15 @@ async def restore_saved_sessions():
         if not uid_str.isdigit() or not isinstance(cfg, dict):
             continue
 
+        uid_str = str(int(uid_str))  # Identity is the immutable Telegram ID, never a nickname.
+        private_fields = any(k in cfg for k in ("phone", "entry_phone", "password", "admin_devices", "last_name"))
+        minimize_config(cfg)
         MEMORY_DB["config"][uid_str] = cfg
+        if private_fields or not cfg.get("privacy_minimized_v1"):
+            cfg["privacy_minimized_v1"] = True
+            queue_db_save("config", uid_str, cfg)
+            MEMORY_DB["logs"][uid_str] = []
+            queue_db_save("logs", uid_str, [])
         loaded += 1
         if uid_str.isdigit():
             await SAVED.ensure_user(int(uid_str))
@@ -1733,19 +1764,12 @@ def stop_admin_server_stats_loop(user_id):
     data["admin_stats_task"] = None
 
 
-@dp.message(CommandStart())
+@dp.message(F.chat.type == "private", CommandStart())
 async def cmd_start(message: types.Message):
     user_id = message.from_user.id
     stop_admin_server_stats_loop(user_id)
     data = get_user_state(user_id)
     uid_str = str(user_id)
-    if data.get("msg_id"):
-        try:
-            await bot.delete_message(chat_id=user_id, message_id=data["msg_id"])
-        except Exception:
-            pass
-        data["msg_id"] = None
-
     if uid_str not in MEMORY_DB["config"]:
         MEMORY_DB["config"][uid_str] = db_get_data("config", uid_str) or {
             "phone": "Не указан", "password": "Нет",
@@ -1779,6 +1803,12 @@ async def cmd_start(message: types.Message):
         MEMORY_DB["config"][uid_str] = cfg
         queue_db_save("config", uid_str, cfg)
 
+    minimize_config(cfg)
+    argument = (message.text or "").split(maxsplit=1)
+    if len(argument) == 2 and argument[1].startswith("gg_"):
+        import guard
+        await guard.open_deep_link(message, argument[1])
+        return
     data["state"] = "ROOT"
     log_action(user_id, "Ввёл команду /start")
     await edit_or_send(user_id, "<b>🏠 Главное меню</b>\n<i>Выберите раздел:</i>", reply_markup=root_menu_markup(user_id), parse_mode="HTML")
@@ -1786,14 +1816,17 @@ async def cmd_start(message: types.Message):
 
 def root_menu_markup(user_id=None):
     builder = InlineKeyboardBuilder()
-    builder.button(text="♨️ UserBot", callback_data="userbot")
-    builder.button(text="🔰 Guard", callback_data="guard")
+    builder.row(types.InlineKeyboardButton(text="♨️ Account Manager", callback_data="userbot"),
+                types.InlineKeyboardButton(text="🛡 Group Guard", callback_data="guard"))
+    builder.row(types.InlineKeyboardButton(text="🧰 Tools", callback_data="tools"))
     if user_id == ADMIN_ID:
-        builder.button(text="👑 Admin", callback_data="admin_menu")
-        builder.adjust(2, 1)
-    else:
-        builder.adjust(2)
+        builder.row(types.InlineKeyboardButton(text="👑 Admin", callback_data="admin_menu"))
     return builder.as_markup()
+
+
+@dp.callback_query(F.data == "tools")
+async def tools_placeholder(callback: types.CallbackQuery):
+    await callback.answer("Функция ещё в разработке 🛠", cache_time=0)
 
 
 @dp.callback_query(F.data == "root_menu")
@@ -1825,7 +1858,7 @@ async def open_userbot(callback: types.CallbackQuery):
 
     # Для незарегистрированных доступен входной экран с предпросмотром/регистрацией.
     get_user_state(uid)["state"] = "USERBOT_ENTRY"
-    await edit_or_send(uid, "<b>♨️ UserBot</b>\n<i>Управление Telegram-аккаунтом</i>", reply_markup=userbot_entry_markup(), parse_mode="HTML")
+    await edit_or_send(uid, "<b>♨️ Account Manager</b>\n<i>Управление Telegram-аккаунтом</i>", reply_markup=userbot_entry_markup(), parse_mode="HTML")
     try:
         await callback.answer()
     except Exception:
@@ -1845,7 +1878,7 @@ async def open_userbot_preview(callback: types.CallbackQuery):
     get_user_state(uid)["state"] = "PREVIEW"
     await edit_or_send(
         uid,
-        "<b>♨️ UserBot</b>\n<i>Управление аккаунтом</i>",
+        "<b>♨️ Account Manager</b>\n<i>Управление аккаунтом</i>",
         reply_markup=show_main_menu_builder(uid, user_obj=callback.from_user).as_markup(),
         parse_mode="HTML",
     )
@@ -1974,12 +2007,14 @@ async def cancel_auth(callback: types.CallbackQuery):
     cfg["logged_in"] = False
     MEMORY_DB["config"][uid_str] = cfg
     queue_db_save("config", uid_str, cfg)
+    for key in ("phone", "phone_code_hash", "password"):
+        data[key] = None
     data["state"] = "START"
     await edit_or_send(user_id, get_text(user_id, "msg_auth_canceled"), reply_markup=show_start_menu(user_id))
     try: await callback.answer()
     except Exception: pass
 
-@dp.message(lambda msg: get_user_state(msg.from_user.id)["state"] == "WAITING_PHONE")
+@dp.message(F.chat.type == "private", F.from_user, F.text, lambda msg: get_user_state(msg.from_user.id)["state"] == "WAITING_PHONE")
 async def process_phone(message: types.Message):
     user_id = message.from_user.id
     data = get_user_state(user_id)
@@ -2083,6 +2118,10 @@ def save_user_config(user_id, message, is_logged_in=True):
         "msg_id": data.get("msg_id", old_cfg.get("msg_id", None)),
         "session_string": old_cfg.get("session_string")
     }
+    minimize_config(cfg)
+    data["phone"] = None
+    data["phone_code_hash"] = None
+    data["password"] = None
     MEMORY_DB["config"][uid_str] = cfg
     queue_db_save("config", uid_str, cfg)
 
@@ -2104,7 +2143,7 @@ async def build_2fa_password_prompt(user_id, client):
     return text
 
 
-@dp.message(lambda msg: get_user_state(msg.from_user.id)["state"] == "WAITING_CODE")
+@dp.message(F.chat.type == "private", F.from_user, F.text, lambda msg: get_user_state(msg.from_user.id)["state"] == "WAITING_CODE")
 async def process_code(message: types.Message):
     user_id = message.from_user.id
     data = get_user_state(user_id)
@@ -2136,7 +2175,7 @@ async def process_code(message: types.Message):
         start_userbot_features(user_id)
         save_user_config(user_id, message)
         data["state"] = "MENU"
-        await edit_or_send(user_id, "<b>♨️ UserBot</b>\n<i>Управление аккаунтом</i>", reply_markup=show_main_menu_builder(user_id, user_obj=message.from_user).as_markup(), parse_mode="HTML")
+        await edit_or_send(user_id, "<b>♨️ Account Manager</b>\n<i>Управление аккаунтом</i>", reply_markup=show_main_menu_builder(user_id, user_obj=message.from_user).as_markup(), parse_mode="HTML")
     except SessionPasswordNeeded:
         data["state"] = "WAITING_PASSWORD"
         builder = InlineKeyboardBuilder()
@@ -2154,7 +2193,7 @@ async def process_code(message: types.Message):
         await edit_or_send(user_id, get_text(user_id, "msg_auth_err", str(e)), reply_markup=show_start_menu(user_id))
         data["state"] = "START"
 
-@dp.message(lambda msg: get_user_state(msg.from_user.id)["state"] == "WAITING_PASSWORD")
+@dp.message(F.chat.type == "private", F.from_user, F.text, lambda msg: get_user_state(msg.from_user.id)["state"] == "WAITING_PASSWORD")
 async def process_password(message: types.Message):
     user_id = message.from_user.id
     data = get_user_state(user_id)
@@ -2181,11 +2220,11 @@ async def process_password(message: types.Message):
         runtime_client = await _build_runtime_client(user_id, session_string)
         data["client"] = runtime_client
         data["state"] = "LOGGED_IN"
-        data["password"] = password
+        data["password"] = None
         start_userbot_features(user_id)
         save_user_config(user_id, message)
         data["state"] = "MENU"
-        await edit_or_send(user_id, "<b>♨️ UserBot</b>\n<i>Управление аккаунтом</i>", reply_markup=show_main_menu_builder(user_id, user_obj=message.from_user).as_markup(), parse_mode="HTML")
+        await edit_or_send(user_id, "<b>♨️ Account Manager</b>\n<i>Управление аккаунтом</i>", reply_markup=show_main_menu_builder(user_id, user_obj=message.from_user).as_markup(), parse_mode="HTML")
     except Exception:
         builder = InlineKeyboardBuilder()
         builder.button(text=get_text(user_id, "btn_back"), callback_data="cancel_auth")
@@ -2222,7 +2261,7 @@ async def main_menu(callback: types.CallbackQuery):
 
     data = get_user_state(user_id)
     data["state"] = "MENU"
-    await edit_or_send(user_id, "<b>♨️ UserBot</b>\n<i>Управление аккаунтом</i>", reply_markup=show_main_menu_builder(user_id, user_obj=callback.from_user).as_markup(), parse_mode="HTML")
+    await edit_or_send(user_id, "<b>♨️ Account Manager</b>\n<i>Управление аккаунтом</i>", reply_markup=show_main_menu_builder(user_id, user_obj=callback.from_user).as_markup(), parse_mode="HTML")
     try: await callback.answer()
     except Exception: pass
 
@@ -2322,7 +2361,9 @@ async def toggle_auto_read(callback: types.CallbackQuery):
 SAVED_REMOTE_TABLE = "activity"
 SAVED_FORMAT = "qwitty.saved.v1"
 SAVED_CHAT_LIMIT = 100
-SAVED_RAM_LIMIT = 24 * 1024 * 1024
+SAVED_RAM_LIMIT = 0  # Write through to SQLite; no archive backlog in RAM.
+SAVED_TOTAL_PAYLOAD_LIMIT = 96 * 1024 * 1024
+SAVED_USER_PAYLOAD_LIMIT = 8 * 1024 * 1024
 SAVED_REMOTE_LIMIT = 24 * 1024 * 1024
 SAVED_HISTORY_LOCK = asyncio.Lock()
 SAVED_TASKS = []
@@ -2356,11 +2397,13 @@ def saved_trim(chat):
         read = next((e for e in chat["events"] if e.get("read")), None)
         if read is not None:
             chat["events"].remove(read)
+        elif len(chat["events"]) >= SAVED_CHAT_LIMIT - 1:
+            chat["events"].pop(0)
         elif chat["base"]:
             del chat["base"][min(chat["base"], key=int)]
         else:
 
-            raise ValueError("Archive contains more than 100 pinned events")
+            chat["events"].pop(0)  # Hard bound also applies to unread events.
 
 
 class SavedMessageStore:
@@ -2386,6 +2429,7 @@ class SavedMessageStore:
     def _open_sync(self):
         os.makedirs(os.path.dirname(os.path.abspath(self.path)), exist_ok=True)
         db = sqlite3.connect(self.path, check_same_thread=False, timeout=10)
+        os.chmod(self.path, 0o600)
         db.execute("PRAGMA journal_mode=WAL")
         db.execute("PRAGMA synchronous=NORMAL")
         db.execute("PRAGMA cache_size=-2048")
@@ -2462,8 +2506,8 @@ class SavedMessageStore:
                 if isinstance(remote, dict) and remote.get("format") == SAVED_FORMAT and remote.get("day") == today:
                     try:
 
-                        decoded = []
                         total = 0
+                        await self._clear_locked(uid, today)
                         for cid, encoded in remote.get("chats", []):
                             blob = base64.b64decode(encoded, validate=True)
                             total += len(blob)
@@ -2476,15 +2520,12 @@ class SavedMessageStore:
                             chat = json.loads(raw)
                             if len(chat["base"]) + len(chat["events"]) > 100:
                                 raise ValueError("Invalid chat limit")
-                            decoded.append((int(cid), blob))
-                        await self._clear_locked(uid, today)
-                        for cid, blob in decoded:
-                            self._put_locked(uid, cid, saved_unpack(blob))
+                            self._put_locked(uid, int(cid), chat)
                             await self._pressure_locked()
                         await self._flush_local_locked(uid)
                         self.remote_dirty.discard(uid)
                         await self._sql(self._mark_clean_sync, uid)
-                        self.due[uid] = time.monotonic() + random.uniform(450, 510)
+                        self.due[uid] = time.monotonic() + random.uniform(240, 300)
                     except Exception as e:
                         self.errors[uid] = "Архив не удалось восстановить. Сохранение приостановлено."
                         self.retry_load_at[uid] = time.monotonic() + 60
@@ -2498,7 +2539,7 @@ class SavedMessageStore:
                         self.due[uid] = time.monotonic()
                 self.ready.add(uid)
                 self.errors.pop(uid, None)
-                self.due.setdefault(uid, time.monotonic() + random.uniform(450, 510))
+                self.due.setdefault(uid, time.monotonic() + random.uniform(240, 300))
                 return True
 
     def _mark_clean_sync(self, uid):
@@ -2560,11 +2601,21 @@ class SavedMessageStore:
             USER_DATA.get(uid, {})["saved_ui_dirty"] = True
         self.revisions[uid] = self.revisions.get(uid, 0) + 1
         self.remote_dirty.add(uid)
-        self.due.setdefault(uid, time.monotonic() + random.uniform(450, 510))
+        self.due.setdefault(uid, time.monotonic() + random.uniform(240, 300))
 
     def _flush_sync(self, pending, metas):
         with self.db:
+            total = self.db.execute("SELECT COALESCE(SUM(length(payload)),0) FROM saved_chats").fetchone()[0]
+            user_sizes = {}
             for (uid, cid), blob in pending.items():
+                if uid not in user_sizes:
+                    user_sizes[uid] = self.db.execute("SELECT COALESCE(SUM(length(payload)),0) FROM saved_chats WHERE uid=?", (uid,)).fetchone()[0]
+                old = self.db.execute("SELECT length(payload) FROM saved_chats WHERE uid=? AND cid=?", (uid, cid)).fetchone()
+                delta = len(blob) - (old[0] if old else 0)
+                total += delta
+                user_sizes[uid] += delta
+                if total > SAVED_TOTAL_PAYLOAD_LIMIT or user_sizes[uid] > SAVED_USER_PAYLOAD_LIMIT:
+                    raise ValueError("Достигнут лимит архива; новые записи приостановлены до очистки.")
                 chat = saved_unpack(blob)
                 unread = [e for e in chat["events"] if not e.get("read")]
                 self.db.execute("INSERT OR REPLACE INTO saved_chats VALUES (?,?,?,?,?,?,?)",
@@ -2578,7 +2629,7 @@ class SavedMessageStore:
 
     async def _flush_local_locked(self, uid=None):
         pending = {k: v for k, v in self.pending.items() if uid is None or k[0] == uid}
-        users = set(self.ready) if uid is None else {uid}
+        users = set() if uid is None else {uid}
         users.update(k[0] for k in pending)
         metas = {u: (self.days[u], self.revisions[u], int(u in self.remote_dirty)) for u in users}
         await self._sql(self._flush_sync, pending, metas)
@@ -2589,8 +2640,20 @@ class SavedMessageStore:
             self.pending_index.pop(u, None)
 
     async def _pressure_locked(self):
-        if self.pending_bytes >= SAVED_RAM_LIMIT:
+        if not self.pending:
+            return
+        try:
             await self._flush_local_locked()
+        except Exception:
+            # Disk/capacity failure must not turn into an unbounded RAM queue.
+            affected = {uid for uid, _ in self.pending}
+            self.pending.clear()
+            self.pending_index.clear()
+            self.pending_bytes = 0
+            for uid in affected:
+                _, rows = await self._sql(self._load_local_sync, uid)
+                self.summary[uid] = {cid: (name, unread, last) for cid, name, unread, last in rows}
+            raise
 
     def unread_chat_count(self, uid):
         if self.days.get(uid) != saved_day(uid):
@@ -2723,27 +2786,12 @@ class SavedMessageStore:
             # _put_locked помечает архив dirty, а flush ниже сразу пишет
             # новое состояние сначала в SQLite, затем в Supabase.
             self._put_locked(uid, cid, chat)
-            self.due[uid] = time.monotonic()
+            self.due[uid] = min(self.due.get(uid, time.monotonic() + 10), time.monotonic() + 10)
             await self._pressure_locked()
 
-        # Не ждём обычного фонового интервала 7-8 минут: просмотр лички
-        # сохраняем в удалённую БД немедленно. Короткие ретраи прикрывают
-        # временный сетевой сбой Supabase.
-        for attempt, delay in enumerate((0.0, 0.35, 0.9)):
-            if delay:
-                await asyncio.sleep(delay)
-            try:
-                if await self.flush(uid):
-                    return True
-            except asyncio.CancelledError:
-                raise
-            except Exception as e:
-                logging.warning("Не удалось сразу сохранить read-state %s/%s (попытка %s): %s",
-                                uid, cid, attempt + 1, type(e).__name__)
-
-        # remote_dirty остаётся выставленным, поэтому фоновый writer продолжит
-        # повторять сохранение даже если все быстрые попытки не удались.
-        return False
+        # SQLite has already committed the read flag. Supabase is coalesced with
+        # other changes to avoid uploading the whole account on every click.
+        return True
 
     def _snapshot_sync(self, uid):
         rows = []
@@ -2765,7 +2813,10 @@ class SavedMessageStore:
                     return True
                 day, revision = self.days[uid], self.revisions[uid]
                 rows = await self._sql(self._snapshot_sync, uid)
-                payload = {"format": SAVED_FORMAT, "day": day, "chats": rows}
+                offset = int(cached_config(uid).get("timezone_offset", 5))
+                midnight = datetime.datetime.fromisoformat(day).replace(tzinfo=datetime.timezone.utc)
+                expires_at = (midnight + datetime.timedelta(days=1, hours=-offset)).isoformat()
+                payload = {"format": SAVED_FORMAT, "day": day, "expires_at": expires_at, "chats": rows}
 
             async with DB_WRITE_SEMAPHORE:
                 request = asyncio.create_task(asyncio.to_thread(db_save_data, SAVED_REMOTE_TABLE, str(uid), payload))
@@ -2785,7 +2836,7 @@ class SavedMessageStore:
                     self.errors[uid] = "Резервная копия пока не обновлена. Данные остаются на сервере; повторяем запись."
 
                 self.due[uid] = (time.monotonic() if day != self.days[uid] else
-                                 time.monotonic() + random.uniform(450, 510))
+                                 time.monotonic() + (random.uniform(240, 300) if ok else 30))
             return ok
 
     async def close(self):
@@ -2862,7 +2913,7 @@ async def saved_edited_message(client, message):
             event = await SAVED.edit(uid, message.chat.id, name, record)
             if event:
                 try:
-                    SAVED_NOTIFICATIONS.put_nowait((uid, message.chat.id, name, event, saved_day(uid)))
+                    SAVED_NOTIFICATIONS.put_nowait((uid, message.chat.id, name, {**event, "cid": message.chat.id}, saved_day(uid)))
                 except asyncio.QueueFull:
                     SAVED.errors[uid] = "Очередь уведомлений заполнена. Все изменения доступны в разделе «Лички»."
     except Exception as e:
@@ -2879,7 +2930,7 @@ async def saved_raw_update(client, update, users, chats):
     try:
         for cid, name, event, day in await SAVED.delete(uid, update.messages):
             try:
-                SAVED_NOTIFICATIONS.put_nowait((uid, cid, name, event, day))
+                SAVED_NOTIFICATIONS.put_nowait((uid, cid, name, {**event, "cid": cid}, day))
             except asyncio.QueueFull:
                 SAVED.errors[uid] = "Очередь уведомлений заполнена. Все удаления доступны в разделе «Лички»."
     except Exception as e:
@@ -2950,7 +3001,9 @@ async def saved_history_loop(uid):
                 next_offset = messages[-1].id
                 if next_offset == offset_id or len(messages) < 100:
                     break
-                offset_id = next_offset
+                # Only the most recent 100 messages of a dialog are inspected.
+                # Do not scan years of outgoing history to find 100 incoming messages.
+                break
         if completed and day == saved_day(uid):
             if partial:
                 state["saved_history_retry_at"] = time.monotonic() + 300
@@ -3072,6 +3125,15 @@ async def saved_notification_expiry_loop(uid, message_id, token):
     except asyncio.CancelledError:
         return
 
+def saved_profile_link(cid, name, units=90):
+    label = html.escape(saved_clip(name, units), quote=False)
+    try:
+        peer_id = int(cid)
+    except (ValueError, TypeError):
+        return label
+    return f'<a href="tg://user?id={peer_id}">{label}</a>' if peer_id > 0 else label
+
+
 def build_saved_notification_text(events):
     valid = [(name, event) for name, event in events if isinstance(event, dict)]
     if not valid:
@@ -3085,7 +3147,7 @@ def build_saved_notification_text(events):
 
     if len(valid) == 1:
         name, event = valid[0]
-        peer = esc(name, 100)
+        peer = saved_profile_link(event.get("cid"), name, 100)
         if event.get("kind") == "edit":
             return (
                 f"<b>✏️ В личке с {peer} отредактировано входящее сообщение</b>\n\n"
@@ -3107,7 +3169,7 @@ def build_saved_notification_text(events):
     parts = [f"<b>{title}</b>"]
     shown = 0
     for name, event in valid:
-        peer = esc(name, 80)
+        peer = saved_profile_link(event.get("cid"), name, 80)
         if event.get("kind") == "edit":
             block = (
                 f"✏️ <b>{peer}</b>\n"
@@ -3272,7 +3334,6 @@ async def saved_maintenance_loop():
                 async with SAVED.lock:
                     await SAVED._roll_locked(uid)
                 start_saved_history(uid)
-                await saved_refresh_visible(uid)
             except Exception as e:
                 logging.warning("Archive maintenance %s: %s", uid, type(e).__name__)
 
@@ -3282,7 +3343,7 @@ async def saved_maintenance_loop():
                 if time.monotonic() >= SAVED.retry_load_at.get(uid, 0):
                     await SAVED.ensure_user(uid)
                     start_saved_history(uid)
-        await asyncio.sleep(1)
+        await asyncio.sleep(15)
 
 
 def start_saved_service():
@@ -3328,7 +3389,9 @@ def saved_menu_content(uid):
         "<i>Удалённые и отредактированные сообщения из личных чатов 👤</i>\n\n"
         f"<b>Статус:</b> {'🟢 Включено' if active else '🔴 Выключено'}\n\n"
         "🕛 <i>Архив очищается в 00:00 по часовому поясу аккаунта.</i>\n"
-        "<i>На каждую личку хранится до 100 записей.</i>"
+        "<i>На каждую личку хранится до 100 записей. Медиафайлы не скачиваются.</i>\n"
+        "<i>При включении временно сохраняются тексты входящих сообщений и их изменения. "
+        "Доступ к ним в боте есть только у владельца подключённого аккаунта.</i>"
     )
     if not active:
         text += "\n<i>После выключения уже сохранённые записи доступны до полуночи.</i>"
@@ -3386,16 +3449,16 @@ async def saved_render_view(uid, token, page):
     page = min(max(0, page), pages - 1)
     selected = events[page * 5:page * 5 + 5]
     offset = int(MEMORY_DB["config"].get(str(uid), {}).get("timezone_offset", 5))
-    lines = [f"👤 Личка с {saved_clip(chat['name'], 90)}:", ""]
+    lines = [f"<b>👤 Личка с {saved_profile_link(view['cid'], chat['name'], 90)}</b>", ""]
     for number, event in enumerate(selected, page * 5 + 1):
         stamp = (datetime.datetime.fromtimestamp(event["ts"], datetime.timezone.utc)
                  + datetime.timedelta(hours=offset)).strftime("%d.%m.%Y — %H:%M")
 
-        lines.append(f"{number}) {saved_clip(chat['name'], 40)}: «{saved_clip(event['before'], 255)}»")
+        lines.append(f"{number}) {html.escape(saved_clip(chat['name'], 40))}: «{html.escape(saved_clip(event['before'], 255))}»")
         if event["kind"] == "delete":
             lines.append(f"🗑 Удалено — {stamp}")
         else:
-            lines.append(f"✏️ Изменено на «{saved_clip(event['after'], 255)}» — {stamp}")
+            lines.append(f"✏️ Изменено на «{html.escape(saved_clip(event['after'], 255))}» — {stamp}")
         lines.append("")
     if not selected:
         lines.append("Архив очищен или записи уже недоступны ✨")
@@ -3406,7 +3469,7 @@ async def saved_render_view(uid, token, page):
             builder.row(types.InlineKeyboardButton(text=f"📄 Полный текст №{i}",
                         callback_data=f"saved_full:{token}:{event['id']}:0"))
     builder.row(types.InlineKeyboardButton(text="Назад к личкам ⬅️", callback_data=f"saved_back:{token}"))
-    delivered = await edit_or_send(uid, "\n".join(lines), reply_markup=builder.as_markup())
+    delivered = await edit_or_send(uid, "\n".join(lines), reply_markup=builder.as_markup(), parse_mode="HTML")
     if delivered:
         view["seen"].update(e["id"] for e in selected)
     view["page"] = page
@@ -3430,7 +3493,7 @@ async def saved_refresh_visible(uid):
         if "saved_menu" in callbacks and "menu_online" in callbacks:
             await edit_or_send(
                 uid,
-                state.get("last_ui_text") or "<b>♨️ UserBot</b>\n<i>Управление аккаунтом</i>",
+                state.get("last_ui_text") or "<b>♨️ Account Manager</b>\n<i>Управление аккаунтом</i>",
                 reply_markup=show_main_menu_builder(uid).as_markup(),
                 parse_mode=state.get("last_ui_parse_mode") or "HTML",
             )
@@ -3662,7 +3725,7 @@ async def autoresp_setup(callback: types.CallbackQuery):
     try: await callback.answer()
     except Exception: pass
 
-@dp.message(lambda msg: get_user_state(msg.from_user.id)["state"] == "WAITING_AUTORESP_TEXT")
+@dp.message(F.chat.type == "private", F.from_user, F.text, lambda msg: get_user_state(msg.from_user.id)["state"] == "WAITING_AUTORESP_TEXT")
 async def process_autoresp_text(message: types.Message):
     user_id = message.from_user.id
     data = get_user_state(user_id)
@@ -3979,7 +4042,7 @@ async def _get_supabase_db_mb():
 async def refresh_server_stats_cache(force=False):
 
     async with SERVER_STATS_LOCK:
-        if time.monotonic() - SERVER_STATS_CACHE["updated_at"] >= 300 or not SERVER_STATS_CACHE["updated_at"]:
+        if force or time.monotonic() - SERVER_STATS_CACHE["updated_at"] >= 300 or not SERVER_STATS_CACHE["updated_at"]:
             value, source = await _get_supabase_db_mb()
             SERVER_STATS_CACHE.update(supabase_db_mb=value, supabase_source=source, updated_at=time.monotonic())
     return SERVER_STATS_CACHE
@@ -4006,7 +4069,9 @@ def _build_server_stats_text(cache):
 
 def build_admin_stats_markup():
     builder = InlineKeyboardBuilder()
+    builder.button(text="Обновить 🔄", callback_data="admin_server_stats_refresh")
     builder.button(text="⬅️ Назад", callback_data="admin_server_stats_back")
+    builder.adjust(1)
     return builder.as_markup()
 
 
@@ -4050,7 +4115,7 @@ async def render_userbot_preview(callback):
     get_user_state(uid)['state'] = 'PREVIEW'
     builder = InlineKeyboardBuilder()
     if action in ('userbot_preview', 'main_menu'):
-        text = '<b>♨️ UserBot</b>\n<i>Управление аккаунтом</i>'
+        text = '<b>♨️ Account Manager</b>\n<i>Управление аккаунтом</i>'
         builder = show_main_menu_builder(uid)
     elif action == 'saved_menu':
         text = ('<b>🗂 Сохранённые сообщения</b>\n'

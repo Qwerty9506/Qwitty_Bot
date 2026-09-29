@@ -11,7 +11,6 @@ from aiohttp import web
 from aiogram import F, types
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
-from pyrogram.raw import functions
 
 if sys.platform != "win32":
     try:
@@ -56,16 +55,6 @@ def _html(value):
     return html.escape(str(value), quote=False)
 
 
-def _display_phone(value):
-    phone = str(value or "").strip()
-    if not phone or phone in {"Не указан", "Не виден", "N/A"}:
-        return phone or "Не указан"
-    if phone.startswith("+"):
-        return phone
-    if phone[0].isdigit():
-        return "+" + phone
-    return phone
-
 RENDER_API_KEY = os.getenv("RENDER_API_KEY", "").strip()
 RENDER_SERVICE_ID = os.getenv("RENDER_SERVICE_ID", "").strip()
 RENDER_INSTANCE_ID = os.getenv("RENDER_INSTANCE_ID", "").strip()
@@ -78,9 +67,11 @@ RESTART_FINALIZE_TASKS = set()
 def build_admin_menu_markup():
     builder = InlineKeyboardBuilder()
     builder.button(text=userbot.get_text(ADMIN_ID, "btn_server_stats"), callback_data="admin_server_stats")
+    builder.button(text="Перезапуск сервера ♻️", callback_data="admin_restart_server")
     builder.button(text="Активные 🟢", callback_data="admin_users_1")
     builder.button(text="Не-входящие 🔴", callback_data="admin_entries_1")
-    builder.button(text="Перезапуск сервера ♻️", callback_data="admin_restart_server")
+    builder.button(text="Группы пабликов 🗂", callback_data="admin_public_groups")
+    builder.button(text="Глобальные жалобы 🌐", callback_data="admin_global_reports")
     builder.button(text="Назад в главное меню 🏠", callback_data="root_menu")
     builder.adjust(1)
     return builder.as_markup()
@@ -108,7 +99,7 @@ async def open_admin_menu_for(user_id: int):
     await userbot.edit_or_send(user_id, "<b>👑 Админ-меню</b>\n<i>Управление сервером и пользователями</i>", reply_markup=build_admin_menu_markup(), parse_mode="HTML")
 
 
-@dp.message(F.text.casefold() == "admin")
+@dp.message(F.chat.type == "private", F.text.casefold() == "admin")
 async def admin_command(message: types.Message):
     if not userbot.is_admin(message.from_user):
         return
@@ -146,8 +137,7 @@ async def admin_server_stats(callback: types.CallbackQuery):
         userbot._build_server_stats_text(cache),
         reply_markup=userbot.build_admin_stats_markup(),
     )
-    data["admin_stats_active"] = True
-    data["admin_stats_task"] = asyncio.create_task(userbot._admin_server_stats_loop(user_id))
+    # The refresh button is explicit; an idle menu is never changed.
 
 
 @dp.callback_query(F.data == "admin_server_stats_back")
@@ -235,15 +225,12 @@ async def admin_entry_view(callback: types.CallbackQuery):
     first_name = cfg.get("entry_first_name") or cfg.get("first_name") or "User"
     username = cfg.get("entry_username") or cfg.get("username") or "N/A"
     username_str = f"@{username}" if username != "N/A" else "Не указан"
-    phone = cfg.get("phone") or cfg.get("entry_phone") or "Не виден"
     entry_time = userbot.entry_time_text(cfg)
 
-    phone = _display_phone(phone)
     text = (
         "<b>👤 Профиль пользователя</b>\n\n"
         f"<b>Никнейм:</b> {_html(first_name)}\n"
         f"<b>Юзернейм:</b> {_html(username_str)}\n"
-        f"<b>Номер:</b> {_html(phone)}\n"
         f"<b>Последний вход:</b> <i>{_html(entry_time)}</i>"
     )
 
@@ -257,48 +244,20 @@ async def admin_entry_view(callback: types.CallbackQuery):
         pass
 
 
+@dp.callback_query(F.data.in_({"admin_public_groups", "admin_global_reports"}))
+async def admin_future_section(callback: types.CallbackQuery):
+    if userbot.is_admin(callback.from_user):
+        await callback.answer("Функция ещё в разработке 🛠", cache_time=0)
+    else:
+        await callback.answer("Нет доступа", show_alert=True)
+
+
 async def refresh_admin_user_snapshot(user_id: int, include_devices: bool = False):
-    """Refresh admin-visible account data from Telegram and immediately queue it for Supabase."""
     if not await userbot.ensure_client_connected(user_id, force_check=True):
         return None, None
-
-    state = userbot.get_user_state(user_id)
-    client = state.get("client")
-    if not client or not client.is_connected:
-        return None, None
-
     cfg = userbot.cached_config(str(user_id))
-    devices_str = cfg.get("admin_devices") or "Неизвестно"
-
-    try:
-        me = await client.get_me()
-        if me:
-            cfg["first_name"] = ((getattr(me, "first_name", None) or "User").strip() or "User")[:64]
-            cfg["last_name"] = (getattr(me, "last_name", None) or "").strip()[:64]
-            cfg["username"] = getattr(me, "username", None) or None
-            live_phone = getattr(me, "phone_number", None)
-            cfg["phone"] = live_phone or None
-    except Exception as e:
-        logging.warning("Не удалось обновить профиль пользователя %s: %s", user_id, type(e).__name__)
-
-    if include_devices:
-        try:
-            auths = await client.invoke(functions.account.GetAuthorizations())
-            authorizations = getattr(auths, "authorizations", []) or []
-            device_names = []
-            for auth in authorizations:
-                dev = getattr(auth, "device_model", "") or getattr(auth, "model", "")
-                if dev and dev not in device_names:
-                    device_names.append(dev)
-            devices_str = ", ".join(device_names) if device_names else "Не найдено"
-            cfg["admin_devices"] = devices_str
-        except Exception as e:
-            logging.warning("Не удалось обновить устройства пользователя %s: %s", user_id, type(e).__name__)
-            devices_str = cfg.get("admin_devices") or "Ошибка получения"
-
-    MEMORY_DB["config"][str(user_id)] = cfg
-    await userbot.persist_user_config_now(user_id, cfg)
-    return cfg, devices_str
+    userbot.minimize_config(cfg)
+    return cfg, None
 
 
 async def admin_validate_session(user_id, cfg, semaphore=None):
@@ -393,8 +352,6 @@ async def admin_user_view(callback: types.CallbackQuery):
     first_name = cfg.get("first_name") or cfg.get("profile_base_first_name") or "Qwitty"
     username = cfg.get("username")
     username_str = f"@{username}" if username else "Отсутствует"
-    phone = _display_phone(cfg.get("phone") or "Не указан")
-    devices_str = devices_str or "Неизвестно"
 
     timezone_offset = int(cfg.get("timezone_offset", 5) or 5)
     timezone_name = userbot.TIMEZONE_NAMES.get(timezone_offset, f"UTC{timezone_offset:+d}")
@@ -402,19 +359,15 @@ async def admin_user_view(callback: types.CallbackQuery):
     autoresponder_status = userbot.get_text(callback.from_user.id, "status_on") if cfg.get("autoresponder_active", False) else userbot.get_text(callback.from_user.id, "status_off")
     online_247_status = userbot.get_text(callback.from_user.id, "status_on") if cfg.get("online_247", False) else userbot.get_text(callback.from_user.id, "status_off")
     auto_read_status = userbot.get_text(callback.from_user.id, "status_on") if cfg.get("auto_read", False) else userbot.get_text(callback.from_user.id, "status_off")
-    autoresponder_greeting = cfg.get("autoresponder_greeting", userbot.get_text(int(target_uid), "msg_autoresp_default"))
 
     text = (
         "<b>👤 Профиль</b>\n"
         f"<b>Никнейм:</b> {_html(first_name)}\n"
         f"<b>Юзернейм:</b> {_html(username_str)}\n"
-        f"<b>Номер:</b> {_html(phone)}\n"
-        f"<b>Устройства:</b> <i>{_html(devices_str)}</i>\n\n"
         "<b>⚙️ Функции</b>\n"
         f"<b>Время в профиль:</b> {_html(time_status)}\n"
         f"<i>{_html(timezone_name)}</i>\n\n"
         f"<b>Автоответчик:</b> {_html(autoresponder_status)}\n"
-        f"<i>{_html(autoresponder_greeting)}</i>\n\n"
         f"<b>Вечный онлайн:</b> {_html(online_247_status)}\n\n"
         f"<b>Автопрочтение:</b> {_html(auto_read_status)}"
     )
@@ -707,6 +660,7 @@ async def main():
     await SAVED.open()
     start_saved_service()
     await restore_saved_sessions()
+    await guard.start_guard()
     recovery_task = asyncio.create_task(session_recovery_loop())
 
     # Не блокируем старт polling на 45 секунд: финализатор работает отдельно.
@@ -716,6 +670,7 @@ async def main():
     try:
         await dp.start_polling(bot)
     finally:
+        await guard.stop_guard()
         SAVED.closing = True
         recovery_task.cancel()
         await asyncio.gather(recovery_task, return_exceptions=True)
