@@ -44,7 +44,7 @@ DANGEROUS_EXTENSIONS = frozenset("""
 .app .appimage .command .pkg .dmg .reg .inf .ins .isp .py .pyw .rb .pl .cgi
 """.split())
 MODES = {
-    "spam": ("🚯АнтиСпам", "Удаляет повторяющиеся сообщения пользователя в течение 2 минут, даже если между ними были другие сообщения."),
+    "spam": ("🚯АнтиСпам", "Удаляет второй одинаковый текст подряд. Если между повторами было другое сообщение, второй остаётся, а третий удаляется. Проверяет повторы за последние 2 минуты, включая сообщения администраторов."),
     "files": ("⚠️АнтиВирус", "Удаляет потенциально опасные исполняемые файлы и скрипты по расширению. Это фильтр файлов, а не проверка содержимого антивирусом."),
     "raid": ("📛 АнтиНакрутка", "Защищает от массовых входов. При 50 и более новых участниках за 60 секунд по окончании этой минуты блокирует всех участников волны."),
     "service": ("🧹Очистка вх/изм", "Убирает уведомления о входе и выходе участников, закреплении сообщений, изменении названия и фотографии группы."),
@@ -58,6 +58,9 @@ GROUP_LOCKS = {}
 MEMBER_PENDING = OrderedDict()
 ADMIN_CACHE = {}
 SPAM = OrderedDict()
+SPAM_LAST = OrderedDict()
+GLOBAL_USER_LOCKS = {}
+GLOBAL_UNBAN_RUNNING = set()
 REPORT_RATE = OrderedDict()
 REPORT_QUEUE = asyncio.Queue(maxsize=256)
 REPORT_QUEUED = set()
@@ -113,6 +116,7 @@ class GuardStore:
         self.global_bans = {}
         self.global_dirty = False
         self.global_due = 0.0
+        self.global_revision = 0
         self.remote_lock = asyncio.Lock()
         self.global_lock = asyncio.Lock()
 
@@ -201,6 +205,8 @@ class GuardStore:
         elif isinstance(local_global, dict) and local_global.get("format") == GLOBAL_FORMAT:
             self.global_bans = local_global.get("bans", {}) if isinstance(local_global.get("bans"), dict) else {}
 
+        chosen_global = local_global if local_global_dirty and isinstance(local_global, dict) else (remote_global or local_global or {})
+        self.global_revision = int(chosen_global.get("revision", 0) or 0)
         for gid, group in self.groups.items():
             await self.sql(self._write, gid, json.dumps(group, ensure_ascii=False), int(gid in self.dirty))
         await self.sql(self._write_meta, GLOBAL_META_KEY, json.dumps(self._global_payload(), ensure_ascii=False), int(self.global_dirty))
@@ -215,14 +221,19 @@ class GuardStore:
             self.db.execute("INSERT OR REPLACE INTO guard_meta VALUES(?,?,?)", (key, payload, dirty))
 
     def _global_payload(self):
-        return {"format": GLOBAL_FORMAT, "id": GLOBAL_STATE_ID, "bans": copy.deepcopy(self.global_bans), "updated": time.time()}
+        return {"format": GLOBAL_FORMAT, "id": GLOBAL_STATE_ID, "bans": copy.deepcopy(self.global_bans), "revision": self.global_revision, "updated": time.time()}
 
     async def save_global_bans(self, urgent=False):
+        self.global_revision += 1
         payload = self._global_payload()
         await self.sql(self._write_meta, GLOBAL_META_KEY, json.dumps(payload, ensure_ascii=False), 1)
         self.global_dirty = True
         self.global_due = time.monotonic()
         await self.flush_global_bans()
+
+    def _mark_global_clean(self, revision):
+        with self.db:
+            self.db.execute("UPDATE guard_meta SET dirty=0 WHERE key=? AND json_extract(payload, '$.revision')=?", (GLOBAL_META_KEY, revision))
 
     async def flush_global_bans(self):
         async with self.global_lock:
@@ -236,14 +247,17 @@ class GuardStore:
                 except asyncio.CancelledError:
                     await request
                     raise
-            if ok and snapshot["bans"] == self.global_bans:
-                await self.sql(self._write_meta, GLOBAL_META_KEY, json.dumps(snapshot, ensure_ascii=False), 0)
-                self.global_dirty = False
+            if ok:
+                await self.sql(self._mark_global_clean, snapshot["revision"])
+                if snapshot["revision"] == self.global_revision and snapshot["bans"] == self.global_bans:
+                    self.global_dirty = False
+                else:
+                    self.global_due = time.monotonic()
             else:
                 self.global_due = time.monotonic() + 10
             return ok
 
-    async def save(self, group, urgent=False):
+    async def save(self, group, urgent=False, defer_remote=False):
         group["revision"] = int(group.get("revision", 0)) + 1
         encoded = json.dumps(group, ensure_ascii=False, separators=(",", ":"))
         if len(encoded.encode()) > MAX_GROUP_BYTES:
@@ -253,8 +267,9 @@ class GuardStore:
         self.groups[gid] = group
         self.dirty.add(gid)
         self.first_dirty.setdefault(gid, time.monotonic())
-        self.due[gid] = time.monotonic()
-        await self.flush(gid)
+        self.due[gid] = min(self.first_dirty[gid] + 5, time.monotonic() + 2) if defer_remote else time.monotonic()
+        if not defer_remote:
+            await self.flush(gid)
 
     def _mark_clean(self, gid, revision):
         with self.db:
@@ -430,36 +445,95 @@ async def group_title_link(group):
 
 
 async def message_link(group, message_id, label="сообщение"):
-    """Build a clickable link to a reported message whenever Telegram exposes one."""
+    gid = int(group["id"])
+    username = group.get("username")
     try:
-        chat = await bot.get_chat(group["id"])
+        chat = await bot.get_chat(gid)
         username = getattr(chat, "username", None)
-        if username:
-            url = f"https://t.me/{username}/{int(message_id)}"
-        else:
-            raw = str(abs(int(group["id"])))
-            if raw.startswith("100") and len(raw) > 3:
-                url = f"https://t.me/c/{raw[3:]}/{int(message_id)}"
-            else:
-                url = f"tg://openmessage?chat_id={int(group['id'])}&message_id={int(message_id)}"
-        return f'<a href="{esc(url)}">{esc(label)}</a>'
-    except (TelegramBadRequest, TelegramForbiddenError, TypeError, ValueError):
-        return esc(label)
+    except (TelegramBadRequest, TelegramForbiddenError):
+        pass
+    if username:
+        url = f"https://t.me/{username}/{int(message_id)}"
+    else:
+        raw = str(abs(gid))
+        url = (f"https://t.me/c/{raw[3:]}/{int(message_id)}" if raw.startswith("100")
+               else f"tg://openmessage?chat_id={gid}&message_id={int(message_id)}")
+    return f'<a href="{html.escape(url, quote=True)}">{esc(label)}</a>'
+
+
+def reported_message_text(message):
+    text = getattr(message, "text", None) or getattr(message, "caption", None)
+    if text:
+        return clip(text, 4096)
+    for field, label in (("photo", "Фото"), ("video", "Видео"), ("document", "Файл"),
+                         ("sticker", "Стикер"), ("animation", "Анимация"), ("voice", "Голосовое сообщение"),
+                         ("video_note", "Видеосообщение"), ("audio", "Аудио"), ("poll", "Опрос")):
+        media = getattr(message, field, None)
+        if media:
+            suffix = getattr(media, "file_name", None) or getattr(media, "question", None) or ""
+            return clip(f"[{label}] {suffix}".strip(), 4096)
+    return "[Сообщение без текста]"
+
+
+async def reported_messages_html(group, item):
+    lines = []
+    for message in item.get("messages", [])[-3:]:
+        try:
+            mid = int(message["message_id"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        gid = int(message.get("group_id") or group["id"])
+        source_group = STORE.groups.get(gid) or {"id": gid, "title": message.get("group_title") or group.get("title", "Группа"), "username": message.get("group_username")}
+        body = clip(message.get("text") or f"Сообщение №{mid} (текст старой жалобы не сохранён)", 650)
+        lines.append("• " + await message_link(source_group, mid, body))
+    return "\n".join(lines) if lines else "<i>История старой жалобы не сохранена.</i>"
+
+
+def aggregate_user_reports(uid):
+    evidence = [(group, item) for group in STORE.groups.values()
+                if (item := group.get("reports", {}).get(str(int(uid))))]
+    if not evidence:
+        return None, None
+    evidence.sort(key=lambda row: float(row[1].get("updated", 0)), reverse=True)
+    group, latest = evidence[0]
+    result = copy.deepcopy(latest)
+    result["count"] = sum(int(item.get("count", 0)) for _, item in evidence)
+    reasons, messages = [], {}
+    for source_group, item in evidence:
+        reasons.extend(copy.deepcopy(report_reasons(item)))
+        for message in item.get("messages", []):
+            record = copy.deepcopy(message)
+            record.setdefault("group_id", source_group["id"])
+            record.setdefault("group_title", source_group.get("title", "Группа"))
+            record.setdefault("group_username", source_group.get("username"))
+            key = (record["group_id"], record.get("message_id"))
+            if key not in messages or float(record.get("at", 0)) >= float(messages[key].get("at", 0)):
+                messages[key] = record
+    result["reasons"] = sorted(reasons, key=lambda r: float(r.get("at", 0)))[-3:]
+    result["messages"] = sorted(messages.values(), key=lambda m: float(m.get("at", 0)))[-3:]
+    return group, result
 
 
 def global_reports_rows():
+    targets = {int(target) for group in STORE.groups.values() if group.get("active")
+               for target in group.get("reports", {}) if str(target) not in STORE.global_bans}
     rows = []
-    for group in STORE.groups.values():
-        if not group.get("active"):
-            continue
-        for target, item in group.get("reports", {}).items():
-            rows.append((group, int(target), item))
-    rows.sort(key=lambda row: row[2].get("updated", 0), reverse=True)
+    for target in targets:
+        group, item = aggregate_user_reports(target)
+        if item:
+            rows.append((group, target, item))
+    rows.sort(key=lambda row: float(row[2].get("updated", 0)), reverse=True)
     return rows
 
 
+def global_banned_rows():
+    rows = [(int(uid), entry) for uid, entry in STORE.global_bans.items() if not entry.get("unbanning")]
+    return sorted(rows, key=lambda row: float(row[1].get("updated", 0)), reverse=True)
+
+
 def is_global_banned(uid):
-    return str(int(uid)) in STORE.global_bans
+    entry = STORE.global_bans.get(str(int(uid)))
+    return bool(entry is not None and not entry.get("unbanning"))
 
 
 def global_ban_entry(uid):
@@ -499,7 +573,7 @@ async def global_ban_notice(group, uid, name, reasons):
 
 async def enforce_global_ban_in_group(group, uid, user=None, announce=True):
     entry = global_ban_entry(uid)
-    if not entry or not group or not group.get("active"):
+    if not entry or entry.get("unbanning") or not group or not group.get("active"):
         return False
     gid = group["id"]
     try:
@@ -512,7 +586,15 @@ async def enforce_global_ban_in_group(group, uid, user=None, announce=True):
         own = await bot.get_chat_member(gid, bot.id)
         if own.status != "administrator" or not getattr(own, "can_restrict_members", False):
             return False
+        if not is_global_banned(uid):
+            return False
         await bot.ban_chat_member(gid, int(uid), request_timeout=20)
+        if not is_global_banned(uid):
+            await bot.unban_chat_member(gid, int(uid), only_if_banned=True, request_timeout=20)
+            return False
+        entry = global_ban_entry(uid)
+        entry["banned_groups"] = sorted(set(entry.get("banned_groups", [])) | {gid})
+        await STORE.save_global_bans(urgent=True)
         if announce:
             name = entry.get("name") or (getattr(user, "full_name", None) if user else None) or member.user.full_name or "Пользователь"
             try:
@@ -526,46 +608,114 @@ async def enforce_global_ban_in_group(group, uid, user=None, announce=True):
         return False
 
 
+async def close_user_reports(uid):
+    for group in list(STORE.groups.values()):
+        if str(uid) in group.get("reports", {}):
+            async with lock_for(group["id"]):
+                group.get("reports", {}).pop(str(uid), None)
+                await STORE.save(group, urgent=True)
+
+
 async def global_ban_user(uid):
     uid = int(uid)
-    latest = None
-    for group, target, item in global_reports_rows():
-        if target == uid and (latest is None or item.get("updated", 0) > latest[1].get("updated", 0)):
-            latest = (group, item)
-    old = global_ban_entry(uid) or {}
-    name = (latest[1].get("name") if latest else None) or old.get("name") or "Пользователь"
-    username = (latest[1].get("username") if latest else None) or old.get("username")
-    reasons = _global_reasons_for(uid)
-    STORE.global_bans[str(uid)] = {
-        "name": clip(name, 100),
-        "username": username,
-        "reasons": reasons[:3],
-        "updated": time.time(),
-    }
-    await STORE.save_global_bans(urgent=True)
-    await STORE.flush_global_bans()
+    async with GLOBAL_USER_LOCKS.setdefault(uid, asyncio.Lock()):
+        group, item = aggregate_user_reports(uid)
+        old = global_ban_entry(uid) or {}
+        snapshot = copy.deepcopy(item or old.get("report") or {})
+        name = snapshot.get("name") or old.get("name") or "Пользователь"
+        username = snapshot.get("username") or old.get("username")
+        source = ({k: group.get(k) for k in ("id", "title", "username", "link")} if group else old.get("group"))
+        STORE.global_bans[str(uid)] = {
+            "name": clip(name, 100), "username": username,
+            "reasons": _global_reasons_for(uid), "report": snapshot,
+            "group": source, "updated": time.time(),
+            "banned_groups": list(old.get("banned_groups", [])),
+        }
+        await STORE.save_global_bans(urgent=True)
+        # Evidence is already in the ban archive; remove duplicate open cards now.
+        await close_user_reports(uid)
+        banned_count = 0
+        for group in list(STORE.groups.values()):
+            if not group.get("active"):
+                continue
+            try:
+                applied = await enforce_global_ban_in_group(group, uid, announce=True)
+            except TelegramRetryAfter as exc:
+                await asyncio.sleep(min(exc.retry_after, 60))
+                try:
+                    applied = await enforce_global_ban_in_group(group, uid, announce=True)
+                except TelegramRetryAfter:
+                    logging.warning("Global ban %s postponed in %s", uid, group["id"])
+                    continue
+            if applied:
+                banned_count += 1
+            await asyncio.sleep(0.05)
+        return banned_count
 
-    banned_count = 0
-    for group in list(STORE.groups.values()):
-        if not group.get("active"):
-            continue
+
+async def _complete_global_unban(uid):
+    entry = global_ban_entry(uid)
+    if not entry or not entry.get("unbanning"):
+        return 0
+    completed, failed = 0, []
+    retry_delay = 30
+    for gid in list(entry.get("unban_pending", [])):
         try:
-            applied = await enforce_global_ban_in_group(group, uid, announce=True)
+            await bot.unban_chat_member(int(gid), int(uid), only_if_banned=True, request_timeout=20)
+            completed += 1
+            entry["unban_pending"] = [g for g in entry.get("unban_pending", []) if int(g) != int(gid)]
+            await STORE.save_global_bans(urgent=True)
         except TelegramRetryAfter as exc:
-            await asyncio.sleep(min(exc.retry_after, 60))
-            applied = await enforce_global_ban_in_group(group, uid, announce=True)
-        if applied:
-            banned_count += 1
+            failed.append(int(gid))
+            retry_delay = max(retry_delay, exc.retry_after + 1)
+        except (TelegramBadRequest, TelegramForbiddenError):
+            failed.append(int(gid))
+            retry_delay = max(retry_delay, 300)
+        except Exception:
+            failed.append(int(gid))
         await asyncio.sleep(0.05)
+    if not failed:
+        STORE.global_bans.pop(str(uid), None)
+    else:
+        entry["unban_pending"] = failed
+        entry["retry_at"] = time.time() + retry_delay
+    await STORE.save_global_bans(urgent=True)
+    return completed
 
-    # Once the decision is global, close this user's pending reports everywhere.
-    for group in list(STORE.groups.values()):
-        if str(uid) not in group.get("reports", {}):
-            continue
-        async with lock_for(group["id"]):
-            group.get("reports", {}).pop(str(uid), None)
-            await STORE.save(group, urgent=True)
-    return banned_count
+
+async def global_unban_user(uid):
+    uid = int(uid)
+    async with GLOBAL_USER_LOCKS.setdefault(uid, asyncio.Lock()):
+        entry = global_ban_entry(uid)
+        if not entry:
+            raise ValueError("Глобальный бан уже снят.")
+        if not entry.get("unbanning"):
+            # Global unban covers every managed chat, including a ban applied just
+            # before a restart. only_if_banned leaves current members in place.
+            groups = set(entry.get("banned_groups", []))
+            groups.update(g["id"] for g in STORE.groups.values() if g.get("active"))
+            entry.update(unbanning=True, unban_pending=sorted(groups), retry_at=0)
+            await STORE.save_global_bans(urgent=True)
+        await close_user_reports(uid)
+        return await _complete_global_unban(uid)
+
+
+async def _retry_global_unban(uid):
+    try:
+        async with GLOBAL_USER_LOCKS.setdefault(uid, asyncio.Lock()):
+            await _complete_global_unban(uid)
+    finally:
+        GLOBAL_UNBAN_RUNNING.discard(uid)
+
+
+async def global_unban_worker():
+    while True:
+        for uid_text, entry in list(STORE.global_bans.items()):
+            uid = int(uid_text)
+            if entry.get("unbanning") and float(entry.get("retry_at", 0)) <= time.time() and uid not in GLOBAL_UNBAN_RUNNING:
+                GLOBAL_UNBAN_RUNNING.add(uid)
+                spawn(_retry_global_unban(uid))
+        await asyncio.sleep(2)
 
 
 async def visible_groups(uid):
@@ -759,14 +909,13 @@ async def report_text(group, target, item, notification=False):
     username = "@" + item["username"] if item.get("username") else "Юзернейм не указан"
     reasons = "\n".join("• " + esc(clip(r["text"], 240)) for r in reversed(report_reasons(item)))
     group_link = await group_title_link(group)
-    messages = item.get("messages", [])
-    latest_message = await message_link(group, messages[-1]["message_id"]) if messages else "Нет ссылки"
+    messages_text = await reported_messages_html(group, item)
     return (f"<b>{'📣 Новая жалоба' if notification else '📣 Жалобы на участника'}</b>\n"
             f"👥 <b>{group_link}</b>\n\n"
             f"<b>Пользователь:</b> {user_link(target, item['name'])}\n"
             f"<b>Юзернейм:</b> {user_link(target, username) if item.get('username') else esc(username)}\n<b>Число жалоб:</b> {item['count']}\n"
             f"<b>Жалоба:</b> {stamp} (UTC +5)\n"
-            f"<b>Сообщение:</b> {latest_message}\n\n"
+            f"<b>Последние сообщения:</b>\n{messages_text}\n\n"
             f"<b>Последние причины:</b>\n{reasons or 'Причины не указаны'}")
 
 
@@ -863,6 +1012,8 @@ async def guard_callback(callback: types.CallbackQuery):
                 if mode not in MODES:
                     raise ValueError("Неизвестный режим")
                 group["settings"][mode] = not group["settings"].get(mode, False)
+                if mode == "spam":
+                    reset_spam(gid)
                 if mode == "raid" and not group["settings"][mode]:
                     group.pop("raid_window", None)
                     group.pop("raid_pending", None)
@@ -952,7 +1103,9 @@ def dangerous_file(message):
 
 
 def message_signature(message):
-    text = " ".join((message.text or message.caption or "").split()).casefold()
+    raw = unicodedata.normalize("NFKC", message.text or message.caption or "")
+    raw = "".join(c for c in raw if unicodedata.category(c) != "Cf")
+    text = " ".join(raw.split()).casefold()
     media_id = ""
     for field in ("document", "sticker", "video", "animation", "audio", "voice", "video_note"):
         media = getattr(message, field, None)
@@ -966,22 +1119,33 @@ def message_signature(message):
     return hashlib.sha256((text + "\0" + media_id).encode()).hexdigest()
 
 
+def reset_spam(gid):
+    SPAM_LAST.pop(gid, None)
+    for key in list(SPAM):
+        if key[0] == gid:
+            SPAM.pop(key, None)
+
+
 def spam_duplicate(gid, uid, mid, signature, now=None):
+    now = time.monotonic() if now is None else float(now)
+    previous = SPAM_LAST.get(gid)
+    if previous and previous[2] == mid:
+        return False
+    SPAM_LAST[gid] = (uid, signature, mid, now)
+    SPAM_LAST.move_to_end(gid)
+    while len(SPAM_LAST) > 2000:
+        SPAM_LAST.popitem(last=False)
     if signature is None:
         return False
-    now = time.monotonic() if now is None else now
     key = (gid, uid, signature)
-    entry = SPAM.get(key)
-    if not entry or now - entry[0] >= SPAM_WINDOW:
-        entry = (now, 0, -1)
-    if entry[2] == mid:
-        return False
-    count = entry[1] + 1
-    SPAM[key] = (entry[0], count, mid)
+    timestamps = [t for t in SPAM.get(key, []) if now - t < SPAM_WINDOW]
+    timestamps.append(now)
+    SPAM[key] = timestamps[-3:]
     SPAM.move_to_end(key)
     while len(SPAM) > 10000:
         SPAM.popitem(last=False)
-    return count >= 2
+    consecutive = bool(previous and previous[0] == uid and previous[1] == signature and now - previous[3] < SPAM_WINDOW)
+    return len(timestamps) >= 3 or (len(timestamps) >= 2 and consecutive)
 
 
 UNITS = {
@@ -1164,12 +1328,34 @@ async def receive_report(message, group, reason):
     item["reasons"] = report_reasons(item)
     if reason.strip():
         item["reasons"] = (item["reasons"] + [{"text": clip(reason.strip(), 240), "at": now}])[-3:]
-    item["messages"] = (item["messages"] + [{"message_id": int(source.message_id), "at": now}])[-3:]
+    record = {"message_id": int(source.message_id), "text": reported_message_text(source), "at": now,
+              "group_id": group["id"], "group_title": group["title"], "group_username": group.get("username")}
+    item["messages"] = ([m for m in item["messages"] if m.get("message_id") != record["message_id"]] + [record])[-3:]
     group["dedup"][fingerprint] = now
     if len(group["dedup"]) > 2000:
         oldest = sorted(group["dedup"], key=group["dedup"].get)[:len(group["dedup"])-2000]
         for entry in oldest:
             group["dedup"].pop(entry, None)
+    banned_entry = global_ban_entry(target.id)
+    if banned_entry and not banned_entry.get("unbanning"):
+        # A complaint that races with the global decision belongs in its archive.
+        archive = copy.deepcopy(banned_entry.get("report") or {})
+        archive.update(name=item["name"], username=item.get("username"), updated=now,
+                       count=int(archive.get("count", 0)) + 1)
+        archive["reasons"] = report_reasons(archive)
+        if reason.strip():
+            archive["reasons"] = (archive["reasons"] + [{"text": clip(reason.strip(), 240), "at": now}])[-3:]
+        existing = [m for m in archive.get("messages", [])
+                    if (m.get("group_id"), m.get("message_id")) != (group["id"], record["message_id"])]
+        archive["messages"] = (existing + [copy.deepcopy(record)])[-3:]
+        banned_entry.update(name=item["name"], username=item.get("username"), report=archive,
+                            group={k: group.get(k) for k in ("id", "title", "username", "link")},
+                            reasons=[r["text"] for r in report_reasons(archive)])
+        await STORE.save_global_bans(urgent=True)
+        group["reports"].pop(str(target.id), None)
+        await STORE.save(group, urgent=True)
+        await group_reply(message, "📨 Жалоба сохранена в архиве глобального бана.")
+        return
     await STORE.save(group, urgent=True)
     notification_key = (group["id"], target.id)
     if notification_key not in REPORT_QUEUED:
@@ -1230,6 +1416,7 @@ async def discover_group(chat, added_by=None):
         STORE.groups[gid] = group
     group["active"] = True
     group["title"] = clip(chat.title or str(gid), 128)
+    group["username"] = getattr(chat, "username", None)
     if added_by and not group.get("added_by"):
         group["added_by"] = added_by
     try:
@@ -1459,6 +1646,14 @@ async def migrate_group(old_id, new_id, title):
     await refresh_open_lists(copied)
 
 
+async def touch_group_activity(group, stamp):
+    stamp = float(stamp)
+    if stamp <= float(group.get("last_activity_at", 0)):
+        return
+    group["last_activity_at"] = stamp
+    await STORE.save(group, defer_remote=True)
+
+
 @dp.message(F.chat.type.in_(GROUP_TYPES))
 async def group_message(message: types.Message):
     if not STORE.ready:
@@ -1481,6 +1676,7 @@ async def group_message(message: types.Message):
             if group["title"] != message.chat.title:
                 group["title"] = clip(message.chat.title, 128)
                 await STORE.save(group)
+            await touch_group_activity(group, message.date.timestamp())
             remember_member(gid, message.from_user)
             if message.from_user and not message.from_user.is_bot and is_global_banned(message.from_user.id):
                 if await enforce_global_ban_in_group(group, message.from_user.id, message.from_user, announce=True):
@@ -1493,6 +1689,7 @@ async def group_message(message: types.Message):
                 if not joined.is_bot and is_global_banned(joined.id):
                     spawn(enforce_global_ban_in_group(group, joined.id, joined, announce=True))
             if any(getattr(message, field, None) for field in SERVICE_FIELDS):
+                spam_duplicate(gid, 0, message.message_id, None)
                 if group["settings"].get("service"):
                     await bot.delete_message(gid, message.message_id)
                 return
@@ -1506,10 +1703,8 @@ async def group_message(message: types.Message):
                 await bot.delete_message(gid, message.message_id)
                 return
             if group["settings"].get("spam") and duplicate and message.from_user and not message.from_user.is_bot and not message.sender_chat:
-                # Administrators are exempt from text-spam checks; the file filter still applies.
-                admins = await admin_ids(gid)
-                if uid not in admins:
-                    await bot.delete_message(gid, message.message_id)
+                # The same duplicate rule applies to ordinary users and administrators.
+                await bot.delete_message(gid, message.message_id)
     except TelegramRetryAfter as exc:
         logging.warning("Guard rate limit: %s seconds", exc.retry_after)
     except (TelegramBadRequest, TelegramForbiddenError):
@@ -1568,6 +1763,7 @@ async def start_guard():
     spawn(writer_loop())
     spawn(report_notification_worker())
     spawn(raid_worker())
+    spawn(global_unban_worker())
     for gid in STORE.groups:
         schedule_welcome(gid)
 
@@ -1580,6 +1776,7 @@ async def stop_guard():
     TASKS.clear()
     WELCOME_TASKS.clear()
     RAID_RUNNING.clear()
+    GLOBAL_UNBAN_RUNNING.clear()
     await STORE.flush_members()
     if STORE.global_dirty:
         try:

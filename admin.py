@@ -220,8 +220,8 @@ async def admin_entry_view(callback: types.CallbackQuery):
         pass
 
 
-def _admin_page_nav(builder, page, pages, prefix):
-    if pages <= 1:
+def _admin_page_nav(builder, page, pages, prefix, total=None):
+    if pages <= 1 and (total is None or total < 5):
         return
     buttons = []
     if page > 1:
@@ -235,7 +235,8 @@ def _admin_page_nav(builder, page, pages, prefix):
 def _active_guard_groups():
     return sorted(
         [group for group in guard.STORE.groups.values() if group.get("active")],
-        key=lambda group: ((group.get("title") or "").casefold(), int(group.get("id", 0))),
+        key=lambda group: (float(group.get("last_activity_at") or group.get("joined_at") or 0), int(group.get("id", 0))),
+        reverse=True,
     )
 
 
@@ -248,7 +249,7 @@ async def _render_admin_public_groups(user_id: int, page: int = 1):
     for group in groups[(page - 1) * per_page:page * per_page]:
         builder.button(text=guard.clip(group.get("title") or str(group["id"]), 55), callback_data=f"admin_public_group_{group['id']}")
     builder.adjust(1)
-    _admin_page_nav(builder, page, pages, "admin_public_groups_")
+    _admin_page_nav(builder, page, pages, "admin_public_groups_", len(groups))
     builder.row(types.InlineKeyboardButton(text="Назад в меню ⬅️", callback_data="admin_menu"))
     text = "<b>Глобальные группы:</b>"
     if not groups:
@@ -289,22 +290,20 @@ async def _render_admin_public_group(user_id: int, gid: int):
 
 
 async def _report_detail_text(group, target: int, item: dict):
-    group_link = await guard.group_title_link(group)
+    if group:
+        group_link = await guard.group_title_link(group)
+        heading = f"<b>Жалобы из чата {group_link}:</b>"
+    else:
+        heading = "<b>Глобальная жалоба</b>"
     username = f"@{item.get('username')}" if item.get("username") else "Не указан"
-    message_links = []
-    for index, message in enumerate(item.get("messages", [])[-3:], start=1):
-        try:
-            message_id = int(message.get("message_id"))
-        except (TypeError, ValueError):
-            continue
-        message_links.append(await guard.message_link(group, message_id, f"сообщение {index}"))
-    reasons = [guard.clip(reason.get("text") or "Без описания", 240) for reason in guard.report_reasons(item)]
+    messages_text = await guard.reported_messages_html(group or {"id": 0, "title": "Группа"}, item)
+    reasons = [guard.clip(reason.get("text") or "", 240) for reason in guard.report_reasons(item)]
     return (
-        f"<b>Жалобы из чата {group_link}:</b>\n\n"
-        f"{guard.user_link(target, item.get('name') or 'Пользователь')}\n"
-        f"{guard.user_link(target, username) if item.get('username') else _html(username)}\n\n"
-        f"<b>Сообщений:</b> {', '.join(message_links) if message_links else 'Нет ссылок'}\n\n"
-        f"<b>Причины:</b> {', '.join(_html(reason) for reason in reasons) if reasons else 'Причины не указаны'}"
+        heading + "\n\n"
+        + guard.user_link(target, item.get("name") or "Пользователь") + "\n"
+        + (guard.user_link(target, username) if item.get("username") else _html(username)) + "\n\n"
+        + "<b>Последние сообщения:</b>\n" + messages_text + "\n\n"
+        + "<b>Причины:</b> " + (", ".join(_html(reason) for reason in reasons) if reasons else "Причины не указаны")
     )
 
 
@@ -331,38 +330,88 @@ async def _render_admin_public_reports(user_id: int, gid: int, page: int = 1):
 
 async def _render_admin_report_detail(user_id: int, gid: int, target: int, source: str):
     group = guard.STORE.groups.get(int(gid))
-    if not group:
-        raise ValueError("Группа больше недоступна.")
-    item = group.get("reports", {}).get(str(int(target)))
+    if source == "global":
+        if str(int(target)) in guard.STORE.global_bans:
+            await _render_admin_banned_detail(user_id, int(target))
+            return
+        group, item = guard.aggregate_user_reports(target)
+    else:
+        item = group.get("reports", {}).get(str(int(target))) if group else None
     if not item:
         raise ValueError("Жалоба уже обработана.")
-    text = await _report_detail_text(group, int(target), item)
     builder = InlineKeyboardBuilder()
     if source == "global":
         builder.button(text="Глобально забанить", callback_data=f"admin_gban:g:{int(target)}")
-        builder.button(text="Игнорить", callback_data="admin_global_reports_1")
+        builder.button(text="Игнорить", callback_data="admin_global_new_1")
+        builder.button(text="Назад в меню ⬅️", callback_data="admin_global_new_1")
     else:
         builder.button(text="Глобально забанить", callback_data=f"admin_gban:p:{int(gid)}:{int(target)}")
         builder.button(text="Игнорить", callback_data=f"admin_public_reports_{int(gid)}_1")
+        builder.button(text="Назад в меню ⬅️", callback_data=f"admin_public_reports_{int(gid)}_1")
     builder.adjust(1)
-    await userbot.edit_or_send(user_id, text, reply_markup=builder.as_markup(), parse_mode="HTML")
+    await userbot.edit_or_send(user_id, await _report_detail_text(group, int(target), item), reply_markup=builder.as_markup(), parse_mode="HTML")
 
 
 async def _render_admin_global_reports(user_id: int, page: int = 1):
+    builder = InlineKeyboardBuilder()
+    builder.row(types.InlineKeyboardButton(text="Новые", callback_data="admin_global_new_1"),
+                types.InlineKeyboardButton(text="Забаненные", callback_data="admin_global_banned_1"))
+    builder.row(types.InlineKeyboardButton(text="Назад в меню ⬅️", callback_data="admin_menu"))
+    await userbot.edit_or_send(user_id, "<b>🌐 Глобальные жалобы</b>\n<i>Выберите список пользователей.</i>",
+                              reply_markup=builder.as_markup(), parse_mode="HTML")
+
+
+async def _render_admin_new_reports(user_id: int, page: int = 1):
     rows = guard.global_reports_rows()
-    per_page = 5
-    pages = max(1, (len(rows) + per_page - 1) // per_page)
+    pages = max(1, (len(rows) + 4) // 5)
     page = max(1, min(page, pages))
     builder = InlineKeyboardBuilder()
-    for group, target, item in rows[(page - 1) * per_page:page * per_page]:
+    for group, target, item in rows[(page - 1) * 5:page * 5]:
         builder.button(text=guard.clip(item.get("name") or "Пользователь", 50), callback_data=f"admin_global_report_{group['id']}_{target}")
     builder.adjust(1)
-    _admin_page_nav(builder, page, pages, "admin_global_reports_")
-    builder.row(types.InlineKeyboardButton(text="Назад в меню ⬅️", callback_data="admin_menu"))
-    text = "<b>Глобальные жалобы:</b>"
+    _admin_page_nav(builder, page, pages, "admin_global_new_", len(rows))
+    builder.row(types.InlineKeyboardButton(text="Назад в меню ⬅️", callback_data="admin_global_reports"))
+    text = "<b>🆕 Новые жалобы</b>"
     if not rows:
-        text += "\n\nОткрытых жалоб нет."
+        text += "\n\n<i>Открытых жалоб нет.</i>"
     await userbot.edit_or_send(user_id, text, reply_markup=builder.as_markup(), parse_mode="HTML")
+
+
+async def _render_admin_banned_list(user_id: int, page: int = 1):
+    rows = guard.global_banned_rows()
+    pages = max(1, (len(rows) + 4) // 5)
+    page = max(1, min(page, pages))
+    builder = InlineKeyboardBuilder()
+    for uid, entry in rows[(page - 1) * 5:page * 5]:
+        builder.button(text=guard.clip(entry.get("name") or "Пользователь", 50), callback_data=f"admin_banned_user_{uid}")
+    builder.adjust(1)
+    _admin_page_nav(builder, page, pages, "admin_global_banned_", len(rows))
+    builder.row(types.InlineKeyboardButton(text="Назад в меню ⬅️", callback_data="admin_global_reports"))
+    text = "<b>🚫 Забаненные</b>"
+    if not rows:
+        text += "\n\n<i>Глобально забаненных пользователей нет.</i>"
+    await userbot.edit_or_send(user_id, text, reply_markup=builder.as_markup(), parse_mode="HTML")
+
+
+async def _render_admin_banned_detail(user_id: int, target: int):
+    entry = guard.global_ban_entry(target)
+    if not entry or entry.get("unbanning"):
+        raise ValueError("Глобальный бан уже снят.")
+    item = dict(entry.get("report") or {})
+    item.setdefault("name", entry.get("name") or "Пользователь")
+    item.setdefault("username", entry.get("username"))
+    item.setdefault("updated", entry.get("updated", 0))
+    item.setdefault("messages", [])
+    item.setdefault("reasons", [{"text": r, "at": entry.get("updated", 0)} for r in entry.get("reasons", [])])
+    group = entry.get("group")
+    if group and group.get("id") is not None:
+        group = guard.STORE.groups.get(int(group["id"])) or group
+    builder = InlineKeyboardBuilder()
+    builder.button(text="Глобально разбанить", callback_data=f"admin_gunban:{target}")
+    builder.button(text="Игнорить", callback_data="admin_global_banned_1")
+    builder.button(text="Назад в меню ⬅️", callback_data="admin_global_banned_1")
+    builder.adjust(1)
+    await userbot.edit_or_send(user_id, await _report_detail_text(group, target, item), reply_markup=builder.as_markup(), parse_mode="HTML")
 
 
 @dp.callback_query(F.data == "admin_public_groups")
@@ -464,12 +513,58 @@ async def admin_global_ban(callback: types.CallbackQuery):
         if mode == "p" and return_gid in guard.STORE.groups:
             await _render_admin_public_reports(callback.from_user.id, return_gid, 1)
         else:
-            await _render_admin_global_reports(callback.from_user.id, 1)
+            await _render_admin_new_reports(callback.from_user.id, 1)
     except (ValueError, IndexError, TelegramBadRequest) as exc:
         try:
             await callback.answer(str(exc) or "Не удалось применить глобальный бан.", show_alert=True)
         except TelegramBadRequest:
             pass
+
+
+@dp.callback_query(F.data.startswith("admin_global_new_"))
+async def admin_global_new(callback: types.CallbackQuery):
+    if not userbot.is_admin(callback.from_user):
+        return
+    try:
+        await callback.answer()
+        await _render_admin_new_reports(callback.from_user.id, int(callback.data.rsplit("_", 1)[1]))
+    except (ValueError, TelegramBadRequest):
+        await callback.answer("Список жалоб недоступен.", show_alert=True)
+
+
+@dp.callback_query(F.data.startswith("admin_global_banned_"))
+async def admin_global_banned(callback: types.CallbackQuery):
+    if not userbot.is_admin(callback.from_user):
+        return
+    try:
+        await callback.answer()
+        await _render_admin_banned_list(callback.from_user.id, int(callback.data.rsplit("_", 1)[1]))
+    except (ValueError, TelegramBadRequest):
+        await callback.answer("Список забаненных недоступен.", show_alert=True)
+
+
+@dp.callback_query(F.data.startswith("admin_banned_user_"))
+async def admin_banned_user(callback: types.CallbackQuery):
+    if not userbot.is_admin(callback.from_user):
+        return
+    try:
+        await _render_admin_banned_detail(callback.from_user.id, int(callback.data.rsplit("_", 1)[1]))
+        await callback.answer()
+    except (ValueError, TelegramBadRequest) as exc:
+        await callback.answer(str(exc) or "Карточка недоступна.", show_alert=True)
+
+
+@dp.callback_query(F.data.startswith("admin_gunban:"))
+async def admin_global_unban(callback: types.CallbackQuery):
+    if not userbot.is_admin(callback.from_user):
+        return
+    try:
+        target = int(callback.data.split(":", 1)[1])
+        await callback.answer("Глобальный разбан…", cache_time=0)
+        await guard.global_unban_user(target)
+        await _render_admin_banned_list(callback.from_user.id, 1)
+    except (ValueError, TelegramBadRequest) as exc:
+        await callback.answer(str(exc) or "Не удалось снять глобальный бан.", show_alert=True)
 
 
 async def refresh_admin_user_snapshot(user_id: int, include_devices: bool = False):
