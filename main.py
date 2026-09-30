@@ -51,6 +51,37 @@ from userbot import (
 ADMIN_ID = userbot.ADMIN_ID
 
 
+# userbot.py owns the root menu. Inject the third Tools button only into a markup
+# that clearly contains both UserBot and Group Guard, so other keyboards stay untouched.
+_ORIGINAL_EDIT_OR_SEND = userbot.edit_or_send
+
+
+def _root_markup_with_tools(reply_markup):
+    if not isinstance(reply_markup, types.InlineKeyboardMarkup):
+        return reply_markup
+    rows = [list(row) for row in reply_markup.inline_keyboard]
+    buttons = [button for row in rows for button in row]
+    callbacks = [(button.callback_data or "").casefold() for button in buttons]
+    texts = [(button.text or "").casefold() for button in buttons]
+    if "tools" in callbacks:
+        return reply_markup
+    has_guard = any(cb == "guard" or cb.startswith("gg:") for cb in callbacks) or any("group guard" in text for text in texts)
+    has_userbot = any(cb.startswith("userbot") or cb.startswith("ub:") for cb in callbacks) or any("userbot" in text or "юзербот" in text for text in texts)
+    if not (has_guard and has_userbot):
+        return reply_markup
+    rows.append([types.InlineKeyboardButton(text="⛓️‍💥tools", callback_data="tools")])
+    return types.InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def _edit_or_send_with_tools(*args, **kwargs):
+    if "reply_markup" in kwargs:
+        kwargs["reply_markup"] = _root_markup_with_tools(kwargs.get("reply_markup"))
+    return await _ORIGINAL_EDIT_OR_SEND(*args, **kwargs)
+
+
+userbot.edit_or_send = _edit_or_send_with_tools
+
+
 def _html(value):
     return html.escape(str(value), quote=False)
 
@@ -70,7 +101,7 @@ def build_admin_menu_markup():
     builder.button(text="Перезапуск сервера ♻️", callback_data="admin_restart_server")
     builder.button(text="Активные 🟢", callback_data="admin_users_1")
     builder.button(text="Не-входящие 🔴", callback_data="admin_entries_1")
-    builder.button(text="Группы пабликов 🗂", callback_data="admin_public_groups")
+    builder.button(text="Глобальные паблики 🗂", callback_data="admin_public_groups")
     builder.button(text="Глобальные жалобы 🌐", callback_data="admin_global_reports")
     builder.button(text="Назад в главное меню 🏠", callback_data="root_menu")
     builder.adjust(1)
@@ -115,6 +146,11 @@ async def admin_menu(callback: types.CallbackQuery):
         await callback.answer()
     except Exception:
         pass
+
+
+@dp.callback_query(F.data == "tools")
+async def tools_placeholder(callback: types.CallbackQuery):
+    await callback.answer("⛓️‍💥 Tools пока в разработке 🛠", show_alert=True, cache_time=0)
 
 
 @dp.callback_query(F.data.in_(["admin_server_stats", "admin_server_stats_refresh"]))
@@ -162,13 +198,18 @@ async def admin_entries_list(callback: types.CallbackQuery):
     except (ValueError, TypeError):
         page = 1
 
-    entries = []
+    entries_by_id = {}
     for uid, cfg in MEMORY_DB["config"].items():
         if cfg.get("logged_in", False):
             continue
         if not cfg.get("last_entry_at") and not cfg.get("last_entry_ts"):
             continue
-        entries.append((uid, cfg))
+        try:
+            normalized_uid = str(int(uid))
+        except (TypeError, ValueError):
+            normalized_uid = str(uid)
+        entries_by_id[normalized_uid] = (normalized_uid, cfg)
+    entries = list(entries_by_id.values())
 
     entries.sort(
         key=lambda item: userbot.entry_time_text(item[1])[6:10]
@@ -190,13 +231,14 @@ async def admin_entries_list(callback: types.CallbackQuery):
         builder.button(text=f"👤 {first_name}", callback_data=f"admin_entry_{uid}")
     builder.adjust(1)
 
-    nav_buttons = []
-    if page > 1:
-        nav_buttons.append(types.InlineKeyboardButton(text="⬅️ Назад", callback_data=f"admin_entries_{page-1}"))
-    nav_buttons.append(types.InlineKeyboardButton(text=f"📖 {page}/{total_pages}", callback_data="ignore"))
-    if page < total_pages:
-        nav_buttons.append(types.InlineKeyboardButton(text="Вперед ➡️", callback_data=f"admin_entries_{page+1}"))
-    builder.row(*nav_buttons)
+    if total_pages > 1:
+        nav_buttons = []
+        if page > 1:
+            nav_buttons.append(types.InlineKeyboardButton(text="⬅️ Назад", callback_data=f"admin_entries_{page-1}"))
+        nav_buttons.append(types.InlineKeyboardButton(text=f"📖 {page}/{total_pages}", callback_data="ignore"))
+        if page < total_pages:
+            nav_buttons.append(types.InlineKeyboardButton(text="Вперед ➡️", callback_data=f"admin_entries_{page+1}"))
+        builder.row(*nav_buttons)
     builder.button(text="⬅️ В админ меню", callback_data="admin_users_back")
 
     await userbot.edit_or_send(
@@ -244,12 +286,256 @@ async def admin_entry_view(callback: types.CallbackQuery):
         pass
 
 
-@dp.callback_query(F.data.in_({"admin_public_groups", "admin_global_reports"}))
-async def admin_future_section(callback: types.CallbackQuery):
-    if userbot.is_admin(callback.from_user):
-        await callback.answer("Функция ещё в разработке 🛠", cache_time=0)
+def _admin_page_nav(builder, page, pages, prefix):
+    if pages <= 1:
+        return
+    buttons = []
+    if page > 1:
+        buttons.append(types.InlineKeyboardButton(text="⬅️", callback_data=f"{prefix}{page-1}"))
+    buttons.append(types.InlineKeyboardButton(text=f"{page}/{pages}", callback_data="ignore"))
+    if page < pages:
+        buttons.append(types.InlineKeyboardButton(text="➡️", callback_data=f"{prefix}{page+1}"))
+    builder.row(*buttons)
+
+
+def _active_guard_groups():
+    return sorted(
+        [group for group in guard.STORE.groups.values() if group.get("active")],
+        key=lambda group: ((group.get("title") or "").casefold(), int(group.get("id", 0))),
+    )
+
+
+async def _render_admin_public_groups(user_id: int, page: int = 1):
+    groups = _active_guard_groups()
+    per_page = 5
+    pages = max(1, (len(groups) + per_page - 1) // per_page)
+    page = max(1, min(page, pages))
+    builder = InlineKeyboardBuilder()
+    for group in groups[(page - 1) * per_page:page * per_page]:
+        builder.button(text=guard.clip(group.get("title") or str(group["id"]), 55), callback_data=f"admin_public_group_{group['id']}")
+    builder.adjust(1)
+    _admin_page_nav(builder, page, pages, "admin_public_groups_")
+    builder.button(text="Назад в меню ⬅️", callback_data="admin_menu")
+    text = "<b>Глобальные группы:</b>"
+    if not groups:
+        text += "\n\nГрупп пока нет."
+    await userbot.edit_or_send(user_id, text, reply_markup=builder.as_markup(), parse_mode="HTML")
+
+
+async def _render_admin_public_group(user_id: int, gid: int):
+    group = guard.STORE.groups.get(int(gid))
+    if not group or not group.get("active"):
+        raise ValueError("Группа больше недоступна.")
+    title = await guard.group_title_link(group)
+    try:
+        admins = await guard.admin_ids(group["id"], force=True)
+        count = await bot.get_chat_member_count(group["id"])
+        group["member_count"] = count
+    except Exception:
+        admins = {}
+        count = group.get("member_count") or "?"
+    admin_links = [guard.user_link(member.user.id, member.user.full_name) for member in admins.values() if not member.user.is_bot]
+    settings = group.get("settings", {})
+    protection_active = any(settings.get(mode) for mode in ("spam", "files", "service"))
+    text = (
+        f"<b>{title}</b>\n\n"
+        f"<b>Участники:</b> {count}\n\n"
+        f"<b>Админы:</b> {', '.join(admin_links) if admin_links else 'Нет данных'}\n\n"
+        f"<b>Защита группы</b> - {'активна' if protection_active else 'неактивна'}\n\n"
+        f"<b>АнтиСпам</b> - {'вкл' if settings.get('spam') else 'выкл'}\n"
+        f"<b>АнтиВирус</b> - {'вкл' if settings.get('files') else 'выкл'}\n"
+        f"<b>АнтиНакрутка</b> - выкл\n"
+        f"<b>Очистка вх/изм</b> - {'вкл' if settings.get('service') else 'выкл'}"
+    )
+    builder = InlineKeyboardBuilder()
+    builder.button(text="Жалобы", callback_data=f"admin_public_reports_{group['id']}_1")
+    builder.button(text="Назад в меню ⬅️", callback_data="admin_public_groups_1")
+    builder.adjust(1)
+    await userbot.edit_or_send(user_id, text, reply_markup=builder.as_markup(), parse_mode="HTML")
+
+
+async def _report_detail_text(group, target: int, item: dict):
+    group_link = await guard.group_title_link(group)
+    username = f"@{item.get('username')}" if item.get("username") else "Не указан"
+    message_links = []
+    for index, message in enumerate(item.get("messages", [])[-3:], start=1):
+        try:
+            message_id = int(message.get("message_id"))
+        except (TypeError, ValueError):
+            continue
+        message_links.append(await guard.message_link(group, message_id, f"сообщение {index}"))
+    reasons = [guard.clip(reason.get("text") or "Без описания", 240) for reason in item.get("reasons", [])[-3:]]
+    return (
+        f"<b>Жалобы из чата {group_link}:</b>\n\n"
+        f"{guard.user_link(target, item.get('name') or 'Пользователь')}\n"
+        f"{_html(username)}\n\n"
+        f"<b>Сообщений:</b> {', '.join(message_links) if message_links else 'Нет ссылок'}\n\n"
+        f"<b>Причины:</b> {', '.join(_html(reason) for reason in reasons) if reasons else 'Без описания'}"
+    )
+
+
+async def _render_admin_public_reports(user_id: int, gid: int, page: int = 1):
+    group = guard.STORE.groups.get(int(gid))
+    if not group or not group.get("active"):
+        raise ValueError("Группа больше недоступна.")
+    rows = sorted(group.get("reports", {}).items(), key=lambda row: row[1].get("updated", 0), reverse=True)
+    per_page = 5
+    pages = max(1, (len(rows) + per_page - 1) // per_page)
+    page = max(1, min(page, pages))
+    builder = InlineKeyboardBuilder()
+    for target, item in rows[(page - 1) * per_page:page * per_page]:
+        builder.button(text=guard.clip(item.get("name") or "Пользователь", 50), callback_data=f"admin_public_report_{gid}_{target}")
+    builder.adjust(1)
+    _admin_page_nav(builder, page, pages, f"admin_public_reports_{gid}_")
+    builder.button(text="Назад в меню ⬅️", callback_data=f"admin_public_group_{gid}")
+    title = await guard.group_title_link(group)
+    text = f"<b>Жалобы из чата {title}:</b>"
+    if not rows:
+        text += "\n\nОткрытых жалоб нет."
+    await userbot.edit_or_send(user_id, text, reply_markup=builder.as_markup(), parse_mode="HTML")
+
+
+async def _render_admin_report_detail(user_id: int, gid: int, target: int, source: str):
+    group = guard.STORE.groups.get(int(gid))
+    if not group:
+        raise ValueError("Группа больше недоступна.")
+    item = group.get("reports", {}).get(str(int(target)))
+    if not item:
+        raise ValueError("Жалоба уже обработана.")
+    text = await _report_detail_text(group, int(target), item)
+    builder = InlineKeyboardBuilder()
+    if source == "global":
+        builder.button(text="Глобально забанить", callback_data=f"admin_gban:g:{int(target)}")
+        builder.button(text="Игнорить", callback_data="admin_global_reports_1")
     else:
-        await callback.answer("Нет доступа", show_alert=True)
+        builder.button(text="Глобально забанить", callback_data=f"admin_gban:p:{int(gid)}:{int(target)}")
+        builder.button(text="Игнорить", callback_data=f"admin_public_reports_{int(gid)}_1")
+    builder.adjust(1)
+    await userbot.edit_or_send(user_id, text, reply_markup=builder.as_markup(), parse_mode="HTML")
+
+
+async def _render_admin_global_reports(user_id: int, page: int = 1):
+    rows = guard.global_reports_rows()
+    per_page = 5
+    pages = max(1, (len(rows) + per_page - 1) // per_page)
+    page = max(1, min(page, pages))
+    builder = InlineKeyboardBuilder()
+    for group, target, item in rows[(page - 1) * per_page:page * per_page]:
+        builder.button(text=guard.clip(item.get("name") or "Пользователь", 50), callback_data=f"admin_global_report_{group['id']}_{target}")
+    builder.adjust(1)
+    _admin_page_nav(builder, page, pages, "admin_global_reports_")
+    builder.button(text="Назад в меню ⬅️", callback_data="admin_menu")
+    text = "<b>Глобальные жалобы:</b>"
+    if not rows:
+        text += "\n\nОткрытых жалоб нет."
+    await userbot.edit_or_send(user_id, text, reply_markup=builder.as_markup(), parse_mode="HTML")
+
+
+@dp.callback_query(F.data == "admin_public_groups")
+@dp.callback_query(F.data.startswith("admin_public_groups_"))
+async def admin_public_groups(callback: types.CallbackQuery):
+    if not userbot.is_admin(callback.from_user):
+        return
+    userbot.stop_admin_server_stats_loop(callback.from_user.id)
+    try:
+        page = int(callback.data.rsplit("_", 1)[1]) if callback.data != "admin_public_groups" else 1
+        await _render_admin_public_groups(callback.from_user.id, page)
+        await callback.answer()
+    except (ValueError, TypeError):
+        await callback.answer("Не удалось открыть список групп.", show_alert=True)
+
+
+@dp.callback_query(F.data.startswith("admin_public_group_"))
+async def admin_public_group(callback: types.CallbackQuery):
+    if not userbot.is_admin(callback.from_user):
+        return
+    try:
+        gid = int(callback.data.removeprefix("admin_public_group_"))
+        await _render_admin_public_group(callback.from_user.id, gid)
+        await callback.answer()
+    except (ValueError, TelegramBadRequest) as exc:
+        await callback.answer(str(exc) or "Группа недоступна.", show_alert=True)
+
+
+@dp.callback_query(F.data.startswith("admin_public_reports_"))
+async def admin_public_reports(callback: types.CallbackQuery):
+    if not userbot.is_admin(callback.from_user):
+        return
+    try:
+        rest = callback.data.removeprefix("admin_public_reports_")
+        gid_text, page_text = rest.rsplit("_", 1)
+        await _render_admin_public_reports(callback.from_user.id, int(gid_text), int(page_text))
+        await callback.answer()
+    except (ValueError, TelegramBadRequest) as exc:
+        await callback.answer(str(exc) or "Жалобы недоступны.", show_alert=True)
+
+
+@dp.callback_query(F.data.startswith("admin_public_report_"))
+async def admin_public_report(callback: types.CallbackQuery):
+    if not userbot.is_admin(callback.from_user):
+        return
+    try:
+        rest = callback.data.removeprefix("admin_public_report_")
+        gid_text, target_text = rest.rsplit("_", 1)
+        await _render_admin_report_detail(callback.from_user.id, int(gid_text), int(target_text), "public")
+        await callback.answer()
+    except (ValueError, TelegramBadRequest) as exc:
+        await callback.answer(str(exc) or "Жалоба недоступна.", show_alert=True)
+
+
+@dp.callback_query(F.data == "admin_global_reports")
+@dp.callback_query(F.data.startswith("admin_global_reports_"))
+async def admin_global_reports(callback: types.CallbackQuery):
+    if not userbot.is_admin(callback.from_user):
+        return
+    userbot.stop_admin_server_stats_loop(callback.from_user.id)
+    try:
+        page = int(callback.data.rsplit("_", 1)[1]) if callback.data != "admin_global_reports" else 1
+        await _render_admin_global_reports(callback.from_user.id, page)
+        await callback.answer()
+    except (ValueError, TypeError):
+        await callback.answer("Не удалось открыть глобальные жалобы.", show_alert=True)
+
+
+@dp.callback_query(F.data.startswith("admin_global_report_"))
+async def admin_global_report(callback: types.CallbackQuery):
+    if not userbot.is_admin(callback.from_user):
+        return
+    try:
+        rest = callback.data.removeprefix("admin_global_report_")
+        gid_text, target_text = rest.rsplit("_", 1)
+        await _render_admin_report_detail(callback.from_user.id, int(gid_text), int(target_text), "global")
+        await callback.answer()
+    except (ValueError, TelegramBadRequest) as exc:
+        await callback.answer(str(exc) or "Жалоба недоступна.", show_alert=True)
+
+
+@dp.callback_query(F.data.startswith("admin_gban:"))
+async def admin_global_ban(callback: types.CallbackQuery):
+    if not userbot.is_admin(callback.from_user):
+        return
+    parts = callback.data.split(":")
+    try:
+        mode = parts[1]
+        if mode == "g":
+            target = int(parts[2])
+            return_gid = None
+        elif mode == "p":
+            return_gid = int(parts[2])
+            target = int(parts[3])
+        else:
+            raise ValueError("Кнопка устарела.")
+        await callback.answer("Глобальная блокировка…", cache_time=0)
+        await guard.global_ban_user(target)
+        if mode == "p" and return_gid in guard.STORE.groups:
+            await _render_admin_public_reports(callback.from_user.id, return_gid, 1)
+        else:
+            await _render_admin_global_reports(callback.from_user.id, 1)
+    except (ValueError, IndexError, TelegramBadRequest) as exc:
+        try:
+            await callback.answer(str(exc) or "Не удалось применить глобальный бан.", show_alert=True)
+        except TelegramBadRequest:
+            pass
 
 
 async def refresh_admin_user_snapshot(user_id: int, include_devices: bool = False):
@@ -257,7 +543,19 @@ async def refresh_admin_user_snapshot(user_id: int, include_devices: bool = Fals
         return None, None
     cfg = userbot.cached_config(str(user_id))
     userbot.minimize_config(cfg)
-    return cfg, None
+    phone_number = cfg.get("phone_number") or cfg.get("phone")
+    if include_devices:
+        data = USER_DATA.get(user_id) or USER_DATA.get(str(user_id)) or {}
+        client = data.get("client")
+        if client:
+            try:
+                me = await client.get_me()
+                phone_number = getattr(me, "phone_number", None) or phone_number
+            except Exception:
+                logging.debug("Не удалось получить номер пользователя %s", user_id, exc_info=True)
+    if phone_number:
+        phone_number = "+" + str(phone_number).strip().lstrip("+")
+    return cfg, phone_number
 
 
 async def admin_validate_session(user_id, cfg, semaphore=None):
@@ -285,7 +583,14 @@ async def admin_users_list(callback: types.CallbackQuery):
     except (ValueError, TypeError):
         page = 1
 
-    all_configs = list(MEMORY_DB["config"].items())
+    config_by_id = {}
+    for uid, cfg in MEMORY_DB["config"].items():
+        try:
+            normalized_uid = str(int(uid))
+        except (TypeError, ValueError):
+            normalized_uid = str(uid)
+        config_by_id[normalized_uid] = (normalized_uid, cfg)
+    all_configs = list(config_by_id.values())
     validation_semaphore = asyncio.Semaphore(5)
     validation_tasks = [
         admin_validate_session(int(uid), cfg, validation_semaphore)
@@ -320,13 +625,14 @@ async def admin_users_list(callback: types.CallbackQuery):
         builder.button(text=f"👤 {first_name}", callback_data=f"admin_user_{uid}")
     builder.adjust(1)
 
-    nav_buttons = []
-    if page > 1:
-        nav_buttons.append(types.InlineKeyboardButton(text="⬅️ Назад", callback_data=f"admin_users_{page-1}"))
-    nav_buttons.append(types.InlineKeyboardButton(text=f"📖 {page}/{total_pages}", callback_data="ignore"))
-    if page < total_pages:
-        nav_buttons.append(types.InlineKeyboardButton(text="Вперед ➡️", callback_data=f"admin_users_{page+1}"))
-    builder.row(*nav_buttons)
+    if total_pages > 1:
+        nav_buttons = []
+        if page > 1:
+            nav_buttons.append(types.InlineKeyboardButton(text="⬅️ Назад", callback_data=f"admin_users_{page-1}"))
+        nav_buttons.append(types.InlineKeyboardButton(text=f"📖 {page}/{total_pages}", callback_data="ignore"))
+        if page < total_pages:
+            nav_buttons.append(types.InlineKeyboardButton(text="Вперед ➡️", callback_data=f"admin_users_{page+1}"))
+        builder.row(*nav_buttons)
     builder.button(text="⬅️ В админ меню", callback_data="admin_users_back")
 
     await userbot.edit_or_send(callback.from_user.id, f"<b>🟢 Активные пользователи</b>\n<i>Всего: {total_users}</i>", reply_markup=builder.as_markup(), parse_mode="HTML")
@@ -343,7 +649,7 @@ async def admin_user_view(callback: types.CallbackQuery):
     userbot.stop_admin_server_stats_loop(callback.from_user.id)
     target_uid = callback.data.split("_")[-1]
 
-    fresh_cfg, devices_str = await refresh_admin_user_snapshot(int(target_uid), include_devices=True)
+    fresh_cfg, phone_number = await refresh_admin_user_snapshot(int(target_uid), include_devices=True)
     if fresh_cfg is None:
         await callback.answer("Сессия пользователя сейчас недоступна. Обновите список.", show_alert=True)
         return
@@ -359,11 +665,13 @@ async def admin_user_view(callback: types.CallbackQuery):
     autoresponder_status = userbot.get_text(callback.from_user.id, "status_on") if cfg.get("autoresponder_active", False) else userbot.get_text(callback.from_user.id, "status_off")
     online_247_status = userbot.get_text(callback.from_user.id, "status_on") if cfg.get("online_247", False) else userbot.get_text(callback.from_user.id, "status_off")
     auto_read_status = userbot.get_text(callback.from_user.id, "status_on") if cfg.get("auto_read", False) else userbot.get_text(callback.from_user.id, "status_off")
+    phone_str = phone_number or "Недоступен"
 
     text = (
         "<b>👤 Профиль</b>\n"
         f"<b>Никнейм:</b> {_html(first_name)}\n"
         f"<b>Юзернейм:</b> {_html(username_str)}\n"
+        f"<b>Номер:</b> {_html(phone_str)}\n\n"
         "<b>⚙️ Функции</b>\n"
         f"<b>Время в профиль:</b> {_html(time_status)}\n"
         f"<i>{_html(timezone_name)}</i>\n\n"

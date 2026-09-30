@@ -25,6 +25,9 @@ import userbot as ub
 
 bot, dp = ub.bot, ub.dp
 FORMAT = "qwitty.guard.v1"
+GLOBAL_FORMAT = "qwitty.guard.global.v1"
+GLOBAL_STATE_ID = -9223372036854775000
+GLOBAL_META_KEY = "global_bans"
 GROUP_TYPES = {"group", "supergroup"}
 ADMIN_STATUSES = {"creator", "administrator"}
 PRESENT_STATUSES = {"creator", "administrator", "member", "restricted"}
@@ -106,6 +109,9 @@ class GuardStore:
         self.lock = asyncio.Lock()
         self.ready = False
         self.errors = set()
+        self.global_bans = {}
+        self.global_dirty = False
+        self.global_due = 0.0
 
     async def sql(self, fn, *args):
         async with self.lock:
@@ -131,9 +137,13 @@ class GuardStore:
                 gid INTEGER, uid INTEGER, username TEXT, name TEXT, seen REAL,
                 PRIMARY KEY(gid,uid));
             CREATE INDEX IF NOT EXISTS members_name ON members(gid,username);
+            CREATE TABLE IF NOT EXISTS guard_meta(
+                key TEXT PRIMARY KEY, payload TEXT NOT NULL, dirty INTEGER NOT NULL);
         ''')
         self.db.commit()
-        return self.db.execute("SELECT gid,payload,dirty FROM groups_state").fetchall()
+        groups = self.db.execute("SELECT gid,payload,dirty FROM groups_state").fetchall()
+        meta = self.db.execute("SELECT key,payload,dirty FROM guard_meta").fetchall()
+        return groups, meta
 
     @staticmethod
     def _remote_groups():
@@ -148,29 +158,85 @@ class GuardStore:
             offset += 100
 
     async def open(self):
-        local = await self.sql(self._open)
+        local_groups, local_meta = await self.sql(self._open)
         # Never replace unknown remote settings with empty defaults after a network error.
         remote = await asyncio.to_thread(self._remote_groups)
+        remote_global = None
         for row in remote:
-            group = row.get("data") or {}
-            if isinstance(group, dict) and group.get("format") == FORMAT:
-                gid = int(row["id"])
-                if gid < 0 and int(group.get("id", 0)) == gid:
-                    self.groups[gid] = group
-        for gid, payload, dirty in local:
+            payload = row.get("data") or {}
+            rid = int(row["id"])
+            if rid == GLOBAL_STATE_ID and isinstance(payload, dict) and payload.get("format") == GLOBAL_FORMAT:
+                remote_global = payload
+                continue
+            if isinstance(payload, dict) and payload.get("format") == FORMAT:
+                if rid < 0 and int(payload.get("id", 0)) == rid:
+                    self.groups[rid] = payload
+        for gid, payload, dirty in local_groups:
             group = json.loads(payload)
             if dirty or gid not in self.groups:
                 self.groups[gid] = group
             if dirty:
                 self.dirty.add(gid)
                 self.due[gid] = time.monotonic()
+
+        local_global = None
+        local_global_dirty = False
+        for key, payload, dirty in local_meta:
+            if key != GLOBAL_META_KEY:
+                continue
+            try:
+                local_global = json.loads(payload)
+            except (TypeError, json.JSONDecodeError):
+                local_global = None
+            local_global_dirty = bool(dirty)
+        if local_global_dirty and isinstance(local_global, dict):
+            self.global_bans = local_global.get("bans", {}) if local_global.get("format") == GLOBAL_FORMAT else {}
+            self.global_dirty = True
+            self.global_due = time.monotonic()
+        elif isinstance(remote_global, dict):
+            self.global_bans = remote_global.get("bans", {}) if isinstance(remote_global.get("bans"), dict) else {}
+        elif isinstance(local_global, dict) and local_global.get("format") == GLOBAL_FORMAT:
+            self.global_bans = local_global.get("bans", {}) if isinstance(local_global.get("bans"), dict) else {}
+
         for gid, group in self.groups.items():
             await self.sql(self._write, gid, json.dumps(group, ensure_ascii=False), int(gid in self.dirty))
+        await self.sql(self._write_meta, GLOBAL_META_KEY, json.dumps(self._global_payload(), ensure_ascii=False), int(self.global_dirty))
         self.ready = True
 
     def _write(self, gid, payload, dirty):
         with self.db:
             self.db.execute("INSERT OR REPLACE INTO groups_state VALUES(?,?,?)", (gid, payload, dirty))
+
+    def _write_meta(self, key, payload, dirty):
+        with self.db:
+            self.db.execute("INSERT OR REPLACE INTO guard_meta VALUES(?,?,?)", (key, payload, dirty))
+
+    def _global_payload(self):
+        return {"format": GLOBAL_FORMAT, "id": GLOBAL_STATE_ID, "bans": copy.deepcopy(self.global_bans), "updated": time.time()}
+
+    async def save_global_bans(self, urgent=False):
+        payload = self._global_payload()
+        await self.sql(self._write_meta, GLOBAL_META_KEY, json.dumps(payload, ensure_ascii=False), 1)
+        self.global_dirty = True
+        self.global_due = time.monotonic() if urgent else time.monotonic() + 2
+
+    async def flush_global_bans(self):
+        if not self.global_dirty:
+            return True
+        snapshot = self._global_payload()
+        async with ub.DB_WRITE_SEMAPHORE:
+            request = asyncio.create_task(asyncio.to_thread(ub.db_save_data, "config", str(GLOBAL_STATE_ID), snapshot))
+            try:
+                ok = await asyncio.shield(request)
+            except asyncio.CancelledError:
+                await request
+                raise
+        if ok:
+            await self.sql(self._write_meta, GLOBAL_META_KEY, json.dumps(snapshot, ensure_ascii=False), 0)
+            self.global_dirty = False
+        else:
+            self.global_due = time.monotonic() + 30
+        return ok
 
     async def save(self, group, urgent=False):
         group["revision"] = int(group.get("revision", 0)) + 1
@@ -339,6 +405,145 @@ async def group_title_link(group):
     return esc(group["title"])
 
 
+async def message_link(group, message_id, label="сообщение"):
+    """Build a clickable link to a reported message whenever Telegram exposes one."""
+    try:
+        chat = await bot.get_chat(group["id"])
+        username = getattr(chat, "username", None)
+        if username:
+            url = f"https://t.me/{username}/{int(message_id)}"
+        else:
+            raw = str(abs(int(group["id"])))
+            if raw.startswith("100") and len(raw) > 3:
+                url = f"https://t.me/c/{raw[3:]}/{int(message_id)}"
+            else:
+                url = f"tg://openmessage?chat_id={int(group['id'])}&message_id={int(message_id)}"
+        return f'<a href="{esc(url)}">{esc(label)}</a>'
+    except (TelegramBadRequest, TelegramForbiddenError, TypeError, ValueError):
+        return esc(label)
+
+
+def global_reports_rows():
+    rows = []
+    for group in STORE.groups.values():
+        if not group.get("active"):
+            continue
+        for target, item in group.get("reports", {}).items():
+            rows.append((group, int(target), item))
+    rows.sort(key=lambda row: row[2].get("updated", 0), reverse=True)
+    return rows
+
+
+def is_global_banned(uid):
+    return str(int(uid)) in STORE.global_bans
+
+
+def global_ban_entry(uid):
+    return STORE.global_bans.get(str(int(uid)))
+
+
+def _global_reasons_for(uid):
+    collected = []
+    for group in STORE.groups.values():
+        item = group.get("reports", {}).get(str(int(uid)))
+        if not item:
+            continue
+        for reason in item.get("reasons", []):
+            collected.append((float(reason.get("at", 0)), clip(reason.get("text") or "Без описания", 240)))
+    collected.sort(key=lambda row: row[0], reverse=True)
+    result = []
+    seen = set()
+    for _, reason in collected:
+        key = reason.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(reason)
+        if len(result) == 3:
+            break
+    return result or ["Без описания"]
+
+
+async def global_ban_notice(group, uid, name, reasons):
+    reason_text = ", ".join(esc(clip(reason, 240)) for reason in reasons[:3]) or "Без описания"
+    await bot.send_message(
+        group["id"],
+        f"Пользователь {user_link(uid, name)} был глобально забанен\n\n<b>Причина:</b> {reason_text}",
+        parse_mode="HTML",
+    )
+
+
+async def enforce_global_ban_in_group(group, uid, user=None, announce=True):
+    entry = global_ban_entry(uid)
+    if not entry or not group or not group.get("active"):
+        return False
+    gid = group["id"]
+    try:
+        member = await bot.get_chat_member(gid, int(uid))
+        if member.status in ADMIN_STATUSES:
+            return False
+        present = member.status == "member" or (member.status == "restricted" and getattr(member, "is_member", True))
+        if not present:
+            return False
+        own = await bot.get_chat_member(gid, bot.id)
+        if own.status != "administrator" or not getattr(own, "can_restrict_members", False):
+            return False
+        await bot.ban_chat_member(gid, int(uid), request_timeout=20)
+        if announce:
+            name = entry.get("name") or (getattr(user, "full_name", None) if user else None) or member.user.full_name or "Пользователь"
+            try:
+                await global_ban_notice(group, uid, name, entry.get("reasons") or ["Без описания"])
+            except (TelegramBadRequest, TelegramForbiddenError):
+                logging.info("Global-ban notice could not be sent to group %s", gid)
+        return True
+    except TelegramRetryAfter:
+        raise
+    except (TelegramBadRequest, TelegramForbiddenError):
+        return False
+
+
+async def global_ban_user(uid):
+    uid = int(uid)
+    latest = None
+    for group, target, item in global_reports_rows():
+        if target == uid and (latest is None or item.get("updated", 0) > latest[1].get("updated", 0)):
+            latest = (group, item)
+    old = global_ban_entry(uid) or {}
+    name = (latest[1].get("name") if latest else None) or old.get("name") or "Пользователь"
+    username = (latest[1].get("username") if latest else None) or old.get("username")
+    reasons = _global_reasons_for(uid)
+    STORE.global_bans[str(uid)] = {
+        "name": clip(name, 100),
+        "username": username,
+        "reasons": reasons[:3],
+        "updated": time.time(),
+    }
+    await STORE.save_global_bans(urgent=True)
+    await STORE.flush_global_bans()
+
+    banned_count = 0
+    for group in list(STORE.groups.values()):
+        if not group.get("active"):
+            continue
+        try:
+            applied = await enforce_global_ban_in_group(group, uid, announce=True)
+        except TelegramRetryAfter as exc:
+            await asyncio.sleep(min(exc.retry_after, 60))
+            applied = await enforce_global_ban_in_group(group, uid, announce=True)
+        if applied:
+            banned_count += 1
+        await asyncio.sleep(0.05)
+
+    # Once the decision is global, close this user's pending reports everywhere.
+    for group in list(STORE.groups.values()):
+        if str(uid) not in group.get("reports", {}):
+            continue
+        async with lock_for(group["id"]):
+            group.get("reports", {}).pop(str(uid), None)
+            await STORE.save(group, urgent=True)
+    return banned_count
+
+
 async def visible_groups(uid):
     found = []
     for group in list(STORE.groups.values()):
@@ -429,7 +634,6 @@ async def render_group(uid, group):
         types.InlineKeyboardButton(text="📑 Команды", callback_data=f"gg:commands:{gid}"),
         types.InlineKeyboardButton(text="🔖 Жалобы", callback_data=f"gg:targets:{gid}:0"),
     )
-    button(builder, "ℹ️ Инфо", f"gg:info:{gid}")
     button(builder, "🗑 Удалить из списка", f"gg:remove:{gid}")
     button(builder, "Назад в меню ⬅️", "gg:list:0")
 
@@ -502,7 +706,7 @@ async def render_reports_home(uid, group):
     unread = unread_reports(group, uid)
     builder = InlineKeyboardBuilder()
     button(builder, f"📨 Жалобы ({unread})" if unread else "📨 Жалобы", f"gg:targets:{group['id']}:0")
-    button(builder, "Назад в меню ⬅️", f"gg:info:{group['id']}")
+    button(builder, "Назад в меню ⬅️", f"gg:group:{group['id']}")
     await show(uid, f"<b>📣 Жалобы пользователей</b>\n👥 <b>{esc(group['title'])}</b>\n\n"
                f"Участников с открытыми жалобами: <b>{len(group['reports'])}</b>", builder)
 
@@ -521,15 +725,20 @@ async def render_targets(uid, group, page=0):
     await show(uid, f"<b>📨 Жалобы</b>\n👥 <b>{esc(group['title'])}</b>" + ("\n\nОткрытых жалоб пока нет." if not rows else ""), builder)
 
 
-def report_text(group, target, item, notification=False):
+async def report_text(group, target, item, notification=False):
     stamp = dt.datetime.fromtimestamp(item["updated"], dt.timezone(dt.timedelta(hours=5))).strftime("%d.%m.%Y %H:%M")
     username = "@" + item["username"] if item.get("username") else "Не указан"
     reasons = "\n".join("• " + esc(clip(r["text"], 240)) for r in reversed(item.get("reasons", [])[-3:]))
+    group_link = await group_title_link(group)
+    messages = item.get("messages", [])
+    latest_message = await message_link(group, messages[-1]["message_id"]) if messages else "Нет ссылки"
     return (f"<b>{'📣 Новая жалоба' if notification else '📣 Жалобы на участника'}</b>\n"
-            f"👥 <b>{esc(group['title'])}</b>\n\n"
+            f"👥 <b>{group_link}</b>\n\n"
             f"<b>Пользователь:</b> {user_link(target, item['name'])}\n"
             f"<b>Юзернейм:</b> {esc(username)}\n<b>Число жалоб:</b> {item['count']}\n"
-            f"<b>Жалоба:</b> {stamp} (UTC +5)\n\n<b>Последние причины:</b>\n{reasons or 'Без описания'}")
+            f"<b>Жалоба:</b> {stamp} (UTC +5)\n"
+            f"<b>Сообщение:</b> {latest_message}\n\n"
+            f"<b>Последние причины:</b>\n{reasons or 'Без описания'}")
 
 
 async def render_target(uid, group, target):
@@ -540,7 +749,7 @@ async def render_target(uid, group, target):
     builder = InlineKeyboardBuilder()
     button(builder, "Забанить 🚫", f"gg:ban:{group['id']}:{target}")
     button(builder, "Назад в меню ⬅️", f"gg:targets:{group['id']}:0")
-    await show(uid, report_text(group, target, item), builder)
+    await show(uid, await report_text(group, target, item), builder)
 
 
 async def open_deep_link(message, argument):
@@ -626,8 +835,6 @@ async def guard_callback(callback: types.CallbackQuery):
                 group["settings"][mode] = not group["settings"].get(mode, False)
                 await STORE.save(group)
                 await render_mode(uid, group, mode)
-            elif command == "info":
-                await render_info(uid, group)
             elif command == "commands":
                 await render_commands(uid, group)
             elif command == "reports":
@@ -865,7 +1072,7 @@ async def notify_report(gid, target):
             builder = InlineKeyboardBuilder()
             button(builder, "Забанить 🚫", f"gg:nb:{gid}:{target}")
             button(builder, "Игнорировать 💤", f"gg:ignore:{gid}:{target}")
-            await bot.send_message(uid, report_text(group, target, item, True),
+            await bot.send_message(uid, await report_text(group, target, item, True),
                                    parse_mode="HTML", reply_markup=builder.as_markup())
         except TelegramRetryAfter as exc:
             await asyncio.sleep(min(exc.retry_after, 60))
@@ -914,11 +1121,14 @@ async def receive_report(message, group, reason):
     while len(REPORT_RATE) > 5000:
         REPORT_RATE.popitem(last=False)
     group["sequence"] = int(group.get("sequence", 0)) + 1
-    item = group["reports"].setdefault(str(target.id), {"count": 0, "reasons": []})
+    item = group["reports"].setdefault(str(target.id), {"count": 0, "reasons": [], "messages": []})
+    item.setdefault("reasons", [])
+    item.setdefault("messages", [])
     item.update(name=clip(target.full_name, 100), username=target.username,
                 updated=now, sequence=group["sequence"])
     item["count"] += 1
     item["reasons"] = (item["reasons"] + [{"text": clip(reason.strip() or "Без описания", 240), "at": now}])[-3:]
+    item["messages"] = (item["messages"] + [{"message_id": int(source.message_id), "at": now}])[-3:]
     group["dedup"][fingerprint] = now
     if len(group["dedup"]) > 2000:
         oldest = sorted(group["dedup"], key=group["dedup"].get)[:len(group["dedup"])-2000]
@@ -1082,6 +1292,9 @@ async def admin_membership(event: types.ChatMemberUpdated):
         return
     member = event.new_chat_member
     remember_member(gid, member.user)
+    if is_global_banned(member.user.id) and member.status in PRESENT_STATUSES and member.status not in ADMIN_STATUSES:
+        await enforce_global_ban_in_group(group, member.user.id, member.user, announce=True)
+        return
     if event.old_chat_member.status in ADMIN_STATUSES or member.status in ADMIN_STATUSES:
         async with lock_for(gid):
             ADMIN_CACHE.pop(gid, None)
@@ -1130,10 +1343,15 @@ async def group_message(message: types.Message):
                 group["title"] = clip(message.chat.title, 128)
                 await STORE.save(group)
             remember_member(gid, message.from_user)
+            if message.from_user and not message.from_user.is_bot and is_global_banned(message.from_user.id):
+                if await enforce_global_ban_in_group(group, message.from_user.id, message.from_user, announce=True):
+                    return
             if message.reply_to_message:
                 remember_member(gid, message.reply_to_message.from_user)
             for joined in message.new_chat_members or []:
                 remember_member(gid, joined)
+                if not joined.is_bot and is_global_banned(joined.id):
+                    spawn(enforce_global_ban_in_group(group, joined.id, joined, announce=True))
             if any(getattr(message, field, None) for field in SERVICE_FIELDS):
                 if group["settings"].get("service"):
                     await bot.delete_message(gid, message.message_id)
@@ -1178,6 +1396,8 @@ async def writer_loop():
     while True:
         try:
             await STORE.flush_members()
+            if STORE.global_dirty and time.monotonic() >= STORE.global_due:
+                await STORE.flush_global_bans()
             for gid in list(STORE.dirty):
                 if time.monotonic() >= STORE.due.get(gid, 0):
                     await STORE.flush(gid)
@@ -1219,6 +1439,11 @@ async def stop_guard():
     TASKS.clear()
     WELCOME_TASKS.clear()
     await STORE.flush_members()
+    if STORE.global_dirty:
+        try:
+            await STORE.flush_global_bans()
+        except Exception as exc:
+            logging.warning("Guard global-ban shutdown flush: %s", type(exc).__name__)
     for gid in list(STORE.dirty):
         try:
             await STORE.flush(gid)
