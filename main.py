@@ -28,6 +28,7 @@ asyncio.set_event_loop(loop)
 
 import userbot
 import guard
+import tools
 
 from userbot import (
     DB_TASKS,
@@ -49,37 +50,6 @@ from userbot import (
 )
 
 ADMIN_ID = userbot.ADMIN_ID
-
-
-# userbot.py owns the root menu. Inject the third Tools button only into a markup
-# that clearly contains both UserBot and Group Guard, so other keyboards stay untouched.
-_ORIGINAL_EDIT_OR_SEND = userbot.edit_or_send
-
-
-def _root_markup_with_tools(reply_markup):
-    if not isinstance(reply_markup, types.InlineKeyboardMarkup):
-        return reply_markup
-    rows = [list(row) for row in reply_markup.inline_keyboard]
-    buttons = [button for row in rows for button in row]
-    callbacks = [(button.callback_data or "").casefold() for button in buttons]
-    texts = [(button.text or "").casefold() for button in buttons]
-    if "tools" in callbacks:
-        return reply_markup
-    has_guard = any(cb == "guard" or cb.startswith("gg:") for cb in callbacks) or any("group guard" in text for text in texts)
-    has_userbot = any(cb.startswith("userbot") or cb.startswith("ub:") for cb in callbacks) or any("userbot" in text or "юзербот" in text for text in texts)
-    if not (has_guard and has_userbot):
-        return reply_markup
-    rows.append([types.InlineKeyboardButton(text="⛓️‍💥tools", callback_data="tools")])
-    return types.InlineKeyboardMarkup(inline_keyboard=rows)
-
-
-async def _edit_or_send_with_tools(*args, **kwargs):
-    if "reply_markup" in kwargs:
-        kwargs["reply_markup"] = _root_markup_with_tools(kwargs.get("reply_markup"))
-    return await _ORIGINAL_EDIT_OR_SEND(*args, **kwargs)
-
-
-userbot.edit_or_send = _edit_or_send_with_tools
 
 
 def _html(value):
@@ -146,11 +116,6 @@ async def admin_menu(callback: types.CallbackQuery):
         await callback.answer()
     except Exception:
         pass
-
-
-@dp.callback_query(F.data == "tools")
-async def tools_placeholder(callback: types.CallbackQuery):
-    await callback.answer("⛓️‍💥 Tools пока в разработке 🛠", show_alert=True, cache_time=0)
 
 
 @dp.callback_query(F.data.in_(["admin_server_stats", "admin_server_stats_refresh"]))

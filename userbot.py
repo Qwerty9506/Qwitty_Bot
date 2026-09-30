@@ -507,8 +507,12 @@ UI_ACTION_TASK = ContextVar("qwitty_ui_action_task", default=None)
 
 
 def minimize_config(cfg):
-    """Credentials used during sign-in must not be retained as profile data."""
-    for key in ("phone", "entry_phone", "password", "admin_devices", "last_name"):
+    """Remove only short-lived sign-in secrets before persistent DB writes.
+
+    Profile data (including phone, names and settings) is intentionally kept in
+    Supabase. One-time login secrets must never become persistent config fields.
+    """
+    for key in ("password", "phone_code_hash", "phone_code", "auth_code"):
         cfg.pop(key, None)
     return cfg
 
@@ -567,6 +571,18 @@ def db_save_data(table: str, user_id: str, data: dict):
             type(e).__name__,
         )
         return False
+
+def db_delete_data(table: str, user_id: str):
+    """Delete one persistent row. Used to purge legacy daily saved-message archives."""
+    if not supabase:
+        return False
+    try:
+        supabase.table(table).delete().eq("id", str(user_id)).execute()
+        return True
+    except Exception as e:
+        logging.warning("Supabase delete failed (%s/%s): %s", table, user_id, type(e).__name__)
+        return False
+
 
 async def async_db_get(table: str, user_id: str):
 
@@ -1543,19 +1559,16 @@ async def _drop_invalid_session(uid, reason):
     if client:
         await close_pyrogram_client(client)
     await clear_session_files(uid)
-    keep = ('phone', 'username', 'first_name', 'entry_first_name', 'entry_username',
-            'entry_phone', 'last_entry_at', 'last_entry_ts', 'ever_registered',
-            'profile_base_first_name', 'profile_base_last_name', 'msg_id', 'timezone_offset',
-            'registration_block_until_ts')
-    clean = {key: cfg[key] for key in keep if key in cfg}
-    clean.update(logged_in=False, saved_purge_pending=True, session_string=None, time_nick_active=False,
-                 autoresponder_active=False, online_247=False, auto_read=False,
-                 saved_messages_enabled=False, password='Нет')
-    clean['entry_phone'] = clean.get('phone') or clean.get('entry_phone') or 'Не виден'
-    if not clean.get('last_entry_at') and not clean.get('last_entry_ts'):
-        clean['last_entry_ts'] = get_world_utc_timestamp()
-    cfg.clear()
-    cfg.update(minimize_config(clean))
+    # A broken/revoked session invalidates only the session itself. Persistent
+    # profile/settings stay in Supabase so reconnecting the account restores the
+    # user's previous configuration. Daily deleted/edited-message cache is purged.
+    cfg["logged_in"] = False
+    cfg["saved_purge_pending"] = True
+    cfg["session_string"] = None
+    cfg["entry_phone"] = cfg.get("phone") or cfg.get("entry_phone") or "Не виден"
+    if not cfg.get("last_entry_at") and not cfg.get("last_entry_ts"):
+        cfg["last_entry_ts"] = get_world_utc_timestamp()
+    minimize_config(cfg)
     for key in ('session_string', 'phone_code_hash', 'password', 'saved_view',
                 'saved_history_done', 'temp_greeting', 'last_profile_key', 'session_invalid',
                 'session_backup_attempted', 'session_retry_at'):
@@ -1723,14 +1736,19 @@ async def restore_saved_sessions():
             continue
 
         uid_str = str(int(uid_str))  # Identity is the immutable Telegram ID, never a nickname.
-        private_fields = any(k in cfg for k in ("phone", "entry_phone", "password", "admin_devices", "last_name"))
+        transient_auth_fields = any(k in cfg for k in ("password", "phone_code_hash", "phone_code", "auth_code"))
         minimize_config(cfg)
         MEMORY_DB["config"][uid_str] = cfg
-        if private_fields or not cfg.get("privacy_minimized_v1"):
-            cfg["privacy_minimized_v1"] = True
+        if transient_auth_fields:
             queue_db_save("config", uid_str, cfg)
-            MEMORY_DB["logs"][uid_str] = []
-            queue_db_save("logs", uid_str, [])
+
+        # Legacy versions uploaded deleted/edited-message archives to the `activity`
+        # table. Purge that row once; from now on the archive is local and daily only.
+        if not cfg.get("saved_remote_purged_v2"):
+            if await asyncio.to_thread(db_delete_data, "activity", uid_str):
+                cfg["saved_remote_purged_v2"] = True
+                MEMORY_DB["config"][uid_str] = cfg
+                queue_db_save("config", uid_str, cfg)
         loaded += 1
         if uid_str.isdigit():
             await SAVED.ensure_user(int(uid_str))
@@ -1772,7 +1790,7 @@ async def cmd_start(message: types.Message):
     uid_str = str(user_id)
     if uid_str not in MEMORY_DB["config"]:
         MEMORY_DB["config"][uid_str] = db_get_data("config", uid_str) or {
-            "phone": "Не указан", "password": "Нет",
+            "phone": "Не указан",
             "time_nick_active": False, "autoresponder_active": False,
             "online_247": False, "auto_read": False,
             "autoresponder_greeting": get_text(user_id, "msg_autoresp_default"),
@@ -1816,16 +1834,14 @@ async def cmd_start(message: types.Message):
 
 def root_menu_markup(user_id=None):
     builder = InlineKeyboardBuilder()
-    builder.row(types.InlineKeyboardButton(text="♨️ Account Manager", callback_data="userbot"),
-                types.InlineKeyboardButton(text="🔰 Group Guard", callback_data="guard"))
+    builder.row(
+        types.InlineKeyboardButton(text="♨️ Account Manager", callback_data="userbot"),
+        types.InlineKeyboardButton(text="🔰 Group Guard", callback_data="guard"),
+    )
+    builder.row(types.InlineKeyboardButton(text="⛓️‍💥tools", callback_data="tools"))
     if user_id == ADMIN_ID:
         builder.row(types.InlineKeyboardButton(text="👑 Admin", callback_data="admin_menu"))
     return builder.as_markup()
-
-
-@dp.callback_query(F.data == "tools")
-async def tools_placeholder(callback: types.CallbackQuery):
-    await callback.answer("Функция ещё в разработке 🛠", cache_time=0)
 
 
 @dp.callback_query(F.data == "root_menu")
@@ -2088,9 +2104,6 @@ def save_user_config(user_id, message, is_logged_in=True):
     cfg = {
         **old_cfg,
         "phone": data["phone"] or old_cfg.get("phone", "Не указан"),
-
-
-        "password": "Нет",
         "time_nick_active": data["time_nick_active"],
         "autoresponder_active": data.get("autoresponder_active", old_cfg.get("autoresponder_active", False)),
         "online_247": bool(old_cfg.get("online_247", False)),
@@ -2113,7 +2126,8 @@ def save_user_config(user_id, message, is_logged_in=True):
         "last_entry_ts": get_world_utc_timestamp(),
         "entry_first_name": old_cfg.get("entry_first_name", message.from_user.first_name or "User"),
         "entry_username": old_cfg.get("entry_username", message.from_user.username or "N/A"),
-        "entry_phone": old_cfg.get("entry_phone", "Не виден"),
+        "entry_phone": data["phone"] or old_cfg.get("phone") or old_cfg.get("entry_phone", "Не виден"),
+        "last_name": message.from_user.last_name or old_cfg.get("last_name", ""),
         "msg_id": data.get("msg_id", old_cfg.get("msg_id", None)),
         "session_string": old_cfg.get("session_string")
     }
@@ -2357,13 +2371,10 @@ async def toggle_auto_read(callback: types.CallbackQuery):
     await menu_auto_read(callback)
 
 
-SAVED_REMOTE_TABLE = "activity"
-SAVED_FORMAT = "qwitty.saved.v1"
 SAVED_CHAT_LIMIT = 100
 SAVED_RAM_LIMIT = 0  # Write through to SQLite; no archive backlog in RAM.
 SAVED_TOTAL_PAYLOAD_LIMIT = 96 * 1024 * 1024
 SAVED_USER_PAYLOAD_LIMIT = 8 * 1024 * 1024
-SAVED_REMOTE_LIMIT = 24 * 1024 * 1024
 SAVED_HISTORY_LOCK = asyncio.Lock()
 SAVED_TASKS = []
 SAVED_NOTIFICATIONS = asyncio.Queue(maxsize=256)
@@ -2473,73 +2484,31 @@ class SavedMessageStore:
         return meta, rows
 
     async def ensure_user(self, uid):
+        """Load only today's local cache. Deleted/edited messages never use Supabase."""
         uid = int(uid)
         if uid in self.ready:
             async with self.lock:
                 await self._roll_locked(uid)
             return True
-        if time.monotonic() < self.retry_load_at.get(uid, 0):
-            return False
         await self.open()
         async with self.load_locks.setdefault(uid, asyncio.Lock()):
             if uid in self.ready:
                 return True
             async with self.lock:
                 meta, rows = await self._sql(self._load_local_sync, uid)
-            today = saved_day(uid)
-            remote = None
-
-            if not meta or meta[0] != today:
-                try:
-                    remote = await async_db_get(SAVED_REMOTE_TABLE, str(uid))
-                except Exception:
-                    self.errors[uid] = "Не удалось загрузить архив. Повторяем подключение к базе."
-                    self.retry_load_at[uid] = time.monotonic() + 30
-                    return False
-            async with self.lock:
+                today = saved_day(uid)
                 self.days[uid] = meta[0] if meta else today
                 self.revisions[uid] = meta[1] if meta else 0
                 self.summary[uid] = {cid: (name, unread, last) for cid, name, unread, last in rows}
-                if meta and meta[2]:
-                    self.remote_dirty.add(uid)
-                if isinstance(remote, dict) and remote.get("format") == SAVED_FORMAT and remote.get("day") == today:
-                    try:
-
-                        total = 0
-                        await self._clear_locked(uid, today)
-                        for cid, encoded in remote.get("chats", []):
-                            blob = base64.b64decode(encoded, validate=True)
-                            total += len(blob)
-                            if total > SAVED_REMOTE_LIMIT:
-                                raise ValueError("Archive too large")
-                            unpacker = zlib.decompressobj()
-                            raw = unpacker.decompress(blob, 8 * 1024 * 1024)
-                            if not unpacker.eof:
-                                raise ValueError("Invalid archive size")
-                            chat = json.loads(raw)
-                            if len(chat["base"]) + len(chat["events"]) > 100:
-                                raise ValueError("Invalid chat limit")
-                            self._put_locked(uid, int(cid), chat)
-                            await self._pressure_locked()
-                        await self._flush_local_locked(uid)
-                        self.remote_dirty.discard(uid)
-                        await self._sql(self._mark_clean_sync, uid)
-                        self.due[uid] = time.monotonic() + random.uniform(240, 300)
-                    except Exception as e:
-                        self.errors[uid] = "Архив не удалось восстановить. Сохранение приостановлено."
-                        self.retry_load_at[uid] = time.monotonic() + 60
-                        logging.warning("Saved archive restore %s: %s", uid, type(e).__name__)
-                        return False
-                else:
-                    await self._roll_locked(uid)
-                    if remote is not None and remote:
-
-                        self.remote_dirty.add(uid)
-                        self.due[uid] = time.monotonic()
+                await self._roll_locked(uid)
+                self.remote_dirty.discard(uid)
+                await self._sql(self._mark_clean_sync, uid)
                 self.ready.add(uid)
                 self.errors.pop(uid, None)
+                self.retry_load_at.pop(uid, None)
                 self.due.setdefault(uid, time.monotonic() + random.uniform(240, 300))
                 return True
+
 
     def _mark_clean_sync(self, uid):
         with self.db:
@@ -2781,62 +2750,26 @@ class SavedMessageStore:
             if not changed:
                 return True
 
-            # read-флаг обязан пережить даже внезапный рестарт Render.
-            # _put_locked помечает архив dirty, а flush ниже сразу пишет
-            # новое состояние сначала в SQLite, затем в Supabase.
+            # read-флаг хранится только в локальном суточном SQLite-кэше.
+            # В Supabase содержимое удалённых/изменённых сообщений не отправляется.
             self._put_locked(uid, cid, chat)
             self.due[uid] = min(self.due.get(uid, time.monotonic() + 10), time.monotonic() + 10)
             await self._pressure_locked()
 
-        # SQLite has already committed the read flag. Supabase is coalesced with
-        # other changes to avoid uploading the whole account on every click.
+        # SQLite already contains the updated read flag for the current day.
         return True
 
-    def _snapshot_sync(self, uid):
-        rows = []
-        size = 0
-        for cid, blob in self.db.execute("SELECT cid,payload FROM saved_chats WHERE uid=? ORDER BY cid", (uid,)):
-            encoded = base64.b64encode(blob).decode("ascii")
-            size += len(encoded)
-            if size > SAVED_REMOTE_LIMIT:
-                raise ValueError("Сжатый архив аккаунта превысил безопасный размер резервной копии.")
-            rows.append([cid, encoded])
-        return rows
-
     async def flush(self, uid):
-        async with self.remote_lock:
-            async with self.lock:
-                await self._roll_locked(uid)
-                await self._flush_local_locked(uid)
-                if uid not in self.remote_dirty:
-                    return True
-                day, revision = self.days[uid], self.revisions[uid]
-                rows = await self._sql(self._snapshot_sync, uid)
-                offset = int(cached_config(uid).get("timezone_offset", 5))
-                midnight = datetime.datetime.fromisoformat(day).replace(tzinfo=datetime.timezone.utc)
-                expires_at = (midnight + datetime.timedelta(days=1, hours=-offset)).isoformat()
-                payload = {"format": SAVED_FORMAT, "day": day, "expires_at": expires_at, "chats": rows}
+        """Commit the current-day cache locally only; never upload message content to Supabase."""
+        async with self.lock:
+            await self._roll_locked(uid)
+            await self._flush_local_locked(uid)
+            self.remote_dirty.discard(uid)
+            await self._sql(self._mark_clean_sync, uid)
+            self.errors.pop(uid, None)
+            self.due[uid] = time.monotonic() + random.uniform(240, 300)
+            return True
 
-            async with DB_WRITE_SEMAPHORE:
-                request = asyncio.create_task(asyncio.to_thread(db_save_data, SAVED_REMOTE_TABLE, str(uid), payload))
-                try:
-                    ok = await asyncio.shield(request)
-                except asyncio.CancelledError:
-
-                    await request
-                    raise
-            async with self.lock:
-                if ok:
-                    self.errors.pop(uid, None)
-                    if day == self.days[uid] and revision == self.revisions[uid]:
-                        self.remote_dirty.discard(uid)
-                        await self._sql(self._mark_clean_sync, uid)
-                else:
-                    self.errors[uid] = "Резервная копия пока не обновлена. Данные остаются на сервере; повторяем запись."
-
-                self.due[uid] = (time.monotonic() if day != self.days[uid] else
-                                 time.monotonic() + (random.uniform(240, 300) if ok else 30))
-            return ok
 
     async def close(self):
         async with self.lock:
