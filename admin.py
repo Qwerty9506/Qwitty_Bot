@@ -302,7 +302,7 @@ async def _report_detail_text(group, target: int, item: dict):
     return (
         f"<b>Жалобы из чата {group_link}:</b>\n\n"
         f"{guard.user_link(target, item.get('name') or 'Пользователь')}\n"
-        f"{guard.user_link(target, username) if item.get("username") else _html(username)}\n\n"
+        f"{guard.user_link(target, username) if item.get('username') else _html(username)}\n\n"
         f"<b>Сообщений:</b> {', '.join(message_links) if message_links else 'Нет ссылок'}\n\n"
         f"<b>Причины:</b> {', '.join(_html(reason) for reason in reasons) if reasons else 'Причины не указаны'}"
     )
