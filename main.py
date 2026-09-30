@@ -21,7 +21,6 @@ asyncio.set_event_loop(loop)
 
 
 import guard
-import tools as tools  # Register Tools callback handlers.
 import admin
 
 from userbot import (
@@ -83,7 +82,10 @@ async def main():
     logging.info("🚀 Бот успешно запущен!")
 
     try:
-        await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
+        allowed_updates = sorted(set(dp.resolve_used_update_types()) | {
+            "message", "edited_message", "my_chat_member", "chat_member",
+        })
+        await dp.start_polling(bot, allowed_updates=allowed_updates)
     finally:
         await guard.stop_guard()
         SAVED.closing = True

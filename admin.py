@@ -283,7 +283,6 @@ async def _render_admin_public_group(user_id: int, gid: int):
         f"<b>Очистка вх/изм</b> - {'вкл' if settings.get('service') else 'выкл'}"
     )
     builder = InlineKeyboardBuilder()
-    builder.button(text="Жалобы", callback_data=f"admin_public_reports_{group['id']}_1")
     builder.row(types.InlineKeyboardButton(text="Назад в меню ⬅️", callback_data="admin_public_groups_1"))
     builder.adjust(1)
     await userbot.edit_or_send(user_id, text, reply_markup=builder.as_markup(), parse_mode="HTML")
@@ -334,11 +333,11 @@ async def _render_admin_report_detail(user_id: int, gid: int, target: int, sourc
         if str(int(target)) in guard.STORE.global_bans:
             await _render_admin_banned_detail(user_id, int(target))
             return
-        group, item = guard.aggregate_user_reports(target)
+        group, item = guard.aggregate_local_bans(target)
     else:
         item = group.get("reports", {}).get(str(int(target))) if group else None
     if not item:
-        raise ValueError("Жалоба уже обработана.")
+        raise ValueError("Пользователь уже разбанен или запись обработана.")
     builder = InlineKeyboardBuilder()
     if source == "global":
         builder.button(text="Глобально забанить", callback_data=f"admin_gban:g:{int(target)}")
@@ -371,9 +370,9 @@ async def _render_admin_new_reports(user_id: int, page: int = 1):
     builder.adjust(1)
     _admin_page_nav(builder, page, pages, "admin_global_new_", len(rows))
     builder.row(types.InlineKeyboardButton(text="Назад в меню ⬅️", callback_data="admin_global_reports"))
-    text = "<b>🆕 Новые жалобы</b>"
+    text = "<b>🆕 Забаненные в группах</b>\n<i>Кандидаты на глобальную блокировку.</i>"
     if not rows:
-        text += "\n\n<i>Открытых жалоб нет.</i>"
+        text += "\n\n<i>Новых забаненных пользователей нет.</i>"
     await userbot.edit_or_send(user_id, text, reply_markup=builder.as_markup(), parse_mode="HTML")
 
 
@@ -1107,4 +1106,3 @@ def start_live_profile(viewer_id, refresh, enabled):
                     except Exception:
                         logging.exception("Не удалось обновить открытый профиль")
     state["admin_live_task"] = asyncio.create_task(run())
-

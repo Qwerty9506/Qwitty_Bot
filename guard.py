@@ -61,6 +61,10 @@ SPAM = OrderedDict()
 SPAM_LAST = OrderedDict()
 GLOBAL_USER_LOCKS = {}
 GLOBAL_UNBAN_RUNNING = set()
+GLOBAL_ENFORCEMENT_LOCKS = {}
+GLOBAL_BAN_PENDING = {}
+GLOBAL_BAN_RUNNING = set()
+KICK_EVENTS = {}
 REPORT_RATE = OrderedDict()
 REPORT_QUEUE = asyncio.Queue(maxsize=256)
 REPORT_QUEUED = set()
@@ -97,7 +101,7 @@ def fresh_group(gid, title):
     return {"format": FORMAT, "id": int(gid), "title": clip(title or str(gid), 128),
             "active": True, "added_by": None, "member_count": None,
             "settings": {"spam": False, "files": False, "raid": False, "service": False},
-            "admins": {}, "hidden": [], "seen": {}, "reports": {}, "dedup": {},
+            "admins": {}, "hidden": [], "seen": {}, "reports": {}, "local_bans": {}, "dedup": {},
             "sequence": 0, "welcome_pending": True, "joined_at": time.time(),
             "revision": 0}
 
@@ -489,9 +493,11 @@ async def reported_messages_html(group, item):
     return "\n".join(lines) if lines else "<i>История старой жалобы не сохранена.</i>"
 
 
-def aggregate_user_reports(uid):
+def _aggregate_evidence(uid, field):
     evidence = [(group, item) for group in STORE.groups.values()
-                if (item := group.get("reports", {}).get(str(int(uid))))]
+                if (field == "reports" or group.get("active"))
+                and (item := group.get(field, {}).get(str(int(uid))))
+                and (field != "local_bans" or not item.get("until_date") or float(item["until_date"]) > time.time())]
     if not evidence:
         return None, None
     evidence.sort(key=lambda row: float(row[1].get("updated", 0)), reverse=True)
@@ -514,12 +520,41 @@ def aggregate_user_reports(uid):
     return group, result
 
 
+def aggregate_user_reports(uid):
+    return _aggregate_evidence(uid, "reports")
+
+
+def aggregate_local_bans(uid):
+    return _aggregate_evidence(uid, "local_bans")
+
+
+async def record_local_ban(group, user, until_date=0, source=None):
+    """Archive evidence only AFTER Telegram confirms a group ban. Caller holds the group lock."""
+    uid = str(user.id)
+    if user.is_bot or global_ban_entry(user.id) is not None:
+        return
+    old = group.get("local_bans", {}).get(uid) or {}
+    item = copy.deepcopy(group.get("reports", {}).get(uid) or old)
+    item.update(name=clip(user.full_name, 100), username=user.username,
+                updated=time.time(), until_date=int(until_date or 0))
+    item.setdefault("count", 0)
+    item.setdefault("reasons", [])
+    item.setdefault("messages", [])
+    if source and source.from_user and source.from_user.id == user.id:
+        record = {"message_id": int(source.message_id), "text": reported_message_text(source),
+                  "at": time.time(), "group_id": group["id"], "group_title": group["title"],
+                  "group_username": group.get("username")}
+        item["messages"] = ([m for m in item["messages"] if m.get("message_id") != record["message_id"]] + [record])[-3:]
+    group.setdefault("local_bans", {})[uid] = item
+    await STORE.save(group, urgent=True)
+
+
 def global_reports_rows():
     targets = {int(target) for group in STORE.groups.values() if group.get("active")
-               for target in group.get("reports", {}) if str(target) not in STORE.global_bans}
+               for target in group.get("local_bans", {}) if str(target) not in STORE.global_bans}
     rows = []
     for target in targets:
-        group, item = aggregate_user_reports(target)
+        group, item = aggregate_local_bans(target)
         if item:
             rows.append((group, target, item))
     rows.sort(key=lambda row: float(row[2].get("updated", 0)), reverse=True)
@@ -571,20 +606,50 @@ async def global_ban_notice(group, uid, name, reasons):
     )
 
 
-async def enforce_global_ban_in_group(group, uid, user=None, announce=True):
+def queue_global_ban(gid, uid, joining=False, delay=0):
+    key = (int(gid), int(uid))
+    old = GLOBAL_BAN_PENDING.get(key, {})
+    GLOBAL_BAN_PENDING[key] = {"joining": joining or old.get("joining", False),
+                               "retry_at": time.monotonic() + delay}
+
+
+async def enforce_global_ban_in_group(group, uid, user=None, announce=True, joining=False):
+    if not group:
+        return False
+    key = (int(group["id"]), int(uid))
+    async with GLOBAL_ENFORCEMENT_LOCKS.setdefault(key, asyncio.Lock()):
+        try:
+            return await _enforce_global_ban_in_group(group, uid, user, announce, joining)
+        except TelegramRetryAfter as exc:
+            queue_global_ban(*key, joining=joining, delay=exc.retry_after + 1)
+            return False
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            queue_global_ban(*key, joining=joining, delay=15)
+            logging.warning("Global ban retry in %s: %s", key[0], type(exc).__name__)
+            return False
+
+
+async def _enforce_global_ban_in_group(group, uid, user, announce, joining):
+    key = (int(group["id"]), int(uid))
     entry = global_ban_entry(uid)
     if not entry or entry.get("unbanning") or not group or not group.get("active"):
+        GLOBAL_BAN_PENDING.pop(key, None)
         return False
     gid = group["id"]
     try:
         member = await bot.get_chat_member(gid, int(uid))
-        if member.status in ADMIN_STATUSES:
+        if member.status in ADMIN_STATUSES or member.status == "kicked":
+            GLOBAL_BAN_PENDING.pop(key, None)
             return False
-        present = member.status == "member" or (member.status == "restricted" and getattr(member, "is_member", True))
-        if not present:
+        # A confirmed join can arrive before getChatMember reflects it.
+        if not member_present(member) and not joining:
+            GLOBAL_BAN_PENDING.pop(key, None)
             return False
         own = await bot.get_chat_member(gid, bot.id)
         if own.status != "administrator" or not getattr(own, "can_restrict_members", False):
+            queue_global_ban(gid, uid, joining=joining, delay=60)
             return False
         if not is_global_banned(uid):
             return False
@@ -595,6 +660,7 @@ async def enforce_global_ban_in_group(group, uid, user=None, announce=True):
         entry = global_ban_entry(uid)
         entry["banned_groups"] = sorted(set(entry.get("banned_groups", [])) | {gid})
         await STORE.save_global_bans(urgent=True)
+        GLOBAL_BAN_PENDING.pop(key, None)
         if announce:
             name = entry.get("name") or (getattr(user, "full_name", None) if user else None) or member.user.full_name or "Пользователь"
             try:
@@ -605,29 +671,59 @@ async def enforce_global_ban_in_group(group, uid, user=None, announce=True):
     except TelegramRetryAfter:
         raise
     except (TelegramBadRequest, TelegramForbiddenError):
+        queue_global_ban(gid, uid, joining=joining, delay=60)
         return False
+
+
+async def _retry_global_ban(key, joining):
+    try:
+        group = STORE.groups.get(key[0])
+        if group:
+            await enforce_global_ban_in_group(group, key[1], joining=joining)
+        else:
+            GLOBAL_BAN_PENDING.pop(key, None)
+    finally:
+        GLOBAL_BAN_RUNNING.discard(key)
+
+
+async def global_ban_worker():
+    while True:
+        for key, job in list(GLOBAL_BAN_PENDING.items()):
+            if not is_global_banned(key[1]):
+                GLOBAL_BAN_PENDING.pop(key, None)
+                continue
+            if key not in GLOBAL_BAN_RUNNING and job["retry_at"] <= time.monotonic():
+                if len(GLOBAL_BAN_RUNNING) >= 4:
+                    break
+                GLOBAL_BAN_RUNNING.add(key)
+                spawn(_retry_global_ban(key, job["joining"]))
+                await asyncio.sleep(0.1)
+        await asyncio.sleep(2)
 
 
 async def close_user_reports(uid):
     for group in list(STORE.groups.values()):
-        if str(uid) in group.get("reports", {}):
+        if str(uid) in group.get("reports", {}) or str(uid) in group.get("local_bans", {}):
             async with lock_for(group["id"]):
                 group.get("reports", {}).pop(str(uid), None)
+                group.get("local_bans", {}).pop(str(uid), None)
                 await STORE.save(group, urgent=True)
 
 
 async def global_ban_user(uid):
     uid = int(uid)
     async with GLOBAL_USER_LOCKS.setdefault(uid, asyncio.Lock()):
-        group, item = aggregate_user_reports(uid)
+        group, item = aggregate_local_bans(uid)
         old = global_ban_entry(uid) or {}
+        if not item and not old:
+            raise ValueError("Глобальный бан доступен только после бана пользователя в группе.")
         snapshot = copy.deepcopy(item or old.get("report") or {})
         name = snapshot.get("name") or old.get("name") or "Пользователь"
         username = snapshot.get("username") or old.get("username")
         source = ({k: group.get(k) for k in ("id", "title", "username", "link")} if group else old.get("group"))
         STORE.global_bans[str(uid)] = {
             "name": clip(name, 100), "username": username,
-            "reasons": _global_reasons_for(uid), "report": snapshot,
+            "reasons": [r["text"] for r in report_reasons(snapshot)] or old.get("reasons") or ["Без описания"], "report": snapshot,
             "group": source, "updated": time.time(),
             "banned_groups": list(old.get("banned_groups", [])),
         }
@@ -638,15 +734,7 @@ async def global_ban_user(uid):
         for group in list(STORE.groups.values()):
             if not group.get("active"):
                 continue
-            try:
-                applied = await enforce_global_ban_in_group(group, uid, announce=True)
-            except TelegramRetryAfter as exc:
-                await asyncio.sleep(min(exc.retry_after, 60))
-                try:
-                    applied = await enforce_global_ban_in_group(group, uid, announce=True)
-                except TelegramRetryAfter:
-                    logging.warning("Global ban %s postponed in %s", uid, group["id"])
-                    continue
+            applied = await enforce_global_ban_in_group(group, uid, announce=True)
             if applied:
                 banned_count += 1
             await asyncio.sleep(0.05)
@@ -1209,7 +1297,7 @@ async def resolve_target(message, arguments):
     raise ValueError("Ответьте на сообщение участника или укажите его @username.")
 
 
-async def moderate(group, actor, target, action, duration):
+async def moderate(group, actor, target, action, duration, source=None):
     gid = group["id"]
     await require_admin(gid, actor, "can_restrict_members")
     if target in {actor, bot.id}:
@@ -1224,8 +1312,10 @@ async def moderate(group, actor, target, action, duration):
         if duration and (await bot.get_chat(gid)).type != "supergroup":
             raise ValueError("Временный бан доступен в супергруппах. В обычной группе срок Telegram не учитывает.")
         await bot.ban_chat_member(gid, target, until_date=until, request_timeout=20)
+        await record_local_ban(group, member.user, until, source)
     elif action == "kick":
         # In case unban fails, the kick expires automatically instead of leaving a permanent ban.
+        KICK_EVENTS[(gid, target)] = time.monotonic() + 120
         await bot.ban_chat_member(gid, target, until_date=int(time.time()) + 60)
         await bot.unban_chat_member(gid, target, only_if_banned=True)
     elif action == "mute":
@@ -1336,26 +1426,6 @@ async def receive_report(message, group, reason):
         oldest = sorted(group["dedup"], key=group["dedup"].get)[:len(group["dedup"])-2000]
         for entry in oldest:
             group["dedup"].pop(entry, None)
-    banned_entry = global_ban_entry(target.id)
-    if banned_entry and not banned_entry.get("unbanning"):
-        # A complaint that races with the global decision belongs in its archive.
-        archive = copy.deepcopy(banned_entry.get("report") or {})
-        archive.update(name=item["name"], username=item.get("username"), updated=now,
-                       count=int(archive.get("count", 0)) + 1)
-        archive["reasons"] = report_reasons(archive)
-        if reason.strip():
-            archive["reasons"] = (archive["reasons"] + [{"text": clip(reason.strip(), 240), "at": now}])[-3:]
-        existing = [m for m in archive.get("messages", [])
-                    if (m.get("group_id"), m.get("message_id")) != (group["id"], record["message_id"])]
-        archive["messages"] = (existing + [copy.deepcopy(record)])[-3:]
-        banned_entry.update(name=item["name"], username=item.get("username"), report=archive,
-                            group={k: group.get(k) for k in ("id", "title", "username", "link")},
-                            reasons=[r["text"] for r in report_reasons(archive)])
-        await STORE.save_global_bans(urgent=True)
-        group["reports"].pop(str(target.id), None)
-        await STORE.save(group, urgent=True)
-        await group_reply(message, "📨 Жалоба сохранена в архиве глобального бана.")
-        return
     await STORE.save(group, urgent=True)
     notification_key = (group["id"], target.id)
     if notification_key not in REPORT_QUEUED:
@@ -1394,7 +1464,8 @@ async def handle_group_command(message, group):
             if command == "kick" and duration_text:
                 raise ValueError("У /kick нет срока. Используйте /ban для временного бана.")
             duration = parse_duration(duration_text) if command != "kick" else None
-            await moderate(group, message.from_user.id, target, command, duration)
+            await moderate(group, message.from_user.id, target, command, duration,
+                           source=message.reply_to_message)
             if command == "ban" and str(target) in group["reports"]:
                 group["reports"].pop(str(target), None)
                 await STORE.save(group, urgent=True)
@@ -1573,6 +1644,7 @@ async def process_raid(gid):
                     # An account promoted to admin during the minute must be protected.
                     if member.status not in ADMIN_STATUSES and int(uid) != bot.id:
                         await bot.ban_chat_member(gid, int(uid))
+                        await record_local_ban(group, member.user)
                     group["raid_pending"].pop(uid, None)
                 except TelegramRetryAfter as exc:
                     entry["retry_at"] = time.time() + exc.retry_after + 1
@@ -1613,13 +1685,26 @@ async def admin_membership(event: types.ChatMemberUpdated):
     if not group:
         async with lock_for(gid):
             group = STORE.groups.get(gid) or await discover_group(event.chat)
+    elif not group.get("active") and member_present(event.new_chat_member):
+        async with lock_for(gid):
+            group = await discover_group(event.chat)
     member = event.new_chat_member
+    async with lock_for(gid):
+        target = str(member.user.id)
+        if member.status == "kicked":
+            if time.monotonic() >= KICK_EVENTS.get((gid, member.user.id), 0):
+                until = getattr(member, "until_date", None)
+                until = int(until.timestamp()) if isinstance(until, dt.datetime) else int(until or 0)
+                await record_local_ban(group, member.user, until)
+        elif target in group.get("local_bans", {}):
+            group["local_bans"].pop(target, None)
+            await STORE.save(group, urgent=True)
     if not member_present(event.old_chat_member) and member_present(member) and member.status not in ADMIN_STATUSES:
         async with lock_for(gid):
             await record_raid_join(group, member.user, event.date.timestamp())
     remember_member(gid, member.user)
-    if is_global_banned(member.user.id) and member.status in PRESENT_STATUSES and member.status not in ADMIN_STATUSES:
-        await enforce_global_ban_in_group(group, member.user.id, member.user, announce=True)
+    if is_global_banned(member.user.id) and member_present(member) and member.status not in ADMIN_STATUSES:
+        await enforce_global_ban_in_group(group, member.user.id, member.user, announce=True, joining=True)
         return
     if event.old_chat_member.status in ADMIN_STATUSES or member.status in ADMIN_STATUSES:
         async with lock_for(gid):
@@ -1638,7 +1723,7 @@ async def migrate_group(old_id, new_id, title):
                 return
             copied = copy.deepcopy(old)
             copied.update(id=new_id, title=title or old["title"], active=True)
-            old.update(active=False, migrated_to=new_id, reports={}, dedup={})
+            old.update(active=False, migrated_to=new_id, reports={}, local_bans={}, dedup={})
             await STORE.save(copied, urgent=True)
             await STORE.save(old, urgent=True)
             ADMIN_CACHE.pop(old_id, None)
@@ -1668,7 +1753,7 @@ async def group_message(message: types.Message):
             return
         async with lock_for(gid):
             group = STORE.groups.get(gid)
-            if not group:
+            if not group or not group.get("active"):
                 group = await discover_group(message.chat)
                 spawn(refresh_open_lists(group))
             if not group.get("active"):
@@ -1687,7 +1772,8 @@ async def group_message(message: types.Message):
                 remember_member(gid, joined)
                 await record_raid_join(group, joined, message.date.timestamp())
                 if not joined.is_bot and is_global_banned(joined.id):
-                    spawn(enforce_global_ban_in_group(group, joined.id, joined, announce=True))
+                    queue_global_ban(gid, joined.id, joining=True)
+                    spawn(enforce_global_ban_in_group(group, joined.id, joined, announce=True, joining=True))
             if any(getattr(message, field, None) for field in SERVICE_FIELDS):
                 spam_duplicate(gid, 0, message.message_id, None)
                 if group["settings"].get("service"):
@@ -1739,6 +1825,9 @@ async def writer_loop():
                     await asyncio.sleep(1)
             if time.monotonic() >= prune_at:
                 await STORE.sql(STORE._prune_members)
+                for key, expires in list(KICK_EVENTS.items()):
+                    if expires <= time.monotonic():
+                        KICK_EVENTS.pop(key, None)
                 for gid, group in list(STORE.groups.items()):
                     async with lock_for(gid):
                         cutoff = time.time() - REPORT_TTL
@@ -1764,6 +1853,12 @@ async def start_guard():
     spawn(report_notification_worker())
     spawn(raid_worker())
     spawn(global_unban_worker())
+    spawn(global_ban_worker())
+    for uid, entry in STORE.global_bans.items():
+        if not entry.get("unbanning"):
+            for gid, group in STORE.groups.items():
+                if group.get("active"):
+                    queue_global_ban(gid, int(uid))
     for gid in STORE.groups:
         schedule_welcome(gid)
 
@@ -1777,6 +1872,10 @@ async def stop_guard():
     WELCOME_TASKS.clear()
     RAID_RUNNING.clear()
     GLOBAL_UNBAN_RUNNING.clear()
+    GLOBAL_BAN_RUNNING.clear()
+    GLOBAL_BAN_PENDING.clear()
+    GLOBAL_ENFORCEMENT_LOCKS.clear()
+    KICK_EVENTS.clear()
     await STORE.flush_members()
     if STORE.global_dirty:
         try:

@@ -1072,8 +1072,6 @@ class RestartMiddleware(BaseMiddleware):
             if event.message.chat.id != event.from_user.id:
                 await event.answer("Откройте бота в личном чате.", show_alert=True)
                 return
-            if event.data == "tools":
-                return await handler(event, data)
             if event.data == "saved_ok" or (event.data or "").startswith(("gg:nb:", "gg:ignore:")):
                 return await handler(event, data)
             user_id = event.from_user.id
@@ -1930,7 +1928,6 @@ def root_menu_markup(user_id=None):
         types.InlineKeyboardButton(text="♨️ Account Manager", callback_data="userbot"),
         types.InlineKeyboardButton(text="🔰 Group Guard", callback_data="guard"),
     )
-    builder.row(types.InlineKeyboardButton(text="⛓️‍💥tools", callback_data="tools"))
     if user_id == ADMIN_ID:
         builder.row(types.InlineKeyboardButton(text="👑 Admin", callback_data="admin_menu"))
     return builder.as_markup()
@@ -4108,4 +4105,3 @@ def preview_action(action):
                       'time_styles', 'saved_menu', 'saved_toggle'} or action.startswith(
                       ('toggle_', 'set_tz_', 'time_style_', 'time_styles_page_', 'saved_chats:',
                        'saved_chat:', 'saved_page:', 'saved_back:', 'saved_full:'))
-
