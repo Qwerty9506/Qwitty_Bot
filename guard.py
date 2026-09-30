@@ -727,7 +727,7 @@ async def render_targets(uid, group, page=0):
 
 async def report_text(group, target, item, notification=False):
     stamp = dt.datetime.fromtimestamp(item["updated"], dt.timezone(dt.timedelta(hours=5))).strftime("%d.%m.%Y %H:%M")
-    username = "@" + item["username"] if item.get("username") else "Не указан"
+    username = "@" + item["username"] if item.get("username") else "Юзернейм не указан"
     reasons = "\n".join("• " + esc(clip(r["text"], 240)) for r in reversed(item.get("reasons", [])[-3:]))
     group_link = await group_title_link(group)
     messages = item.get("messages", [])
