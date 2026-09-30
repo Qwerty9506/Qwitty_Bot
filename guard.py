@@ -46,6 +46,7 @@ DANGEROUS_EXTENSIONS = frozenset("""
 MODES = {
     "spam": ("🚯АнтиСпам", "Удаляет повторяющиеся сообщения пользователя в течение 2 минут, даже если между ними были другие сообщения."),
     "files": ("⚠️АнтиВирус", "Удаляет потенциально опасные исполняемые файлы и скрипты по расширению. Это фильтр файлов, а не проверка содержимого антивирусом."),
+    "raid": ("📛 АнтиНакрутка", "Защищает от массовых входов. При 50 и более новых участниках за 60 секунд по окончании этой минуты блокирует всех участников волны."),
     "service": ("🧹Очистка вх/изм", "Убирает уведомления о входе и выходе участников, закреплении сообщений, изменении названия и фотографии группы."),
 }
 SERVICE_FIELDS = ("new_chat_members", "left_chat_member", "pinned_message",
@@ -92,7 +93,7 @@ def spawn(coro):
 def fresh_group(gid, title):
     return {"format": FORMAT, "id": int(gid), "title": clip(title or str(gid), 128),
             "active": True, "added_by": None, "member_count": None,
-            "settings": {"spam": False, "files": False, "service": False},
+            "settings": {"spam": False, "files": False, "raid": False, "service": False},
             "admins": {}, "hidden": [], "seen": {}, "reports": {}, "dedup": {},
             "sequence": 0, "welcome_pending": True, "joined_at": time.time(),
             "revision": 0}
@@ -112,6 +113,8 @@ class GuardStore:
         self.global_bans = {}
         self.global_dirty = False
         self.global_due = 0.0
+        self.remote_lock = asyncio.Lock()
+        self.global_lock = asyncio.Lock()
 
     async def sql(self, fn, *args):
         async with self.lock:
@@ -218,25 +221,27 @@ class GuardStore:
         payload = self._global_payload()
         await self.sql(self._write_meta, GLOBAL_META_KEY, json.dumps(payload, ensure_ascii=False), 1)
         self.global_dirty = True
-        self.global_due = time.monotonic() if urgent else time.monotonic() + 2
+        self.global_due = time.monotonic()
+        await self.flush_global_bans()
 
     async def flush_global_bans(self):
-        if not self.global_dirty:
-            return True
-        snapshot = self._global_payload()
-        async with ub.DB_WRITE_SEMAPHORE:
-            request = asyncio.create_task(asyncio.to_thread(ub.db_save_data, "config", str(GLOBAL_STATE_ID), snapshot))
-            try:
-                ok = await asyncio.shield(request)
-            except asyncio.CancelledError:
-                await request
-                raise
-        if ok:
-            await self.sql(self._write_meta, GLOBAL_META_KEY, json.dumps(snapshot, ensure_ascii=False), 0)
-            self.global_dirty = False
-        else:
-            self.global_due = time.monotonic() + 30
-        return ok
+        async with self.global_lock:
+            if not self.global_dirty:
+                return True
+            snapshot = self._global_payload()
+            async with ub.DB_WRITE_SEMAPHORE:
+                request = asyncio.create_task(asyncio.to_thread(ub.db_save_data, "config", str(GLOBAL_STATE_ID), snapshot))
+                try:
+                    ok = await asyncio.shield(request)
+                except asyncio.CancelledError:
+                    await request
+                    raise
+            if ok and snapshot["bans"] == self.global_bans:
+                await self.sql(self._write_meta, GLOBAL_META_KEY, json.dumps(snapshot, ensure_ascii=False), 0)
+                self.global_dirty = False
+            else:
+                self.global_due = time.monotonic() + 10
+            return ok
 
     async def save(self, group, urgent=False):
         group["revision"] = int(group.get("revision", 0)) + 1
@@ -247,34 +252,38 @@ class GuardStore:
         await self.sql(self._write, gid, encoded, 1)
         self.groups[gid] = group
         self.dirty.add(gid)
-        first = self.first_dirty.setdefault(gid, time.monotonic())
-        self.due[gid] = min(first + 5, time.monotonic() + (0 if urgent else 2))
+        self.first_dirty.setdefault(gid, time.monotonic())
+        self.due[gid] = time.monotonic()
+        await self.flush(gid)
+
+    def _mark_clean(self, gid, revision):
+        with self.db:
+            self.db.execute("UPDATE groups_state SET dirty=0 WHERE gid=? AND json_extract(payload, '$.revision')=?", (gid, revision))
 
     async def flush(self, gid):
-        group = self.groups.get(gid)
-        if group is None:
-            return True
-        snapshot = copy.deepcopy(group)
-        async with ub.DB_WRITE_SEMAPHORE:
-            request = asyncio.create_task(asyncio.to_thread(ub.db_save_data, "config", str(gid), snapshot))
-            try:
-                ok = await asyncio.shield(request)
-            except asyncio.CancelledError:
-                await request
-                raise
-        async with lock_for(gid):
+        # Never acquire a group lock here: callers often already hold it.
+        async with self.remote_lock:
+            group = self.groups.get(gid)
+            if group is None or gid not in self.dirty:
+                return True
+            snapshot = copy.deepcopy(group)
+            async with ub.DB_WRITE_SEMAPHORE:
+                request = asyncio.create_task(asyncio.to_thread(ub.db_save_data, "config", str(gid), snapshot))
+                try:
+                    ok = await asyncio.shield(request)
+                except asyncio.CancelledError:
+                    await request
+                    raise
             if ok:
                 self.errors.discard(gid)
+                await self.sql(self._mark_clean, gid, snapshot["revision"])
                 if group["revision"] == snapshot["revision"]:
-                    await self.sql(self._write, gid, json.dumps(snapshot, ensure_ascii=False), 0)
                     self.dirty.discard(gid)
                     self.first_dirty.pop(gid, None)
-                else:
-                    self.due[gid] = time.monotonic() + 2
             else:
                 self.errors.add(gid)
-                self.due[gid] = time.monotonic() + 30
-        return ok
+                self.due[gid] = time.monotonic() + 10
+            return ok
 
     def _write_members(self, rows):
         with self.db:
@@ -370,6 +379,8 @@ async def sync_admins(group):
 async def show(uid, text, builder, screen="GROUP"):
     state = ub.get_user_state(uid)
     state["state"] = "GUARD_" + screen
+    if any(is_group_owner(group, uid) and gid in STORE.errors for gid, group in STORE.groups.items()):
+        text += "\n\n<i>⚠️ Есть изменения, ещё не подтверждённые Supabase. Они сохранены локально; повторяем отправку.</i>"
     await ub.edit_or_send(uid, text, reply_markup=builder.as_markup(), parse_mode="HTML")
 
 
@@ -393,16 +404,29 @@ def has_hidden_group(uid):
     return any(int(uid) in g.get("hidden", []) and is_group_owner(g, uid) for g in STORE.groups.values())
 
 
+GROUP_LINK_CACHE = {}
+
+
 async def group_title_link(group):
-    try:
-        chat = await bot.get_chat(group["id"])
-        if getattr(chat, "username", None):
-            return f'<a href="https://t.me/{esc(chat.username)}">{esc(group["title"])}</a>'
-        if getattr(chat, "invite_link", None):
-            return f'<a href="{esc(chat.invite_link)}">{esc(group["title"])}</a>'
-    except (TelegramBadRequest, TelegramForbiddenError):
-        pass
-    return esc(group["title"])
+    gid = int(group["id"])
+    cached = GROUP_LINK_CACHE.get(gid)
+    if cached and time.monotonic() - cached[0] < 60:
+        url = cached[1]
+    else:
+        url = group.get("link")
+        try:
+            chat = await bot.get_chat(gid)
+            if getattr(chat, "username", None):
+                url = f"https://t.me/{chat.username}"
+            elif getattr(chat, "invite_link", None):
+                url = chat.invite_link
+        except (TelegramBadRequest, TelegramForbiddenError):
+            pass
+        if not url:
+            raw = str(abs(gid))
+            url = f"https://t.me/c/{raw[3:]}" if raw.startswith("100") else f"tg://openmessage?chat_id={gid}"
+        GROUP_LINK_CACHE[gid] = (time.monotonic(), url)
+    return f'<a href="{html.escape(url, quote=True)}">{esc(group["title"])}</a>'
 
 
 async def message_link(group, message_id, label="сообщение"):
@@ -448,7 +472,7 @@ def _global_reasons_for(uid):
         item = group.get("reports", {}).get(str(int(uid)))
         if not item:
             continue
-        for reason in item.get("reasons", []):
+        for reason in report_reasons(item):
             collected.append((float(reason.get("at", 0)), clip(reason.get("text") or "Без описания", 240)))
     collected.sort(key=lambda row: row[0], reverse=True)
     result = []
@@ -627,7 +651,7 @@ async def render_group(uid, group):
         types.InlineKeyboardButton(text=MODES["files"][0], callback_data=f"gg:mode:{gid}:files"),
     )
     builder.row(
-        types.InlineKeyboardButton(text="📛АнтиНакрутка", callback_data=f"gg:soon:{gid}"),
+        types.InlineKeyboardButton(text="📛АнтиНакрутка", callback_data=f"gg:mode:{gid}:raid"),
         types.InlineKeyboardButton(text=MODES["service"][0], callback_data=f"gg:mode:{gid}:service"),
     )
     builder.row(
@@ -654,7 +678,7 @@ async def render_mode(uid, group, mode):
     builder = InlineKeyboardBuilder()
     button(builder, "Выключить 🔴" if enabled else "Включить 🟢", f"gg:toggle:{group['id']}:{mode}")
     button(builder, "Назад в меню ⬅️", f"gg:group:{group['id']}")
-    await show(uid, f"<b>{title}</b>\n👥 <b>{esc(group['title'])}</b>\n\n<i>{description}</i>\n\n<b>Статус:</b> {'Включён 🟢' if enabled else 'Выключен 🔴'}", builder)
+    await show(uid, f"<b>{title}</b>\n👥 <b>{await group_title_link(group)}</b>\n\n<i>{description}</i>\n\n<b>Статус:</b> {'Включён 🟢' if enabled else 'Выключен 🔴'}", builder)
 
 
 async def render_info(uid, group):
@@ -669,7 +693,7 @@ async def render_info(uid, group):
         own = await bot.get_chat_member(gid, bot.id)
         if own.status == "administrator":
             names.append(user_link(bot.id, own.user.full_name))
-    text = f"<b>ℹ️ Информация о группе</b>\n👥 <b>{esc(group['title'])}</b>\n\n<b>Участников:</b> {count}\n<b>Администраторы:</b>\n"
+    text = f"<b>ℹ️ Информация о группе</b>\n👥 <b>{await group_title_link(group)}</b>\n\n<b>Участников:</b> {count}\n<b>Администраторы:</b>\n"
     # Telegram limits message length; show a bounded admin list.
     text += "\n".join(names[:20])
     if len(names) > 20:
@@ -707,7 +731,7 @@ async def render_reports_home(uid, group):
     builder = InlineKeyboardBuilder()
     button(builder, f"📨 Жалобы ({unread})" if unread else "📨 Жалобы", f"gg:targets:{group['id']}:0")
     button(builder, "Назад в меню ⬅️", f"gg:group:{group['id']}")
-    await show(uid, f"<b>📣 Жалобы пользователей</b>\n👥 <b>{esc(group['title'])}</b>\n\n"
+    await show(uid, f"<b>📣 Жалобы пользователей</b>\n👥 <b>{await group_title_link(group)}</b>\n\n"
                f"Участников с открытыми жалобами: <b>{len(group['reports'])}</b>", builder)
 
 
@@ -722,23 +746,28 @@ async def render_targets(uid, group, page=0):
         button(builder, f"{clip(item['name'], 42)} ({item['count']})", f"gg:target:{group['id']}:{target}")
     page_buttons(builder, page, pages, f"gg:targets:{group['id']}:")
     button(builder, "Назад в меню ⬅️", f"gg:group:{group['id']}")
-    await show(uid, f"<b>📨 Жалобы</b>\n👥 <b>{esc(group['title'])}</b>" + ("\n\nОткрытых жалоб пока нет." if not rows else ""), builder)
+    await show(uid, f"<b>📨 Жалобы</b>\n👥 <b>{await group_title_link(group)}</b>" + ("\n\nОткрытых жалоб пока нет." if not rows else ""), builder)
+
+
+def report_reasons(item):
+    return [r for r in item.get("reasons", [])
+            if str(r.get("text") or "").strip().casefold() not in {"", "без описания", "без причины"}][-3:]
 
 
 async def report_text(group, target, item, notification=False):
     stamp = dt.datetime.fromtimestamp(item["updated"], dt.timezone(dt.timedelta(hours=5))).strftime("%d.%m.%Y %H:%M")
     username = "@" + item["username"] if item.get("username") else "Юзернейм не указан"
-    reasons = "\n".join("• " + esc(clip(r["text"], 240)) for r in reversed(item.get("reasons", [])[-3:]))
+    reasons = "\n".join("• " + esc(clip(r["text"], 240)) for r in reversed(report_reasons(item)))
     group_link = await group_title_link(group)
     messages = item.get("messages", [])
     latest_message = await message_link(group, messages[-1]["message_id"]) if messages else "Нет ссылки"
     return (f"<b>{'📣 Новая жалоба' if notification else '📣 Жалобы на участника'}</b>\n"
             f"👥 <b>{group_link}</b>\n\n"
             f"<b>Пользователь:</b> {user_link(target, item['name'])}\n"
-            f"<b>Юзернейм:</b> {esc(username)}\n<b>Число жалоб:</b> {item['count']}\n"
+            f"<b>Юзернейм:</b> {user_link(target, username) if item.get('username') else esc(username)}\n<b>Число жалоб:</b> {item['count']}\n"
             f"<b>Жалоба:</b> {stamp} (UTC +5)\n"
             f"<b>Сообщение:</b> {latest_message}\n\n"
-            f"<b>Последние причины:</b>\n{reasons or 'Без описания'}")
+            f"<b>Последние причины:</b>\n{reasons or 'Причины не указаны'}")
 
 
 async def render_target(uid, group, target):
@@ -768,7 +797,7 @@ async def open_deep_link(message, argument):
             await STORE.save(group)
         builder = InlineKeyboardBuilder()
         button(builder, "🔰 Открыть меню групп", "gg:list:0")
-        await show(uid, f"<b>👋 Вы администратор группы {esc(group['title'])}</b>\n\n"
+        await show(uid, f"<b>👋 Вы администратор группы {await group_title_link(group)}</b>\n\n"
                    "Здесь можно настроить защиту группы и рассматривать жалобы участников.", builder)
     except (ValueError, TelegramBadRequest, TelegramForbiddenError):
         builder = InlineKeyboardBuilder()
@@ -811,12 +840,13 @@ async def guard_callback(callback: types.CallbackQuery):
         gid = int(parts[2])
         permission = "can_restrict_members" if command in {"ban", "nb"} else None
         if command == "toggle":
-            permission = "can_delete_messages"
+            permission = "can_restrict_members" if len(parts) > 3 and parts[3] == "raid" else "can_delete_messages"
         group, _, _ = await require_admin(gid, uid, permission)
         if command not in {"ban", "nb", "ignore"} and not is_group_owner(group, uid):
             raise ValueError("Настройки этой группы доступны только тому, кто добавил Qwitty.")
-        if command == "soon":
-            await safe_answer(callback, "АнтиНакрутка ещё в разработке 🛠")
+        if command == "soon":  # Old keyboards open the working screen, too.
+            await safe_answer(callback)
+            await render_mode(uid, group, "raid")
             return
         if command == "ignore":
             await callback.message.delete()
@@ -833,6 +863,10 @@ async def guard_callback(callback: types.CallbackQuery):
                 if mode not in MODES:
                     raise ValueError("Неизвестный режим")
                 group["settings"][mode] = not group["settings"].get(mode, False)
+                if mode == "raid" and not group["settings"][mode]:
+                    group.pop("raid_window", None)
+                    group.pop("raid_pending", None)
+                    group.pop("raid_seen", None)
                 await STORE.save(group)
                 await render_mode(uid, group, mode)
             elif command == "commands":
@@ -874,8 +908,8 @@ async def guard_callback(callback: types.CallbackQuery):
                 builder = InlineKeyboardBuilder()
                 button(builder, "Да, я уверен", f"gg:hide:{gid}")
                 button(builder, "Назад ⬅️", f"gg:group:{gid}")
-                await show(uid, f"<b>Убрать {esc(group['title'])} из вашего списка?</b>\n\n"
-                           "Группа останется в группе. Уведомления о её жалобах вам приходить не будут.", builder)
+                await show(uid, f"<b>Убрать {await group_title_link(group)} из вашего списка?</b>\n\n"
+                           "Бот останется в группе. Уведомления о её жалобах вам приходить не будут.", builder)
             elif command == "hide":
                 group["hidden"] = sorted(set(group.get("hidden", [])) | {uid})
                 await STORE.save(group)
@@ -1127,7 +1161,9 @@ async def receive_report(message, group, reason):
     item.update(name=clip(target.full_name, 100), username=target.username,
                 updated=now, sequence=group["sequence"])
     item["count"] += 1
-    item["reasons"] = (item["reasons"] + [{"text": clip(reason.strip() or "Без описания", 240), "at": now}])[-3:]
+    item["reasons"] = report_reasons(item)
+    if reason.strip():
+        item["reasons"] = (item["reasons"] + [{"text": clip(reason.strip(), 240), "at": now}])[-3:]
     item["messages"] = (item["messages"] + [{"message_id": int(source.message_id), "at": now}])[-3:]
     group["dedup"][fingerprint] = now
     if len(group["dedup"]) > 2000:
@@ -1282,6 +1318,105 @@ async def bot_membership(event: types.ChatMemberUpdated):
     await refresh_open_lists(group)
 
 
+RAID_THRESHOLD = 50
+RAID_SECONDS = 60
+RAID_RUNNING = set()
+
+
+def member_present(member):
+    return member.status in {"creator", "administrator", "member"} or (
+        member.status == "restricted" and bool(getattr(member, "is_member", False)))
+
+
+def close_raid_window(group, now):
+    window = group.get("raid_window", {})
+    due = window.get("due")
+    if not due or now < due:
+        return False
+    pending = group.setdefault("raid_pending", {})
+    for uid in window.get("members", {}):
+        pending.setdefault(uid, {"joined": window["members"][uid], "retry_at": 0})
+    group["last_raid"] = {"at": due, "count": len(window.get("members", {}))}
+    group["raid_window"] = {"members": {}, "due": None}
+    return True
+
+
+async def record_raid_join(group, user, joined_at=None):
+    """Called with the group lock held. Count each account once per window."""
+    if not group.get("active") or not group.get("settings", {}).get("raid") or user.id == bot.id:
+        return
+    stamp = float(joined_at if joined_at is not None else time.time())
+    uid = str(user.id)
+    seen = group.setdefault("raid_seen", {})
+    if uid in seen and abs(stamp - float(seen[uid])) < RAID_SECONDS:
+        return  # chat_member + service message describe the same join.
+    closed = close_raid_window(group, stamp)
+    window = group.setdefault("raid_window", {"members": {}, "due": None})
+    members = window.setdefault("members", {})
+    if not window.get("due"):
+        members = {k: v for k, v in members.items() if stamp - float(v) < RAID_SECONDS}
+        window["members"] = members
+    members[uid] = stamp
+    seen[uid] = stamp
+    group["raid_seen"] = {k: v for k, v in seen.items() if stamp - float(v) < RAID_SECONDS * 2}
+    if len(members) >= RAID_THRESHOLD and not window.get("due"):
+        window["due"] = min(members.values()) + RAID_SECONDS
+    await STORE.save(group, urgent=closed or bool(window.get("due")))
+
+
+async def process_raid(gid):
+    try:
+        async with lock_for(gid):
+            group = STORE.groups.get(gid)
+            if not group or not group.get("active") or not group.get("settings", {}).get("raid"):
+                return
+            if close_raid_window(group, time.time()):
+                await STORE.save(group, urgent=True)
+            targets = list(group.get("raid_pending", {}))
+        for uid in targets:
+            async with lock_for(gid):
+                group = STORE.groups.get(gid)
+                if not group or not group.get("active") or not group.get("settings", {}).get("raid"):
+                    return
+                entry = group.get("raid_pending", {}).get(uid)
+                if not entry or float(entry.get("retry_at", 0)) > time.time():
+                    continue
+                try:
+                    member = await bot.get_chat_member(gid, int(uid))
+                    # An account promoted to admin during the minute must be protected.
+                    if member.status not in ADMIN_STATUSES and int(uid) != bot.id:
+                        await bot.ban_chat_member(gid, int(uid))
+                    group["raid_pending"].pop(uid, None)
+                except TelegramRetryAfter as exc:
+                    entry["retry_at"] = time.time() + exc.retry_after + 1
+                    await STORE.save(group, urgent=True)
+                    return
+                except (TelegramBadRequest, TelegramForbiddenError) as exc:
+                    entry["retry_at"] = time.time() + 60
+                    entry["error"] = type(exc).__name__
+                except Exception as exc:
+                    entry["retry_at"] = time.time() + 15
+                    entry["error"] = type(exc).__name__
+                await STORE.save(group, urgent=True)
+            await asyncio.sleep(0.05)
+    finally:
+        RAID_RUNNING.discard(gid)
+
+
+async def raid_worker():
+    while True:
+        now = time.time()
+        for gid, group in list(STORE.groups.items()):
+            if gid in RAID_RUNNING or not group.get("active") or not group.get("settings", {}).get("raid"):
+                continue
+            due = group.get("raid_window", {}).get("due")
+            has_pending = any(float(v.get("retry_at", 0)) <= now for v in group.get("raid_pending", {}).values())
+            if (due and due <= now) or has_pending:
+                RAID_RUNNING.add(gid)
+                spawn(process_raid(gid))
+        await asyncio.sleep(0.5)
+
+
 @dp.chat_member(F.chat.type.in_(GROUP_TYPES))
 async def admin_membership(event: types.ChatMemberUpdated):
     if not STORE.ready:
@@ -1289,8 +1424,12 @@ async def admin_membership(event: types.ChatMemberUpdated):
     gid = event.chat.id
     group = STORE.groups.get(gid)
     if not group:
-        return
+        async with lock_for(gid):
+            group = STORE.groups.get(gid) or await discover_group(event.chat)
     member = event.new_chat_member
+    if not member_present(event.old_chat_member) and member_present(member) and member.status not in ADMIN_STATUSES:
+        async with lock_for(gid):
+            await record_raid_join(group, member.user, event.date.timestamp())
     remember_member(gid, member.user)
     if is_global_banned(member.user.id) and member.status in PRESENT_STATUSES and member.status not in ADMIN_STATUSES:
         await enforce_global_ban_in_group(group, member.user.id, member.user, announce=True)
@@ -1350,6 +1489,7 @@ async def group_message(message: types.Message):
                 remember_member(gid, message.reply_to_message.from_user)
             for joined in message.new_chat_members or []:
                 remember_member(gid, joined)
+                await record_raid_join(group, joined, message.date.timestamp())
                 if not joined.is_bot and is_global_banned(joined.id):
                     spawn(enforce_global_ban_in_group(group, joined.id, joined, announce=True))
             if any(getattr(message, field, None) for field in SERVICE_FIELDS):
@@ -1407,7 +1547,7 @@ async def writer_loop():
                 for gid, group in list(STORE.groups.items()):
                     async with lock_for(gid):
                         cutoff = time.time() - REPORT_TTL
-                        expired = [k for k, v in group["reports"].items() if v.get("updated", 0) < cutoff]
+                        expired = []  # Open complaints persist until explicitly handled.
                         dedup = {k: v for k, v in group["dedup"].items() if v > cutoff}
                         if expired or dedup != group["dedup"]:
                             for key in expired:
@@ -1427,6 +1567,7 @@ async def start_guard():
     await bot_name()
     spawn(writer_loop())
     spawn(report_notification_worker())
+    spawn(raid_worker())
     for gid in STORE.groups:
         schedule_welcome(gid)
 
@@ -1438,6 +1579,7 @@ async def stop_guard():
     await asyncio.gather(*tasks, return_exceptions=True)
     TASKS.clear()
     WELCOME_TASKS.clear()
+    RAID_RUNNING.clear()
     await STORE.flush_members()
     if STORE.global_dirty:
         try:

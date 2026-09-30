@@ -2,11 +2,11 @@ import copy
 from contextvars import ContextVar
 import struct
 import binascii
-import base64
 import hashlib
 import html
 import json
 import sqlite3
+import threading
 import uuid
 import zlib
 import asyncio
@@ -17,7 +17,6 @@ import glob
 import logging
 import re
 import random
-import psutil
 import ntplib
 from aiogram import Bot, Dispatcher, types, F, BaseMiddleware
 from aiogram.filters import CommandStart
@@ -517,6 +516,52 @@ def minimize_config(cfg):
     return cfg
 
 
+class DurableOutbox:
+    """Pending non-message state. Keep this directory on persistent disk if available."""
+    def __init__(self):
+        self.db = None
+        self.lock = threading.RLock()
+
+    def open(self):
+        if self.db is None:
+            path = os.getenv("CONFIG_OUTBOX_SQLITE", os.path.join(SESSIONS_DIR, "config_outbox.sqlite3"))
+            os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+            self.db = sqlite3.connect(path, check_same_thread=False, timeout=10)
+            os.chmod(path, 0o600)
+            self.db.execute("PRAGMA journal_mode=WAL")
+            self.db.execute("PRAGMA synchronous=FULL")
+            self.db.execute("CREATE TABLE IF NOT EXISTS pending (tbl TEXT, uid TEXT, payload TEXT, PRIMARY KEY(tbl,uid))")
+            self.db.commit()
+
+    def put(self, table, uid, payload):
+        snapshot = copy.deepcopy(payload)
+        if table == "config":
+            minimize_config(snapshot)
+        encoded = json.dumps(snapshot, ensure_ascii=False, sort_keys=True)
+        with self.lock:
+            self.open()
+            with self.db:
+                self.db.execute("INSERT OR REPLACE INTO pending VALUES(?,?,?)", (table, str(uid), encoded))
+
+    def acknowledge(self, table, uid, payload):
+        snapshot = copy.deepcopy(payload)
+        if table == "config":
+            minimize_config(snapshot)
+        encoded = json.dumps(snapshot, ensure_ascii=False, sort_keys=True)
+        with self.lock:
+            self.open()
+            with self.db:
+                self.db.execute("DELETE FROM pending WHERE tbl=? AND uid=? AND payload=?", (table, str(uid), encoded))
+
+    def rows(self):
+        with self.lock:
+            self.open()
+            return [(table, uid, json.loads(payload)) for table, uid, payload in self.db.execute("SELECT tbl,uid,payload FROM pending").fetchall()]
+
+
+OUTBOX = DurableOutbox()
+
+
 def db_get_data(table: str, user_id: str):
     if not supabase:
         return {}
@@ -543,7 +588,7 @@ def db_get_all_config():
             offset += 500
     except Exception as e:
         logging.error(f"Error fetching all Supabase configs: {e}")
-        return []
+        raise RuntimeError("Не удалось загрузить настройки: запуск остановлен, данные не перезаписаны.") from e
 
 def db_save_data(table: str, user_id: str, data: dict):
 
@@ -656,6 +701,7 @@ def queue_db_save(table, uid, data):
     if uid not in table_cache:
         table_cache[uid] = copy.deepcopy(data)
 
+    OUTBOX.put(table, uid, table_cache[uid])
     DB_DIRTY.add(key)
     _bump_db_revision(key)
     _ensure_db_worker(table, uid)
@@ -706,9 +752,15 @@ async def _write_latest_snapshot(table: str, user_id: str, fallback_data=None):
         snapshot = copy.deepcopy(current)
         revision = int(DB_REVISIONS.get(key, 0) or 0)
         async with DB_WRITE_SEMAPHORE:
-            ok = await asyncio.to_thread(db_save_data, table, uid, snapshot)
+            request = asyncio.create_task(asyncio.to_thread(db_save_data, table, uid, snapshot))
+            try:
+                ok = await asyncio.shield(request)
+            except asyncio.CancelledError:
+                await request
+                raise
 
         if ok:
+            OUTBOX.acknowledge(table, uid, snapshot)
             DB_SAVED_REVISIONS[key] = max(int(DB_SAVED_REVISIONS.get(key, 0) or 0), revision)
             latest = MEMORY_DB.get(table, {}).get(uid, fallback_data if fallback_data is not None else {})
 
@@ -767,6 +819,7 @@ async def async_db_save(table: str, user_id: str, data: dict, max_attempts=3, ba
     if uid not in table_cache:
         table_cache[uid] = copy.deepcopy(data)
 
+    OUTBOX.put(table, uid, table_cache[uid])
     DB_DIRTY.add(key)
     _bump_db_revision(key)
 
@@ -801,14 +854,12 @@ async def db_retry_loop():
 
 
 async def persist_user_config_now(user_id: int, cfg: dict):
-
     uid = str(user_id)
     MEMORY_DB["config"][uid] = cfg
-    queue_db_save("config", uid, cfg)
-
-
-    await asyncio.sleep(0)
-    return True
+    ok = await async_db_save("config", uid, cfg)
+    if not ok:
+        get_user_state(user_id)["save_error"] = True
+    return ok
 
 
 async def sync_profile_base_from_telegram(user_id: int, cfg=None, me=None, persist=True):
@@ -1021,10 +1072,16 @@ class RestartMiddleware(BaseMiddleware):
             if event.message.chat.id != event.from_user.id:
                 await event.answer("Откройте бота в личном чате.", show_alert=True)
                 return
+            if event.data == "tools":
+                return await handler(event, data)
             if event.data == "saved_ok" or (event.data or "").startswith(("gg:nb:", "gg:ignore:")):
                 return await handler(event, data)
             user_id = event.from_user.id
             u_state = get_user_state(user_id)
+            live_task = u_state.get("admin_live_task")
+            if live_task and not live_task.done():
+                live_task.cancel()
+                await asyncio.gather(live_task, return_exceptions=True)
             stats_task = u_state.get("admin_stats_task")
             if stats_task and not stats_task.done():
                 stop_admin_server_stats_loop(user_id)
@@ -1117,6 +1174,26 @@ def start_ui_refresh_task(user_id):
     data["ui_refresh_task"] = asyncio.create_task(timenick_ui_refresh_loop(user_id))
 
 
+def separate_back_rows(markup):
+    """Back/return controls always occupy a full, separate row."""
+    if not isinstance(markup, types.InlineKeyboardMarkup):
+        return markup
+    rows = []
+    for row in markup.inline_keyboard:
+        regular = []
+        for btn in row:
+            if "назад" in btn.text.casefold() or "в админ меню" in btn.text.casefold():
+                if regular:
+                    rows.append(regular)
+                    regular = []
+                rows.append([btn])
+            else:
+                regular.append(btn)
+        if regular:
+            rows.append(regular)
+    return types.InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 async def edit_or_send(user_id, text, reply_markup=None, parse_mode=None):
     data = get_user_state(user_id)
 
@@ -1130,6 +1207,7 @@ async def edit_or_send(user_id, text, reply_markup=None, parse_mode=None):
         text = format_plain_ui_html(text)
         parse_mode = "HTML"
 
+    reply_markup = separate_back_rows(reply_markup)
     clean_text = text
     display_text = clean_text
     if data.get("save_error"):
@@ -1414,6 +1492,8 @@ async def update_profile_branding(user_id, sync_base=True):
 
         await data["client"].update_profile(first_name=new_first, last_name=new_last)
         data["last_profile_key"] = profile_key
+        user_cfg["profile_display_name"] = " ".join(filter(None, (new_first, new_last)))
+        await persist_user_config_now(user_id, user_cfg)
 
 
     except FloodWait as e:
@@ -1724,6 +1804,15 @@ async def session_recovery_loop():
 
 async def restore_saved_sessions():
     rows = await asyncio.to_thread(db_get_all_config)
+    # A pending local commit is newer than its remote copy. Replay before login.
+    pending = OUTBOX.rows()
+    configs = {str(row["id"]): row for row in rows}
+    for table, uid, payload in pending:
+        MEMORY_DB.setdefault(table, {})[uid] = payload
+        if table == "config":
+            configs[uid] = {"id": uid, "data": payload}
+        queue_db_save(table, uid, payload)
+    rows = list(configs.values())
     restored = 0
     skipped = 0
     loaded = 0
@@ -1780,6 +1869,9 @@ def stop_admin_server_stats_loop(user_id):
     if task and not task.done():
         task.cancel()
     data["admin_stats_task"] = None
+    live = data.pop("admin_live_task", None)
+    if live and not live.done():
+        live.cancel()
 
 
 @dp.message(F.chat.type == "private", CommandStart())
@@ -3345,7 +3437,7 @@ def saved_page_row(builder, page, pages, prefix):
     if pages <= 1:
         return
     builder.row(
-        types.InlineKeyboardButton(text="⬅️ Назад", callback_data=f"{prefix}{page - 1}" if page else "ignore"),
+        types.InlineKeyboardButton(text="⬅️", callback_data=f"{prefix}{page - 1}" if page else "ignore"),
         types.InlineKeyboardButton(text=f"{page + 1}/{pages}", callback_data="ignore"),
         types.InlineKeyboardButton(text="Вперёд ➡️", callback_data=f"{prefix}{page + 1}" if page + 1 < pages else "ignore"),
     )
@@ -3386,7 +3478,7 @@ async def saved_render_view(uid, token, page):
         stamp = (datetime.datetime.fromtimestamp(event["ts"], datetime.timezone.utc)
                  + datetime.timedelta(hours=offset)).strftime("%d.%m.%Y — %H:%M")
 
-        lines.append(f"{number}) {html.escape(saved_clip(chat['name'], 40))}: «{html.escape(saved_clip(event['before'], 255))}»")
+        lines.append(f"{number}) {saved_profile_link(view['cid'], chat['name'], 40)}: «{html.escape(saved_clip(event['before'], 255))}»")
         if event["kind"] == "delete":
             lines.append(f"🗑 Удалено — {stamp}")
         else:
@@ -3695,7 +3787,7 @@ def build_timenick_screen(user_id, cfg):
         "<b>⏰ Время в профиле</b>\n"
         "<i>Автоматически добавляет текущее время в имя профиля.</i>\n\n"
         f"<b>Статус:</b> {html.escape(status_str, quote=False)}\n"
-        f"<b>Текущий вид:</b>\n{html.escape(current_view, quote=False)}\n"
+        f"<b>Текущий вид:</b>\n{saved_profile_link(user_id, current_view, 128)}\n"
         f"<b>Часовой пояс:</b> UTC{html.escape(sign_str, quote=False)}"
     )
 
@@ -3926,108 +4018,6 @@ async def set_timezone(callback: types.CallbackQuery):
 async def ignore_callback(callback: types.CallbackQuery):
     try: await callback.answer()
     except Exception: pass
-
-
-SERVER_STATS_CACHE = {"supabase_db_mb": None, "supabase_source": None, "updated_at": 0.0}
-SERVER_STATS_LOCK = asyncio.Lock()
-PROCESS_STARTED_AT = time.monotonic()
-try:
-    PROCESS_STARTED_AT -= max(0, time.time() - psutil.Process(os.getpid()).create_time())
-except Exception:
-    pass
-
-
-def _next_render_reset_utc(now=None):
-    now = now or datetime.datetime.now(datetime.timezone.utc)
-    if now.month == 12:
-        return datetime.datetime(now.year + 1, 1, 1, tzinfo=datetime.timezone.utc)
-    return datetime.datetime(now.year, now.month + 1, 1, tzinfo=datetime.timezone.utc)
-
-
-async def _get_supabase_db_mb():
-    if not supabase:
-        return None, "нет подключения"
-
-
-    rpc_name = SUPABASE_DB_SIZE_RPC or "get_database_size_bytes"
-    try:
-        result = await asyncio.to_thread(lambda: supabase.rpc(rpc_name, {}).execute())
-        raw = result.data
-        if isinstance(raw, list) and raw:
-            raw = raw[0]
-        if isinstance(raw, dict):
-            raw = (
-                raw.get("bytes")
-                or raw.get("size_bytes")
-                or raw.get("db_size_bytes")
-                or raw.get("size")
-                or raw.get("database_size_bytes")
-            )
-        value = float(raw)
-        return (value / (1024 * 1024), "rpc_bytes")
-    except Exception as e:
-        logging.warning(f"Не удалось получить точный размер Supabase через RPC {rpc_name}: {e}")
-
-        return None, "rpc_error"
-
-
-async def refresh_server_stats_cache(force=False):
-
-    async with SERVER_STATS_LOCK:
-        if force or time.monotonic() - SERVER_STATS_CACHE["updated_at"] >= 300 or not SERVER_STATS_CACHE["updated_at"]:
-            value, source = await _get_supabase_db_mb()
-            SERVER_STATS_CACHE.update(supabase_db_mb=value, supabase_source=source, updated_at=time.monotonic())
-    return SERVER_STATS_CACHE
-
-
-def _build_server_stats_text(cache):
-    now = datetime.datetime.now(datetime.timezone.utc)
-    reset = _next_render_reset_utc(now)
-    size = cache.get("supabase_db_mb")
-    db_line = (
-        f"<b>База:</b> {size:.1f} / {SUPABASE_DB_LIMIT_MB:g} MB"
-        if size is not None else "<b>База:</b> данные недоступны"
-    )
-    return (
-        "<b>🖥 Статистика сервера</b>\n\n"
-        "<b>🟣 Render</b>\n"
-        f"<b>Сброс лимита:</b> {reset.strftime('%d.%m.%Y %H:%M UTC')}\n"
-        f"<b>До сброса:</b> {format_remaining_time((reset - now).total_seconds())}\n"
-        f"<b>Аптайм процесса:</b> {format_remaining_time(time.monotonic() - PROCESS_STARTED_AT)}\n\n"
-        "<b>🟢 Supabase</b>\n"
-        + db_line
-    )
-
-
-def build_admin_stats_markup():
-    builder = InlineKeyboardBuilder()
-    builder.button(text="Обновить 🔄", callback_data="admin_server_stats_refresh")
-    builder.button(text="⬅️ Назад", callback_data="admin_server_stats_back")
-    builder.adjust(1)
-    return builder.as_markup()
-
-
-async def _admin_server_stats_loop(user_id):
-    data = get_user_state(user_id)
-    while data.get("admin_stats_active"):
-        await asyncio.sleep(1)
-        if not data.get("admin_stats_active"):
-            return
-        try:
-            await bot.edit_message_text(chat_id=user_id, message_id=data["msg_id"],
-                text=_build_server_stats_text(SERVER_STATS_CACHE), reply_markup=build_admin_stats_markup(),
-                parse_mode="HTML")
-        except TelegramRetryAfter as e:
-            await asyncio.sleep(e.retry_after + 1)
-        except TelegramBadRequest as e:
-            if "message is not modified" not in str(e).lower():
-                data["admin_stats_active"] = False
-                return
-        except asyncio.CancelledError:
-            raise
-        except Exception as e:
-            logging.warning("Статистика сервера: %s", e)
-            await asyncio.sleep(5)
 
 
 async def preview_registration(callback):
