@@ -875,7 +875,7 @@ async def guard_callback(callback: types.CallbackQuery):
                 button(builder, "Да, я уверен", f"gg:hide:{gid}")
                 button(builder, "Назад ⬅️", f"gg:group:{gid}")
                 await show(uid, f"<b>Убрать {esc(group['title'])} из вашего списка?</b>\n\n"
-                           "Группа останется у других администраторов. Уведомления о её жалобах вам приходить не будут.", builder)
+                           "Группа останется в группе. Уведомления о её жалобах вам приходить не будут.", builder)
             elif command == "hide":
                 group["hidden"] = sorted(set(group.get("hidden", [])) | {uid})
                 await STORE.save(group)
