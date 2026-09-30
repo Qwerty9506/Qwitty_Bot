@@ -34,7 +34,7 @@ PRESENT_STATUSES = {"creator", "administrator", "member", "restricted"}
 PAGE_SIZE = 5
 REPORT_TTL = 30 * 86400
 MEMBER_TTL = 7 * 86400
-SPAM_WINDOW = 120
+SPAM_WINDOW = 1.0
 MAX_TARGETS = 500
 MAX_GROUP_BYTES = 1024 * 1024
 DANGEROUS_EXTENSIONS = frozenset("""
@@ -44,7 +44,7 @@ DANGEROUS_EXTENSIONS = frozenset("""
 .app .appimage .command .pkg .dmg .reg .inf .ins .isp .py .pyw .rb .pl .cgi
 """.split())
 MODES = {
-    "spam": ("🚯АнтиСпам", "Удаляет второй одинаковый текст подряд. Если между повторами было другое сообщение, второй остаётся, а третий удаляется. Проверяет повторы за последние 2 минуты, включая сообщения администраторов."),
+    "spam": ("🚯АнтиСпам", "Удаляет второе и последующие сообщения одного пользователя, если между сообщениями прошло не больше 1 секунды. Работает и для администраторов."),
     "files": ("⚠️АнтиВирус", "Удаляет потенциально опасные исполняемые файлы и скрипты по расширению. Это фильтр файлов, а не проверка содержимого антивирусом."),
     "raid": ("📛 АнтиНакрутка", "Защищает от массовых входов. При 50 и более новых участниках за 60 секунд по окончании этой минуты блокирует всех участников волны."),
     "service": ("🧹Очистка вх/изм", "Убирает уведомления о входе и выходе участников, закреплении сообщений, изменении названия и фотографии группы."),
@@ -57,7 +57,6 @@ WELCOME_TASKS = {}
 GROUP_LOCKS = {}
 MEMBER_PENDING = OrderedDict()
 ADMIN_CACHE = {}
-SPAM = OrderedDict()
 SPAM_LAST = OrderedDict()
 GLOBAL_USER_LOCKS = {}
 GLOBAL_UNBAN_RUNNING = set()
@@ -1190,50 +1189,24 @@ def dangerous_file(message):
     return any("." + part.rstrip(" .") in DANGEROUS_EXTENSIONS for part in pieces)
 
 
-def message_signature(message):
-    raw = unicodedata.normalize("NFKC", message.text or message.caption or "")
-    raw = "".join(c for c in raw if unicodedata.category(c) != "Cf")
-    text = " ".join(raw.split()).casefold()
-    media_id = ""
-    for field in ("document", "sticker", "video", "animation", "audio", "voice", "video_note"):
-        media = getattr(message, field, None)
-        if media:
-            media_id = field + ":" + str(media.file_unique_id)
-            break
-    if message.photo:
-        media_id = "photo:" + message.photo[-1].file_unique_id
-    if not text and not media_id:
-        return None
-    return hashlib.sha256((text + "\0" + media_id).encode()).hexdigest()
-
-
 def reset_spam(gid):
-    SPAM_LAST.pop(gid, None)
-    for key in list(SPAM):
+    for key in list(SPAM_LAST):
         if key[0] == gid:
-            SPAM.pop(key, None)
+            SPAM_LAST.pop(key, None)
 
 
-def spam_duplicate(gid, uid, mid, signature, now=None):
+def spam_flood(gid, uid, mid, now=None):
+    """Return True for the 2nd+ message from one user inside a 1-second gap."""
     now = time.monotonic() if now is None else float(now)
-    previous = SPAM_LAST.get(gid)
-    if previous and previous[2] == mid:
+    key = (int(gid), int(uid))
+    previous = SPAM_LAST.get(key)
+    if previous and previous[0] == int(mid):
         return False
-    SPAM_LAST[gid] = (uid, signature, mid, now)
-    SPAM_LAST.move_to_end(gid)
-    while len(SPAM_LAST) > 2000:
+    SPAM_LAST[key] = (int(mid), now)
+    SPAM_LAST.move_to_end(key)
+    while len(SPAM_LAST) > 10000:
         SPAM_LAST.popitem(last=False)
-    if signature is None:
-        return False
-    key = (gid, uid, signature)
-    timestamps = [t for t in SPAM.get(key, []) if now - t < SPAM_WINDOW]
-    timestamps.append(now)
-    SPAM[key] = timestamps[-3:]
-    SPAM.move_to_end(key)
-    while len(SPAM) > 10000:
-        SPAM.popitem(last=False)
-    consecutive = bool(previous and previous[0] == uid and previous[1] == signature and now - previous[3] < SPAM_WINDOW)
-    return len(timestamps) >= 3 or (len(timestamps) >= 2 and consecutive)
+    return bool(previous and 0 <= now - previous[1] <= SPAM_WINDOW)
 
 
 UNITS = {
@@ -1744,6 +1717,7 @@ async def group_message(message: types.Message):
     if not STORE.ready:
         return
     gid = message.chat.id
+    received_at = time.monotonic()
     try:
         if message.migrate_to_chat_id:
             await migrate_group(gid, message.migrate_to_chat_id, message.chat.title)
@@ -1775,22 +1749,20 @@ async def group_message(message: types.Message):
                     queue_global_ban(gid, joined.id, joining=True)
                     spawn(enforce_global_ban_in_group(group, joined.id, joined, announce=True, joining=True))
             if any(getattr(message, field, None) for field in SERVICE_FIELDS):
-                spam_duplicate(gid, 0, message.message_id, None)
                 if group["settings"].get("service"):
                     await bot.delete_message(gid, message.message_id)
                 return
-            # See all observed messages when deciding whether a repeat is consecutive.
-            signature = message_signature(message)
             uid = message.from_user.id if message.from_user else 0
-            duplicate = spam_duplicate(gid, uid, message.message_id, signature)
+            flooding = spam_flood(gid, uid, message.message_id, received_at)
+            if group["settings"].get("spam") and flooding and message.from_user and not message.from_user.is_bot and not message.sender_chat:
+                # One user may send one message per second; the 2nd+ rapid message is spam.
+                await bot.delete_message(gid, message.message_id)
+                return
             if await handle_group_command(message, group):
                 return
             if group["settings"].get("files") and dangerous_file(message):
                 await bot.delete_message(gid, message.message_id)
                 return
-            if group["settings"].get("spam") and duplicate and message.from_user and not message.from_user.is_bot and not message.sender_chat:
-                # The same duplicate rule applies to ordinary users and administrators.
-                await bot.delete_message(gid, message.message_id)
     except TelegramRetryAfter as exc:
         logging.warning("Guard rate limit: %s seconds", exc.retry_after)
     except (TelegramBadRequest, TelegramForbiddenError):
