@@ -69,7 +69,7 @@ def build_admin_menu_markup():
     builder = InlineKeyboardBuilder()
     builder.button(text=userbot.get_text(ADMIN_ID, "btn_server_stats"), callback_data="admin_server_stats")
     builder.button(text="Перезапуск сервера ♻️", callback_data="admin_restart_server")
-    builder.button(text="Активные 🟢", callback_data="admin_users_1")
+    builder.button(text="Активные Сессии 🟢", callback_data="admin_users_1")
     builder.button(text="Не-входящие 🔴", callback_data="admin_entries_1")
     builder.button(text="Глобальные паблики 🗂", callback_data="admin_public_groups")
     builder.button(text="Глобальные жалобы 🌐", callback_data="admin_global_reports")
