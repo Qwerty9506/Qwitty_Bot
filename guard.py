@@ -1354,7 +1354,7 @@ async def receive_report(message, group, reason):
         await STORE.save_global_bans(urgent=True)
         group["reports"].pop(str(target.id), None)
         await STORE.save(group, urgent=True)
-        await group_reply(message, "📨 Жалоба отправлена.")
+        await group_reply(message, "📨 Жалоба сохранена в архиве глобального бана.")
         return
     await STORE.save(group, urgent=True)
     notification_key = (group["id"], target.id)
