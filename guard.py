@@ -374,6 +374,21 @@ async def require_admin(gid, uid, permission=None):
     return group, actor, own
 
 
+def guard_bot_ready(member):
+    return (
+        member.status == "administrator"
+        and bool(getattr(member, "can_delete_messages", False))
+        and bool(getattr(member, "can_restrict_members", False))
+    )
+
+
+async def require_guard_bot_ready(gid):
+    own = await bot.get_chat_member(gid, bot.id)
+    if not guard_bot_ready(own):
+        raise ValueError("Сначала выдайте Qwitty права администратора на удаление сообщений и блокировку участников.")
+    return own
+
+
 async def admin_ids(gid, force=False):
     cached = ADMIN_CACHE.get(gid)
     if not force and cached and time.monotonic() < cached[0]:
@@ -1104,8 +1119,6 @@ async def guard_callback(callback: types.CallbackQuery):
             return
         gid = int(parts[2])
         permission = "can_restrict_members" if command in {"ban", "nb"} else None
-        if command == "toggle":
-            permission = "can_restrict_members" if len(parts) > 3 and parts[3] == "raid" else "can_delete_messages"
         group, _, _ = await require_admin(gid, uid, permission)
         if command not in {"ban", "nb", "ignore"} and not is_group_owner(group, uid):
             raise ValueError("Настройки этой группы доступны только тому, кто добавил Qwitty.")
@@ -1117,6 +1130,16 @@ async def guard_callback(callback: types.CallbackQuery):
             await callback.message.delete()
             await safe_answer(callback)
             return
+        if command == "toggle":
+            mode = parts[3]
+            if mode not in MODES:
+                raise ValueError("Неизвестный режим")
+            if not group["settings"].get(mode, False):
+                try:
+                    await require_guard_bot_ready(gid)
+                except ValueError as exc:
+                    await safe_answer(callback, str(exc), True)
+                    return
         await safe_answer(callback)
         async with lock_for(gid):
             if command == "group":
@@ -1127,6 +1150,8 @@ async def guard_callback(callback: types.CallbackQuery):
                 mode = parts[3]
                 if mode not in MODES:
                     raise ValueError("Неизвестный режим")
+                if not group["settings"].get(mode, False):
+                    await require_guard_bot_ready(gid)
                 group["settings"][mode] = not group["settings"].get(mode, False)
                 if mode == "spam":
                     reset_spam(gid)
@@ -1536,7 +1561,7 @@ async def welcome_when_ready(gid):
             return
         try:
             own = await bot.get_chat_member(gid, bot.id)
-            if own.status == "administrator" and time.time() >= group.get("joined_at", 0) + 30:
+            if guard_bot_ready(own) and time.time() >= group.get("joined_at", 0) + 30:
                 await bot.send_message(gid, "<b>Всем привет! Я Qwitty 🛡</b>\n\n"
                                        "Спасибо, что добавили меня в группу. Помогаю администраторам удалять спам, "
                                        "опасные файлы и поддерживать порядок.\n\n"
