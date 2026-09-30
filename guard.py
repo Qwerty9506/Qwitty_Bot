@@ -41,9 +41,9 @@ DANGEROUS_EXTENSIONS = frozenset("""
 .app .appimage .command .pkg .dmg .reg .inf .ins .isp .py .pyw .rb .pl .cgi
 """.split())
 MODES = {
-    "spam": ("🚫 АнтиСпам", "Удаляет второй одинаковый подряд и третий повтор за 2 минуты, даже если между ними писали другие участники."),
-    "files": ("🦠 АнтиВирус", "Удаляет потенциально опасные исполняемые файлы и скрипты по расширению. Это фильтр файлов, а не проверка содержимого антивирусом."),
-    "service": ("🧹 Очистка Вход/Изм", "Убирает уведомления о входе и выходе участников, закреплении сообщений, изменении названия и фотографии группы."),
+    "spam": ("🚯АнтиСпам", "Удаляет повторяющиеся сообщения пользователя в течение 2 минут, даже если между ними были другие сообщения."),
+    "files": ("⚠️АнтиВирус", "Удаляет потенциально опасные исполняемые файлы и скрипты по расширению. Это фильтр файлов, а не проверка содержимого антивирусом."),
+    "service": ("🧹Очистка вх/изм", "Убирает уведомления о входе и выходе участников, закреплении сообщений, изменении названия и фотографии группы."),
 }
 SERVICE_FIELDS = ("new_chat_members", "left_chat_member", "pinned_message",
                   "new_chat_title", "new_chat_photo", "delete_chat_photo")
@@ -54,7 +54,6 @@ GROUP_LOCKS = {}
 MEMBER_PENDING = OrderedDict()
 ADMIN_CACHE = {}
 SPAM = OrderedDict()
-LAST_MESSAGE = OrderedDict()
 REPORT_RATE = OrderedDict()
 REPORT_QUEUE = asyncio.Queue(maxsize=256)
 REPORT_QUEUED = set()
@@ -313,15 +312,37 @@ def button(builder, text, data):
 
 
 def page_buttons(builder, page, pages, prefix):
+    if pages <= 1:
+        return
     builder.row(types.InlineKeyboardButton(text="⬅️", callback_data=f"{prefix}{page-1}" if page else "gg:noop"),
                 types.InlineKeyboardButton(text=f"{page+1}/{pages}", callback_data="gg:noop"),
                 types.InlineKeyboardButton(text="➡️", callback_data=f"{prefix}{page+1}" if page+1 < pages else "gg:noop"))
 
 
+def is_group_owner(group, uid):
+    return int(group.get("added_by") or 0) == int(uid)
+
+
+def has_hidden_group(uid):
+    return any(int(uid) in g.get("hidden", []) and is_group_owner(g, uid) for g in STORE.groups.values())
+
+
+async def group_title_link(group):
+    try:
+        chat = await bot.get_chat(group["id"])
+        if getattr(chat, "username", None):
+            return f'<a href="https://t.me/{esc(chat.username)}">{esc(group["title"])}</a>'
+        if getattr(chat, "invite_link", None):
+            return f'<a href="{esc(chat.invite_link)}">{esc(group["title"])}</a>'
+    except (TelegramBadRequest, TelegramForbiddenError):
+        pass
+    return esc(group["title"])
+
+
 async def visible_groups(uid):
     found = []
     for group in list(STORE.groups.values()):
-        if not group.get("active") or hidden(group, uid) or str(uid) not in group.get("admins", {}):
+        if not group.get("active") or hidden(group, uid) or not is_group_owner(group, uid):
             continue
         try:
             await require_admin(group["id"], uid)
@@ -342,10 +363,11 @@ async def render_groups(uid, page=0, banner=""):
         button(builder, "👥 " + clip(group["title"], 55), f"gg:group:{group['id']}")
     username = await bot_name()
     builder.row(types.InlineKeyboardButton(text="➕ Добавить группу", url=f"https://t.me/{username}?startgroup=guard&admin=delete_messages+restrict_members"))
-    button(builder, "🔄 Восстановить группы", "gg:restore")
+    if has_hidden_group(uid):
+        button(builder, "🔄 Восстановить группы", "gg:restore")
     page_buttons(builder, page, pages, "gg:list:")
     button(builder, "Назад в главное меню 🏠", "root_menu")
-    text = "<b>🛡 Group Guard</b>\n<i>Управление группами</i>"
+    text = "<b>🔰 Group Guard</b>\n<i>Управление группами</i>"
     if not groups:
         text += "\n\nДобавьте бота в группу и выдайте ему права администратора."
     if banner:
@@ -362,11 +384,14 @@ async def restore_groups(uid):
             actor = await bot.get_chat_member(group["id"], uid)
             if own.status not in PRESENT_STATUSES or actor.status not in ADMIN_STATUSES:
                 continue
+            if not group.get("added_by") and actor.status == "creator":
+                group["added_by"] = uid
+            if not is_group_owner(group, uid) or uid not in group.get("hidden", []):
+                continue
             chat = await bot.get_chat(group["id"])
             async with lock_for(group["id"]):
                 group["active"] = True
                 group["title"] = clip(chat.title, 128)
-                group["admins"][str(uid)] = clip(actor.user.full_name, 100)
                 group["hidden"] = [x for x in group.get("hidden", []) if x != uid]
                 await STORE.save(group)
         except (TelegramBadRequest, TelegramForbiddenError):
@@ -381,15 +406,39 @@ async def restore_groups(uid):
 async def render_group(uid, group):
     gid = group["id"]
     active = any(group["settings"].get(mode) for mode in MODES)
+    try:
+        admins = await sync_admins(group)
+        count = await bot.get_chat_member_count(gid)
+        group["member_count"] = count
+    except (TelegramBadRequest, TelegramForbiddenError):
+        admins = {}
+        count = group.get("member_count") or "?"
+    names = [user_link(m.user.id, m.user.full_name) for m in admins.values() if not m.user.is_bot]
+    title = await group_title_link(group)
+
     builder = InlineKeyboardBuilder()
-    for mode in ("spam", "files"):
-        button(builder, MODES[mode][0], f"gg:mode:{gid}:{mode}")
-    button(builder, "🛑 АнтиНакрутка", f"gg:soon:{gid}")
-    button(builder, MODES["service"][0], f"gg:mode:{gid}:service")
+    builder.row(
+        types.InlineKeyboardButton(text=MODES["spam"][0], callback_data=f"gg:mode:{gid}:spam"),
+        types.InlineKeyboardButton(text=MODES["files"][0], callback_data=f"gg:mode:{gid}:files"),
+    )
+    builder.row(
+        types.InlineKeyboardButton(text="📛АнтиНакрутка", callback_data=f"gg:soon:{gid}"),
+        types.InlineKeyboardButton(text=MODES["service"][0], callback_data=f"gg:mode:{gid}:service"),
+    )
+    builder.row(
+        types.InlineKeyboardButton(text="📑 Команды", callback_data=f"gg:commands:{gid}"),
+        types.InlineKeyboardButton(text="🔖 Жалобы", callback_data=f"gg:targets:{gid}:0"),
+    )
     button(builder, "ℹ️ Инфо", f"gg:info:{gid}")
     button(builder, "🗑 Удалить из списка", f"gg:remove:{gid}")
     button(builder, "Назад в меню ⬅️", "gg:list:0")
-    text = f"<b>👥 {esc(group['title'])}</b>\n\nЗащита группы — {'активна 🟢' if active else 'пока неактивна ⚪'}"
+
+    text = (f"<b>👥 {title}</b>\n\n"
+            f"Защита группы — {'активна 🟢' if active else 'пока неактивна ⚪'}\n\n"
+            f"<b>Участников:</b> {count}\n\n"
+            f"<b>Админы:</b> {', '.join(names[:20]) if names else 'Нет данных'}")
+    if len(names) > 20:
+        text += f" и ещё {len(names)-20}"
     if gid in STORE.errors:
         text += "\n\n<i>Резервная копия настроек ещё не записана. Повторяем автоматически.</i>"
     await show(uid, text, builder)
@@ -422,16 +471,14 @@ async def render_info(uid, group):
     if len(names) > 20:
         text += f"\n<i>И ещё {len(names)-20}</i>"
     builder = InlineKeyboardBuilder()
-    button(builder, "📋 Список команд", f"gg:commands:{gid}")
-    button(builder, "📣 Жалобы пользователей", f"gg:reports:{gid}")
     button(builder, "Назад в меню ⬅️", f"gg:group:{gid}")
     await show(uid, text, builder)
 
 
 async def render_commands(uid, group):
     builder = InlineKeyboardBuilder()
-    button(builder, "Назад в меню ⬅️", f"gg:info:{group['id']}")
-    await show(uid, "<b>📋 Список команд</b>\n\n"
+    button(builder, "Назад в меню ⬅️", f"gg:group:{group['id']}")
+    await show(uid, "<b>📑 Список команд</b>\n\n"
                "<code>/ban 1 day 2 hours @username</code>\n"
                "<code>/mute 5 мин 2 часа 1 день @username</code>\n"
                "<code>/kick @username</code>\n"
@@ -470,7 +517,7 @@ async def render_targets(uid, group, page=0):
     for target, item in rows[page*5:(page+1)*5]:
         button(builder, f"{clip(item['name'], 42)} ({item['count']})", f"gg:target:{group['id']}:{target}")
     page_buttons(builder, page, pages, f"gg:targets:{group['id']}:")
-    button(builder, "Назад в меню ⬅️", f"gg:reports:{group['id']}")
+    button(builder, "Назад в меню ⬅️", f"gg:group:{group['id']}")
     await show(uid, f"<b>📨 Жалобы</b>\n👥 <b>{esc(group['title'])}</b>" + ("\n\nОткрытых жалоб пока нет." if not rows else ""), builder)
 
 
@@ -500,13 +547,18 @@ async def open_deep_link(message, argument):
     uid = message.from_user.id
     try:
         gid = int(argument.removeprefix("gg_"))
-        group, _, _ = await require_admin(gid, uid)
+        group, actor, _ = await require_admin(gid, uid)
+        if not group.get("added_by") and actor.status == "creator":
+            group["added_by"] = uid
+            await STORE.save(group)
+        if not is_group_owner(group, uid):
+            raise ValueError("Настройки этой группы доступны только тому, кто добавил Qwitty.")
         async with lock_for(gid):
             group["admins"][str(uid)] = clip(message.from_user.full_name, 100)
             group["hidden"] = [x for x in group.get("hidden", []) if x != uid]
             await STORE.save(group)
         builder = InlineKeyboardBuilder()
-        button(builder, "🛡 Открыть меню групп", "gg:list:0")
+        button(builder, "🔰 Открыть меню групп", "gg:list:0")
         await show(uid, f"<b>👋 Вы администратор группы {esc(group['title'])}</b>\n\n"
                    "Здесь можно настроить защиту группы и рассматривать жалобы участников.", builder)
     except (ValueError, TelegramBadRequest, TelegramForbiddenError):
@@ -552,6 +604,8 @@ async def guard_callback(callback: types.CallbackQuery):
         if command == "toggle":
             permission = "can_delete_messages"
         group, _, _ = await require_admin(gid, uid, permission)
+        if command not in {"ban", "nb", "ignore"} and not is_group_owner(group, uid):
+            raise ValueError("Настройки этой группы доступны только тому, кто добавил Qwitty.")
         if command == "soon":
             await safe_answer(callback, "АнтиНакрутка ещё в разработке 🛠")
             return
@@ -586,6 +640,11 @@ async def guard_callback(callback: types.CallbackQuery):
                 target = int(parts[3])
                 if str(target) not in group["reports"]:
                     raise ValueError("Жалоба уже обработана другим администратором.")
+                target_member = await bot.get_chat_member(gid, target)
+                if target_member.status in ADMIN_STATUSES:
+                    group["reports"].pop(str(target), None)
+                    await STORE.save(group, urgent=True)
+                    raise ValueError("Нельзя блокировать владельца или администратора группы. Жалоба удалена.")
                 await moderate(group, uid, target, "ban", None)
                 group["reports"].pop(str(target), None)
                 await STORE.save(group, urgent=True)
@@ -667,14 +726,9 @@ def message_signature(message):
 
 
 def spam_duplicate(gid, uid, mid, signature, now=None):
-    now = time.monotonic() if now is None else now
-    previous = LAST_MESSAGE.get(gid)
-    LAST_MESSAGE[gid] = (uid, signature, mid, now)
-    LAST_MESSAGE.move_to_end(gid)
-    while len(LAST_MESSAGE) > 5000:
-        LAST_MESSAGE.popitem(last=False)
     if signature is None:
         return False
+    now = time.monotonic() if now is None else now
     key = (gid, uid, signature)
     entry = SPAM.get(key)
     if not entry or now - entry[0] >= SPAM_WINDOW:
@@ -686,9 +740,7 @@ def spam_duplicate(gid, uid, mid, signature, now=None):
     SPAM.move_to_end(key)
     while len(SPAM) > 10000:
         SPAM.popitem(last=False)
-    consecutive = (previous and previous[0] == uid and previous[1] == signature
-                   and previous[2] != mid and now - previous[3] < SPAM_WINDOW)
-    return bool(consecutive or count >= 3)
+    return count >= 2
 
 
 UNITS = {
@@ -898,7 +950,13 @@ async def handle_group_command(message, group):
             await receive_report(message, group, arguments)
         else:
             if not message.from_user or message.sender_chat:
-                raise ValueError("Отправьте команду от своего аккаунта, без анонимного режима.")
+                return True
+            try:
+                actor = await bot.get_chat_member(group["id"], message.from_user.id)
+            except (TelegramBadRequest, TelegramForbiddenError):
+                return True
+            if actor.status not in ADMIN_STATUSES:
+                return True
             await require_admin(group["id"], message.from_user.id, "can_restrict_members")
             target, duration_text = await resolve_target(message, arguments)
             if command == "kick" and duration_text:
@@ -969,16 +1027,13 @@ async def welcome_when_ready(gid):
         try:
             own = await bot.get_chat_member(gid, bot.id)
             if own.status == "administrator" and time.time() >= group.get("joined_at", 0) + 30:
-                builder = InlineKeyboardBuilder()
-                builder.row(types.InlineKeyboardButton(text="Управление для админов 🛡", url=f"https://t.me/{await bot_name()}?start=gg_{gid}"))
                 await bot.send_message(gid, "<b>Всем привет! Я Qwitty 🛡</b>\n\n"
                                        "Спасибо, что добавили меня в группу. Помогаю администраторам удалять спам, "
                                        "опасные файлы и поддерживать порядок.\n\n"
                                        "<b>Заметили нарушение?</b> Ответьте на сообщение участника:\n"
                                        "<code>/admin причина</code>\n<i>Причину можно не указывать. Сообщение останется в чате, "
-                                       "а жалоба попадёт администрации.</i>\n\n"
-                                       "Администраторы могут открыть настройки кнопкой ниже. Режимы защиты включаются в меню группы.",
-                                       parse_mode="HTML", reply_markup=builder.as_markup())
+                                       "а жалоба попадёт администрации.</i>",
+                                       parse_mode="HTML")
                 async with lock_for(gid):
                     group["welcome_pending"] = False
                     await STORE.save(group, urgent=True)

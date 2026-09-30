@@ -1817,8 +1817,7 @@ async def cmd_start(message: types.Message):
 def root_menu_markup(user_id=None):
     builder = InlineKeyboardBuilder()
     builder.row(types.InlineKeyboardButton(text="♨️ Account Manager", callback_data="userbot"),
-                types.InlineKeyboardButton(text="🛡 Group Guard", callback_data="guard"))
-    builder.row(types.InlineKeyboardButton(text="🧰 Tools", callback_data="tools"))
+                types.InlineKeyboardButton(text="🔰 Group Guard", callback_data="guard"))
     if user_id == ADMIN_ID:
         builder.row(types.InlineKeyboardButton(text="👑 Admin", callback_data="admin_menu"))
     return builder.as_markup()
