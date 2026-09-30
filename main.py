@@ -77,7 +77,7 @@ async def main():
     await guard.start_guard()
     recovery_task = asyncio.create_task(session_recovery_loop())
 
-    # Не блокируем старт polling на 45 секунд: финализатор работает отдельно.
+                                                                             
     admin._start_restart_finalizer()
     logging.info("🚀 Бот успешно запущен!")
 

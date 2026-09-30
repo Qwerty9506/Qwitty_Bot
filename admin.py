@@ -64,6 +64,9 @@ async def open_admin_menu_for(user_id: int):
     userbot.stop_admin_server_stats_loop(user_id)
     data = userbot.get_user_state(user_id)
     data["state"] = "ADMIN"
+    data.pop("admin_gban_target", None)
+    data.pop("admin_gban_mode", None)
+    data.pop("admin_gban_return_gid", None)
     await userbot.edit_or_send(user_id, "<b>👑 Админ-меню</b>\n<i>Управление сервером и пользователями</i>", reply_markup=build_admin_menu_markup(), parse_mode="HTML")
 
 
@@ -401,7 +404,11 @@ async def _render_admin_banned_detail(user_id: int, target: int):
     item.setdefault("username", entry.get("username"))
     item.setdefault("updated", entry.get("updated", 0))
     item.setdefault("messages", [])
-    item.setdefault("reasons", [{"text": r, "at": entry.get("updated", 0)} for r in entry.get("reasons", [])])
+    global_reason = str(entry.get("global_reason") or "").strip()
+    if not global_reason:
+        stored = entry.get("reasons") or []
+        global_reason = str(stored[0]).strip() if stored else "Без описания"
+    item["reasons"] = [{"text": global_reason, "at": entry.get("updated", 0)}]
     group = entry.get("group")
     if group and group.get("id") is not None:
         group = guard.STORE.groups.get(int(group["id"])) or group
@@ -507,17 +514,147 @@ async def admin_global_ban(callback: types.CallbackQuery):
             target = int(parts[3])
         else:
             raise ValueError("Кнопка устарела.")
-        await callback.answer("Глобальная блокировка…", cache_time=0)
-        await guard.global_ban_user(target)
-        if mode == "p" and return_gid in guard.STORE.groups:
-            await _render_admin_public_reports(callback.from_user.id, return_gid, 1)
-        else:
-            await _render_admin_new_reports(callback.from_user.id, 1)
+
+                                                                               
+                                                                                   
+        data = userbot.get_user_state(callback.from_user.id)
+        data["state"] = "ADMIN_GBAN_REASON"
+        data["admin_gban_target"] = target
+        data["admin_gban_mode"] = mode
+        data["admin_gban_return_gid"] = return_gid
+
+        builder = InlineKeyboardBuilder()
+        builder.button(text="Отмена ⬅️", callback_data="admin_gban_cancel")
+        builder.adjust(1)
+        await userbot.edit_or_send(
+            callback.from_user.id,
+            f"<b>🌐 Причина глобального бана</b>\n\n"
+            f"Пользователь: {guard.user_link(target, 'Открыть профиль')}\n\n"
+            "Напишите причину следующим сообщением. Она будет сохранена как причина глобального бана "
+            "и показана во всех группах, где Qwitty применит эту блокировку.\n\n"
+            "<i>Максимум 240 символов.</i>",
+            reply_markup=builder.as_markup(),
+            parse_mode="HTML",
+        )
+        await callback.answer("Введите причину глобального бана", cache_time=0)
     except (ValueError, IndexError, TelegramBadRequest) as exc:
         try:
-            await callback.answer(str(exc) or "Не удалось применить глобальный бан.", show_alert=True)
+            await callback.answer(str(exc) or "Не удалось открыть ввод причины.", show_alert=True)
         except TelegramBadRequest:
             pass
+
+
+@dp.callback_query(F.data == "admin_gban_cancel")
+async def admin_global_ban_cancel(callback: types.CallbackQuery):
+    if not userbot.is_admin(callback.from_user):
+        return
+    data = userbot.get_user_state(callback.from_user.id)
+    mode = data.pop("admin_gban_mode", None)
+    return_gid = data.pop("admin_gban_return_gid", None)
+    data.pop("admin_gban_target", None)
+    data["state"] = "ADMIN"
+    try:
+        await callback.answer("Глобальный бан отменён", cache_time=0)
+    except TelegramBadRequest:
+        pass
+    if mode == "p" and return_gid in guard.STORE.groups:
+        await _render_admin_public_reports(callback.from_user.id, int(return_gid), 1)
+    else:
+        await _render_admin_new_reports(callback.from_user.id, 1)
+
+
+async def _delete_private_message_later(chat_id: int, message_id: int, delay: float = 3.0):
+    await asyncio.sleep(delay)
+    try:
+        await bot.delete_message(chat_id, message_id)
+    except (TelegramBadRequest, TelegramRetryAfter):
+        pass
+    except Exception:
+        pass
+
+
+@dp.message(
+    F.chat.type == "private",
+    F.from_user,
+    F.text,
+    lambda msg: userbot.is_admin(msg.from_user)
+    and userbot.get_user_state(msg.from_user.id).get("state") == "ADMIN_GBAN_REASON",
+)
+async def admin_global_ban_reason(message: types.Message):
+    data = userbot.get_user_state(message.from_user.id)
+    reason = (message.text or "").strip()
+    target = data.get("admin_gban_target")
+    mode = data.get("admin_gban_mode")
+    return_gid = data.get("admin_gban_return_gid")
+
+    if target is None or mode not in {"g", "p"}:
+        data["state"] = "ADMIN"
+        data.pop("admin_gban_target", None)
+        data.pop("admin_gban_mode", None)
+        data.pop("admin_gban_return_gid", None)
+        await userbot.edit_or_send(message.from_user.id, "⚠️ Запрос глобального бана устарел. Откройте жалобу заново.", parse_mode="HTML")
+        return
+    if not reason:
+        builder = InlineKeyboardBuilder()
+        builder.button(text="Отмена ⬅️", callback_data="admin_gban_cancel")
+        await userbot.edit_or_send(
+            message.from_user.id,
+            "⚠️ Причина не может быть пустой. Напишите причину глобального бана.",
+            reply_markup=builder.as_markup(),
+            parse_mode="HTML",
+        )
+        return
+    if len(reason) > 240:
+        builder = InlineKeyboardBuilder()
+        builder.button(text="Отмена ⬅️", callback_data="admin_gban_cancel")
+        await userbot.edit_or_send(
+            message.from_user.id,
+            f"⚠️ Причина слишком длинная: {len(reason)}/240 символов. Сократите текст и отправьте ещё раз.",
+            reply_markup=builder.as_markup(),
+            parse_mode="HTML",
+        )
+        return
+
+    data["state"] = "ADMIN_GBAN_APPLYING"
+    asyncio.create_task(_delete_private_message_later(message.chat.id, message.message_id, 3.0))
+    try:
+        await userbot.edit_or_send(
+            message.from_user.id,
+            f"<b>🌐 Применяю глобальный бан…</b>\n\n<b>Причина:</b> {_html(reason)}",
+            parse_mode="HTML",
+        )
+        banned_count = await guard.global_ban_user(int(target), reason=reason)
+        data.pop("admin_gban_target", None)
+        data.pop("admin_gban_mode", None)
+        data.pop("admin_gban_return_gid", None)
+        data["state"] = "ADMIN"
+        if mode == "p" and return_gid in guard.STORE.groups:
+            await _render_admin_public_reports(message.from_user.id, int(return_gid), 1)
+        else:
+            await _render_admin_new_reports(message.from_user.id, 1)
+        logging.info("Global ban %s applied to %s managed groups", target, banned_count)
+    except (ValueError, TelegramBadRequest) as exc:
+        data["state"] = "ADMIN_GBAN_REASON"
+        builder = InlineKeyboardBuilder()
+        builder.button(text="Отмена ⬅️", callback_data="admin_gban_cancel")
+        await userbot.edit_or_send(
+            message.from_user.id,
+            f"⚠️ {_html(str(exc) or 'Не удалось применить глобальный бан.')}\n\n"
+            "Причина ещё не потеряна. Исправьте её или нажмите отмену.",
+            reply_markup=builder.as_markup(),
+            parse_mode="HTML",
+        )
+    except Exception:
+        data["state"] = "ADMIN_GBAN_REASON"
+        logging.exception("Не удалось применить глобальный бан")
+        builder = InlineKeyboardBuilder()
+        builder.button(text="Отмена ⬅️", callback_data="admin_gban_cancel")
+        await userbot.edit_or_send(
+            message.from_user.id,
+            "⚠️ Не удалось применить глобальный бан. Попробуйте отправить причину ещё раз или отмените действие.",
+            reply_markup=builder.as_markup(),
+            parse_mode="HTML",
+        )
 
 
 @dp.callback_query(F.data.startswith("admin_global_new_"))
@@ -764,8 +901,8 @@ async def _render_clean_deploy():
     if not RENDER_SERVICE_ID:
         raise RuntimeError("Render не передал RENDER_SERVICE_ID этому сервису.")
 
-    # Это именно аналог Dashboard -> Manual Deploy -> Clear build cache & deploy.
-    # /restart лишь перезапускает уже существующий deploy и build-cache не чистит.
+                                                                                 
+                                                                                  
     url = f"https://api.render.com/v1/services/{RENDER_SERVICE_ID}/deploys"
     headers = {
         "Authorization": f"Bearer {RENDER_API_KEY}",
@@ -883,8 +1020,8 @@ async def admin_restart_confirm(callback: types.CallbackQuery):
 
     try:
         await _render_clean_deploy()
-        # Фолбэк в текущем процессе. Если Render успеет убить его раньше,
-        # новый процесс подхватит тот же pending из Supabase при старте.
+                                                                         
+                                                                        
         _start_restart_finalizer()
     except Exception as e:
         _cancel_restart_animation(user_id)
@@ -948,7 +1085,7 @@ async def finalize_pending_server_restart():
         except asyncio.CancelledError:
             raise
 
-    # Если старый процесс всё ещё жив, не даём анимации перезаписать финальный текст.
+                                                                                     
     _cancel_restart_animation(ADMIN_ID)
 
     try:
@@ -1094,7 +1231,7 @@ def start_live_profile(viewer_id, refresh, enabled):
     async def run():
         while True:
             await userbot.sleep_until_next_world_minute()
-            await asyncio.sleep(2)  # Let profile clock updates finish first.
+            await asyncio.sleep(2)                                           
             async with state.setdefault("ui_lock", asyncio.Lock()):
                 if state.get("msg_id") != message_id:
                     return

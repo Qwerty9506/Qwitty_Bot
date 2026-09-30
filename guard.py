@@ -169,7 +169,7 @@ class GuardStore:
 
     async def open(self):
         local_groups, local_meta = await self.sql(self._open)
-        # Never replace unknown remote settings with empty defaults after a network error.
+                                                                                          
         remote = await asyncio.to_thread(self._remote_groups)
         remote_global = None
         for row in remote:
@@ -279,7 +279,7 @@ class GuardStore:
             self.db.execute("UPDATE groups_state SET dirty=0 WHERE gid=? AND json_extract(payload, '$.revision')=?", (gid, revision))
 
     async def flush(self, gid):
-        # Never acquire a group lock here: callers often already hold it.
+                                                                         
         async with self.remote_lock:
             group = self.groups.get(gid)
             if group is None or gid not in self.dirty:
@@ -359,7 +359,7 @@ async def require_admin(gid, uid, permission=None):
     group = STORE.groups.get(gid)
     if not STORE.ready or not group or not group.get("active"):
         raise ValueError("Группа недоступна. Добавьте бота и восстановите список.")
-    # Fresh checks on EVERY action, including clicks on old notification buttons.
+                                                                                 
     actor = await bot.get_chat_member(gid, uid)
     own = await bot.get_chat_member(gid, bot.id)
     if actor.status not in ADMIN_STATUSES:
@@ -638,29 +638,51 @@ async def _enforce_global_ban_in_group(group, uid, user, announce, joining):
         return False
     gid = group["id"]
     try:
-        member = await bot.get_chat_member(gid, int(uid))
-        if member.status in ADMIN_STATUSES or member.status == "kicked":
-            GLOBAL_BAN_PENDING.pop(key, None)
-            return False
-        # A confirmed join can arrive before getChatMember reflects it.
-        if not member_present(member) and not joining:
-            GLOBAL_BAN_PENDING.pop(key, None)
-            return False
+                                                                                  
+                                                                         
         own = await bot.get_chat_member(gid, bot.id)
         if own.status != "administrator" or not getattr(own, "can_restrict_members", False):
             queue_global_ban(gid, uid, joining=joining, delay=60)
             return False
-        if not is_global_banned(uid):
+
+        member = await bot.get_chat_member(gid, int(uid))
+        if member.status in ADMIN_STATUSES:
+                                                                                
+                                                                                  
+                                                       
+            GLOBAL_BAN_PENDING.pop(key, None)
             return False
-        await bot.ban_chat_member(gid, int(uid), request_timeout=20)
+
+        was_present = member_present(member) or joining
+        if not is_global_banned(uid):
+            GLOBAL_BAN_PENDING.pop(key, None)
+            return False
+
+        if member.status == "kicked":
+                                                                                   
+                                                            
+            entry = global_ban_entry(uid)
+            entry["banned_groups"] = sorted(set(entry.get("banned_groups", [])) | {gid})
+            await STORE.save_global_bans(urgent=True)
+            GLOBAL_BAN_PENDING.pop(key, None)
+            return True
+
+                                                                                   
+                                                                                
+        await bot.ban_chat_member(
+            gid, int(uid), revoke_messages=True, request_timeout=20
+        )
         if not is_global_banned(uid):
             await bot.unban_chat_member(gid, int(uid), only_if_banned=True, request_timeout=20)
             return False
+
         entry = global_ban_entry(uid)
         entry["banned_groups"] = sorted(set(entry.get("banned_groups", [])) | {gid})
         await STORE.save_global_bans(urgent=True)
         GLOBAL_BAN_PENDING.pop(key, None)
-        if announce:
+
+                                                                                  
+        if announce and was_present:
             name = entry.get("name") or (getattr(user, "full_name", None) if user else None) or member.user.full_name or "Пользователь"
             try:
                 await global_ban_notice(group, uid, name, entry.get("reasons") or ["Без описания"])
@@ -670,6 +692,9 @@ async def _enforce_global_ban_in_group(group, uid, user, announce, joining):
     except TelegramRetryAfter:
         raise
     except (TelegramBadRequest, TelegramForbiddenError):
+                                                                                   
+                                                                             
+                                                                       
         queue_global_ban(gid, uid, joining=joining, delay=60)
         return False
 
@@ -709,25 +734,29 @@ async def close_user_reports(uid):
                 await STORE.save(group, urgent=True)
 
 
-async def global_ban_user(uid):
+async def global_ban_user(uid, reason=None):
     uid = int(uid)
+    global_reason = clip((reason or "").strip(), 240)
     async with GLOBAL_USER_LOCKS.setdefault(uid, asyncio.Lock()):
         group, item = aggregate_local_bans(uid)
         old = global_ban_entry(uid) or {}
         if not item and not old:
             raise ValueError("Глобальный бан доступен только после бана пользователя в группе.")
+        if not global_reason:
+            raise ValueError("Укажите причину глобального бана.")
         snapshot = copy.deepcopy(item or old.get("report") or {})
         name = snapshot.get("name") or old.get("name") or "Пользователь"
         username = snapshot.get("username") or old.get("username")
         source = ({k: group.get(k) for k in ("id", "title", "username", "link")} if group else old.get("group"))
         STORE.global_bans[str(uid)] = {
             "name": clip(name, 100), "username": username,
-            "reasons": [r["text"] for r in report_reasons(snapshot)] or old.get("reasons") or ["Без описания"], "report": snapshot,
+            "global_reason": global_reason,
+            "reasons": [global_reason], "report": snapshot,
             "group": source, "updated": time.time(),
             "banned_groups": list(old.get("banned_groups", [])),
         }
         await STORE.save_global_bans(urgent=True)
-        # Evidence is already in the ban archive; remove duplicate open cards now.
+                                                                                  
         await close_user_reports(uid)
         banned_count = 0
         for group in list(STORE.groups.values()):
@@ -777,8 +806,8 @@ async def global_unban_user(uid):
         if not entry:
             raise ValueError("Глобальный бан уже снят.")
         if not entry.get("unbanning"):
-            # Global unban covers every managed chat, including a ban applied just
-            # before a restart. only_if_banned leaves current members in place.
+                                                                                  
+                                                                               
             groups = set(entry.get("banned_groups", []))
             groups.update(g["id"] for g in STORE.groups.values() if g.get("active"))
             entry.update(unbanning=True, unban_pending=sorted(groups), retry_at=0)
@@ -931,7 +960,7 @@ async def render_info(uid, group):
         if own.status == "administrator":
             names.append(user_link(bot.id, own.user.full_name))
     text = f"<b>ℹ️ Информация о группе</b>\n👥 <b>{await group_title_link(group)}</b>\n\n<b>Участников:</b> {count}\n<b>Администраторы:</b>\n"
-    # Telegram limits message length; show a bounded admin list.
+                                                                
     text += "\n".join(names[:20])
     if len(names) > 20:
         text += f"\n<i>И ещё {len(names)-20}</i>"
@@ -1080,7 +1109,7 @@ async def guard_callback(callback: types.CallbackQuery):
         group, _, _ = await require_admin(gid, uid, permission)
         if command not in {"ban", "nb", "ignore"} and not is_group_owner(group, uid):
             raise ValueError("Настройки этой группы доступны только тому, кто добавил Qwitty.")
-        if command == "soon":  # Old keyboards open the working screen, too.
+        if command == "soon":                                               
             await safe_answer(callback)
             await render_mode(uid, group, "raid")
             return
@@ -1124,7 +1153,7 @@ async def guard_callback(callback: types.CallbackQuery):
                     group["reports"].pop(str(target), None)
                     await STORE.save(group, urgent=True)
                     raise ValueError("Нельзя блокировать владельца или администратора группы. Жалоба удалена.")
-                await moderate(group, uid, target, "ban", None)
+                await moderate(group, uid, target, "ban", None, purge_messages=True)
                 group["reports"].pop(str(target), None)
                 await STORE.save(group, urgent=True)
                 if command == "nb":
@@ -1132,7 +1161,7 @@ async def guard_callback(callback: types.CallbackQuery):
                         await callback.message.delete()
                     except TelegramBadRequest:
                         pass
-                    # Notification clicks must not turn the notification into the main UI.
+                                                                                          
                     state = ub.get_user_state(uid)
                     token = ub.UI_ACTION_TASK.set(None)
                     try:
@@ -1164,7 +1193,7 @@ async def guard_callback(callback: types.CallbackQuery):
 
 
 async def show_callback_error(callback, text):
-    # The callback may already have been answered; display errors in the private UI.
+                                                                                    
     if (callback.data or "").startswith(("gg:nb:", "gg:ignore:")):
         try:
             await callback.message.edit_text(esc(text), parse_mode="HTML")
@@ -1184,7 +1213,7 @@ def dangerous_file(message):
     name = unicodedata.normalize("NFKC", document.file_name or "").casefold()
     name = "".join(c for c in name if unicodedata.category(c) != "Cf")
     name = name.replace("\\", "/").rsplit("/", 1)[-1].rstrip(" .")
-    # Split all suffixes: catches invoice.exe.pdf as well as upper-case extensions.
+                                                                                   
     pieces = name.split(".")[1:]
     return any("." + part.rstrip(" .") in DANGEROUS_EXTENSIONS for part in pieces)
 
@@ -1252,7 +1281,7 @@ async def resolve_target(message, arguments):
         username = mentions[0]
         target = await STORE.find_member(message.chat.id, username)
         if not target:
-            # Admins can also be resolved without having recently posted.
+                                                                         
             for uid, member in (await admin_ids(message.chat.id)).items():
                 if (member.user.username or "").casefold() == username.casefold():
                     target = uid
@@ -1270,7 +1299,7 @@ async def resolve_target(message, arguments):
     raise ValueError("Ответьте на сообщение участника или укажите его @username.")
 
 
-async def moderate(group, actor, target, action, duration, source=None):
+async def moderate(group, actor, target, action, duration, source=None, purge_messages=False):
     gid = group["id"]
     await require_admin(gid, actor, "can_restrict_members")
     if target in {actor, bot.id}:
@@ -1284,10 +1313,14 @@ async def moderate(group, actor, target, action, duration, source=None):
     if action == "ban":
         if duration and (await bot.get_chat(gid)).type != "supergroup":
             raise ValueError("Временный бан доступен в супергруппах. В обычной группе срок Telegram не учитывает.")
-        await bot.ban_chat_member(gid, target, until_date=until, request_timeout=20)
+                                                                             
+                                                                                     
+        await bot.ban_chat_member(
+            gid, target, until_date=until, revoke_messages=bool(purge_messages), request_timeout=20
+        )
         await record_local_ban(group, member.user, until, source)
     elif action == "kick":
-        # In case unban fails, the kick expires automatically instead of leaving a permanent ban.
+                                                                                                 
         KICK_EVENTS[(gid, target)] = time.monotonic() + 120
         await bot.ban_chat_member(gid, target, until_date=int(time.time()) + 60)
         await bot.unban_chat_member(gid, target, only_if_banned=True)
@@ -1313,7 +1346,7 @@ async def group_reply(message, text):
 
 
 async def notify_report(gid, target):
-    # Re-read live permissions before each delivery. Hidden groups never send notifications.
+                                                                                            
     try:
         admins = await admin_ids(gid, force=True)
     except (TelegramBadRequest, TelegramForbiddenError):
@@ -1329,7 +1362,7 @@ async def notify_report(gid, target):
             await require_admin(gid, uid)
             if hidden(group, uid):
                 continue
-            # Do not create private profiles for admins who have never started the bot.
+                                                                                       
             builder = InlineKeyboardBuilder()
             button(builder, "Забанить 🚫", f"gg:nb:{gid}:{target}")
             button(builder, "Игнорировать 💤", f"gg:ignore:{gid}:{target}")
@@ -1407,7 +1440,7 @@ async def receive_report(message, group, reason):
             REPORT_QUEUED.add(notification_key)
         except asyncio.QueueFull:
             logging.warning("Guard notification queue full; report remains in group menu")
-    # The reported message and /admin message are both left intact.
+                                                                   
     await group_reply(message, "📨 Жалоба сохранена и направлена администрации.")
 
 
@@ -1580,7 +1613,7 @@ async def record_raid_join(group, user, joined_at=None):
     uid = str(user.id)
     seen = group.setdefault("raid_seen", {})
     if uid in seen and abs(stamp - float(seen[uid])) < RAID_SECONDS:
-        return  # chat_member + service message describe the same join.
+        return                                                         
     closed = close_raid_window(group, stamp)
     window = group.setdefault("raid_window", {"members": {}, "due": None})
     members = window.setdefault("members", {})
@@ -1614,7 +1647,7 @@ async def process_raid(gid):
                     continue
                 try:
                     member = await bot.get_chat_member(gid, int(uid))
-                    # An account promoted to admin during the minute must be protected.
+                                                                                       
                     if member.status not in ADMIN_STATUSES and int(uid) != bot.id:
                         await bot.ban_chat_member(gid, int(uid))
                         await record_local_ban(group, member.user)
@@ -1755,7 +1788,7 @@ async def group_message(message: types.Message):
             uid = message.from_user.id if message.from_user else 0
             flooding = spam_flood(gid, uid, message.message_id, received_at)
             if group["settings"].get("spam") and flooding and message.from_user and not message.from_user.is_bot and not message.sender_chat:
-                # One user may send one message per second; the 2nd+ rapid message is spam.
+                                                                                           
                 await bot.delete_message(gid, message.message_id)
                 return
             if await handle_group_command(message, group):
@@ -1773,7 +1806,7 @@ async def group_message(message: types.Message):
 
 @dp.edited_message(F.chat.type.in_(GROUP_TYPES))
 async def group_edited(message: types.Message):
-    # Never re-execute commands/reports when a user edits a command message.
+                                                                            
     group = STORE.groups.get(message.chat.id)
     if not group or not group.get("active"):
         return
@@ -1803,7 +1836,7 @@ async def writer_loop():
                 for gid, group in list(STORE.groups.items()):
                     async with lock_for(gid):
                         cutoff = time.time() - REPORT_TTL
-                        expired = []  # Open complaints persist until explicitly handled.
+                        expired = []                                                     
                         dedup = {k: v for k, v in group["dedup"].items() if v > cutoff}
                         if expired or dedup != group["dedup"]:
                             for key in expired:
