@@ -34,7 +34,6 @@ PRESENT_STATUSES = {"creator", "administrator", "member", "restricted"}
 PAGE_SIZE = 5
 REPORT_TTL = 30 * 86400
 MEMBER_TTL = 7 * 86400
-SPAM_WINDOW = 1.0
 MAX_TARGETS = 500
 MAX_GROUP_BYTES = 1024 * 1024
 DANGEROUS_EXTENSIONS = frozenset("""
@@ -44,7 +43,7 @@ DANGEROUS_EXTENSIONS = frozenset("""
 .app .appimage .command .pkg .dmg .reg .inf .ins .isp .py .pyw .rb .pl .cgi
 """.split())
 MODES = {
-    "spam": ("🚯АнтиСпам", "Удаляет второе и последующие сообщения одного пользователя, если между сообщениями прошло не больше 1 секунды. Работает и для администраторов."),
+    "spam": ("🚯АнтиСпам", ""),
     "files": ("⚠️АнтиВирус", "Удаляет потенциально опасные исполняемые файлы и скрипты по расширению. Это фильтр файлов, а не проверка содержимого антивирусом."),
     "raid": ("📛 АнтиНакрутка", "Защищает от массовых входов. При 50 и более новых участниках за 60 секунд по окончании этой минуты блокирует всех участников волны."),
     "service": ("🧹Очистка вх/изм", "Убирает уведомления о входе и выходе участников, закреплении сообщений, изменении названия и фотографии группы."),
@@ -57,7 +56,6 @@ WELCOME_TASKS = {}
 GROUP_LOCKS = {}
 MEMBER_PENDING = OrderedDict()
 ADMIN_CACHE = {}
-SPAM_LAST = OrderedDict()
 GLOBAL_USER_LOCKS = {}
 GLOBAL_UNBAN_RUNNING = set()
 GLOBAL_ENFORCEMENT_LOCKS = {}
@@ -149,6 +147,10 @@ class GuardStore:
             CREATE INDEX IF NOT EXISTS members_name ON members(gid,username);
             CREATE TABLE IF NOT EXISTS guard_meta(
                 key TEXT PRIMARY KEY, payload TEXT NOT NULL, dirty INTEGER NOT NULL);
+            CREATE TABLE IF NOT EXISTS spam_messages(
+                gid INTEGER NOT NULL, uid INTEGER NOT NULL,
+                fingerprint TEXT NOT NULL, mid INTEGER NOT NULL,
+                PRIMARY KEY(gid, uid, fingerprint));
         ''')
         self.db.commit()
         groups = self.db.execute("SELECT gid,payload,dirty FROM groups_state").fetchall()
@@ -329,6 +331,27 @@ class GuardStore:
             for (gid,) in self.db.execute("SELECT DISTINCT gid FROM members").fetchall():
                 self.db.execute("DELETE FROM members WHERE gid=? AND uid NOT IN (SELECT uid FROM members WHERE gid=? ORDER BY seen DESC LIMIT 5000)", (gid, gid))
         self.db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+
+
+    def _check_spam(self, gid, uid, fingerprint, mid):
+        # The first message owns this content. No time window or last-message
+        # shortcut: intervening messages and restarts must not allow repeats.
+        with self.db:
+            row = self.db.execute(
+                "SELECT mid FROM spam_messages WHERE gid=? AND uid=? AND fingerprint=?",
+                (gid, uid, fingerprint),
+            ).fetchone()
+            if row is not None:
+                return int(row[0]) != mid
+            self.db.execute("INSERT INTO spam_messages VALUES(?,?,?,?)",
+                            (gid, uid, fingerprint, mid))
+        return False
+
+
+    def _reset_spam(self, gid):
+        with self.db:
+            self.db.execute("DELETE FROM spam_messages WHERE gid=?", (int(gid),))
+
 
 
 STORE = GuardStore()
@@ -959,7 +982,11 @@ async def render_mode(uid, group, mode):
     builder = InlineKeyboardBuilder()
     button(builder, "Выключить 🔴" if enabled else "Включить 🟢", f"gg:toggle:{group['id']}:{mode}")
     button(builder, "Назад в меню ⬅️", f"gg:group:{group['id']}")
-    await show(uid, f"<b>{title}</b>\n👥 <b>{await group_title_link(group)}</b>\n\n<i>{description}</i>\n\n<b>Статус:</b> {'Включён 🟢' if enabled else 'Выключен 🔴'}", builder)
+    text = f"<b>{title}</b>\n👥 <b>{await group_title_link(group)}</b>"
+    if description:
+        text += f"\n\n<i>{description}</i>"
+    text += f"\n\n<b>Статус:</b> {'Включён 🟢' if enabled else 'Выключен 🔴'}"
+    await show(uid, text, builder)
 
 
 async def render_info(uid, group):
@@ -1154,7 +1181,7 @@ async def guard_callback(callback: types.CallbackQuery):
                     await require_guard_bot_ready(gid)
                 group["settings"][mode] = not group["settings"].get(mode, False)
                 if mode == "spam":
-                    reset_spam(gid)
+                    await reset_spam(gid)
                 if mode == "raid" and not group["settings"][mode]:
                     group.pop("raid_window", None)
                     group.pop("raid_pending", None)
@@ -1243,24 +1270,48 @@ def dangerous_file(message):
     return any("." + part.rstrip(" .") in DANGEROUS_EXTENSIONS for part in pieces)
 
 
-def reset_spam(gid):
-    for key in list(SPAM_LAST):
-        if key[0] == gid:
-            SPAM_LAST.pop(key, None)
+async def reset_spam(gid):
+    await STORE.sql(STORE._reset_spam, gid)
 
 
-def spam_flood(gid, uid, mid, now=None):
-    """Return True for the 2nd+ message from one user inside a 1-second gap."""
-    now = time.monotonic() if now is None else float(now)
-    key = (int(gid), int(uid))
-    previous = SPAM_LAST.get(key)
-    if previous and previous[0] == int(mid):
+
+def spam_fingerprint(message):
+    """Stable content identity, independent of message ID and arrival time."""
+    text = unicodedata.normalize("NFKC", message.text or message.caption or "")
+    text = " ".join("".join(c for c in text if unicodedata.category(c) != "Cf").casefold().split())
+    content = []
+    if text:
+        content.append(("text", text))
+    for field in ("animation", "audio", "document", "sticker", "video", "video_note", "voice"):
+        media = getattr(message, field, None)
+        if media:
+            content.append((field, media.file_unique_id))
+            break
+    if message.photo:
+        content.append(("photo", message.photo[-1].file_unique_id))
+    if message.contact:
+        contact = message.contact
+        content.append(("contact", contact.phone_number, contact.first_name, contact.last_name))
+    if message.location:
+        content.append(("location", message.location.latitude, message.location.longitude))
+    if message.venue:
+        content.append(("venue", message.venue.title, message.venue.address))
+    if message.poll:
+        content.append(("poll", message.poll.question, [option.text for option in message.poll.options]))
+    if not content:
+        return None
+    return hashlib.sha256(json.dumps(content, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
+
+
+
+async def spam_duplicate(message):
+    if not message.from_user or message.from_user.is_bot or message.sender_chat:
         return False
-    SPAM_LAST[key] = (int(mid), now)
-    SPAM_LAST.move_to_end(key)
-    while len(SPAM_LAST) > 10000:
-        SPAM_LAST.popitem(last=False)
-    return bool(previous and 0 <= now - previous[1] <= SPAM_WINDOW)
+    fingerprint = spam_fingerprint(message)
+    if fingerprint is None:
+        return False
+    return await STORE.sql(STORE._check_spam, int(message.chat.id), int(message.from_user.id),
+                           fingerprint, int(message.message_id))
 
 
 UNITS = {
@@ -1775,7 +1826,6 @@ async def group_message(message: types.Message):
     if not STORE.ready:
         return
     gid = message.chat.id
-    received_at = time.monotonic()
     try:
         if message.migrate_to_chat_id:
             await migrate_group(gid, message.migrate_to_chat_id, message.chat.title)
@@ -1810,9 +1860,7 @@ async def group_message(message: types.Message):
                 if group["settings"].get("service"):
                     await bot.delete_message(gid, message.message_id)
                 return
-            uid = message.from_user.id if message.from_user else 0
-            flooding = spam_flood(gid, uid, message.message_id, received_at)
-            if group["settings"].get("spam") and flooding and message.from_user and not message.from_user.is_bot and not message.sender_chat:
+            if group["settings"].get("spam") and await spam_duplicate(message):
                                                                                            
                 await bot.delete_message(gid, message.message_id)
                 return
@@ -1836,8 +1884,14 @@ async def group_edited(message: types.Message):
     if not group or not group.get("active"):
         return
     try:
-        if group["settings"].get("files") and dangerous_file(message):
-            await bot.delete_message(message.chat.id, message.message_id)
+        async with lock_for(message.chat.id):
+            if group["settings"].get("spam") and await spam_duplicate(message):
+                await bot.delete_message(message.chat.id, message.message_id)
+                return
+            if group["settings"].get("files") and dangerous_file(message):
+                await bot.delete_message(message.chat.id, message.message_id)
+    except TelegramRetryAfter as exc:
+        logging.warning("Guard edit rate limit: %s seconds", exc.retry_after)
     except (TelegramBadRequest, TelegramForbiddenError):
         pass
 
