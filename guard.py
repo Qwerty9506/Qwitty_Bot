@@ -435,7 +435,9 @@ async def sync_admins(group):
 async def show(uid, text, builder, screen="GROUP"):
     state = ub.get_user_state(uid)
     state["state"] = "GUARD_" + screen
-    if any(is_group_owner(group, uid) and gid in STORE.errors for gid, group in STORE.groups.items()):
+    if screen == "PREVIEW":
+        text = "#Предпросмотр\n\n" + text.removeprefix("#Предпросмотр\n\n")
+    elif any(is_group_owner(group, uid) and gid in STORE.errors for gid, group in STORE.groups.items()):
         text += "\n\n<i>⚠️ Есть изменения, ещё не подтверждённые Supabase. Они сохранены локально; повторяем отправку.</i>"
     await ub.edit_or_send(uid, text, reply_markup=builder.as_markup(), parse_mode="HTML")
 
@@ -464,6 +466,8 @@ GROUP_LINK_CACHE = {}
 
 
 async def group_title_link(group):
+    if group.get("_preview"):
+        return esc(group["title"])
     gid = int(group["id"])
     cached = GROUP_LINK_CACHE.get(gid)
     if cached and time.monotonic() - cached[0] < 60:
@@ -885,17 +889,77 @@ async def visible_groups(uid):
     return sorted(found, key=lambda g: (g["title"].casefold(), g["id"]))
 
 
-async def render_groups(uid, page=0, banner=""):
+async def add_group_button(builder):
+    username = await bot_name()
+    builder.row(types.InlineKeyboardButton(
+        text="➕ Добавить группу",
+        url=f"https://t.me/{username}?startgroup=guard&admin=delete_messages+restrict_members",
+    ))
+
+
+async def render_guard_entry(uid):
+    builder = InlineKeyboardBuilder()
+    button(builder, "Предпросмотр 👁", "gg:preview:group")
+    await add_group_button(builder)
+    button(builder, "Назад в меню 🏠", "root_menu")
+    await show(uid, "<b>🔰 Group Guard</b>\n<i>Управление группами</i>", builder, "ENTRY")
+
+
+def preview_group():
+    # A display-only group: never insert it into STORE or use its ID with Telegram.
+    return {"_preview": True, "id": 0, "title": "Ваша группа",
+            "settings": {mode: False for mode in MODES}}
+
+
+def group_callback(group, command, *args):
+    if group.get("_preview"):
+        parts = ("gg", "preview", command, *args)
+    else:
+        parts = ("gg", command, group["id"], *args)
+    return ":".join(map(str, parts))
+
+
+async def render_guard_preview(callback):
+    uid = callback.from_user.id
+    parts = callback.data.split(":")
+    command = parts[2] if len(parts) > 2 else "group"
+    group = preview_group()
+    if command == "toggle" or command in {"remove", "connect"}:
+        builder = InlineKeyboardBuilder()
+        await add_group_button(builder)
+        button(builder, "Назад ⬅️", "gg:preview:group")
+        await show(uid, "Для включения функций добавьте Qwitty в группу "
+                   "и выдайте права на удаление сообщений и блокировку участников.", builder, "CONNECT")
+    elif command == "group":
+        await render_group(uid, group)
+    elif command == "mode" and len(parts) == 4 and parts[3] in MODES:
+        await render_mode(uid, group, parts[3])
+    elif command == "commands":
+        await render_commands(uid, group)
+    elif command == "targets":
+        builder = InlineKeyboardBuilder()
+        button(builder, "Назад в меню ⬅️", "gg:preview:group")
+        await show(uid, "<b>📨 Жалобы</b>\n👥 <b>Ваша группа</b>\n\n"
+                   "Открытых жалоб пока нет.", builder, "PREVIEW")
+    else:
+        await safe_answer(callback, "Кнопка устарела. Откройте предпросмотр заново.", True)
+        return
+    await safe_answer(callback)
+
+
+async def render_groups(uid, page=0, banner="", entry=False):
     if not STORE.ready:
         raise ValueError("Group Guard запускается. Попробуйте через несколько секунд.")
     groups = await visible_groups(uid)
+    if entry and not groups and not has_hidden_group(uid):
+        await render_guard_entry(uid)
+        return
     pages = max(1, (len(groups) + PAGE_SIZE - 1) // PAGE_SIZE)
     page = max(0, min(page, pages - 1))
     builder = InlineKeyboardBuilder()
     for group in groups[page*PAGE_SIZE:(page+1)*PAGE_SIZE]:
         button(builder, "👥 " + clip(group["title"], 55), f"gg:group:{group['id']}")
-    username = await bot_name()
-    builder.row(types.InlineKeyboardButton(text="➕ Добавить группу", url=f"https://t.me/{username}?startgroup=guard&admin=delete_messages+restrict_members"))
+    await add_group_button(builder)
     if has_hidden_group(uid):
         button(builder, "🔄 Восстановить группы", "gg:restore")
     page_buttons(builder, page, pages, "gg:list:")
@@ -939,31 +1003,36 @@ async def restore_groups(uid):
 async def render_group(uid, group):
     gid = group["id"]
     active = any(group["settings"].get(mode) for mode in MODES)
-    try:
-        admins = await sync_admins(group)
-        count = await bot.get_chat_member_count(gid)
-        group["member_count"] = count
-    except (TelegramBadRequest, TelegramForbiddenError):
+    preview = bool(group.get("_preview"))
+    if preview:
         admins = {}
-        count = group.get("member_count") or "?"
+        count = "—"
+    else:
+        try:
+            admins = await sync_admins(group)
+            count = await bot.get_chat_member_count(gid)
+            group["member_count"] = count
+        except (TelegramBadRequest, TelegramForbiddenError):
+            admins = {}
+            count = group.get("member_count") or "?"
     names = [user_link(m.user.id, m.user.full_name) for m in admins.values() if not m.user.is_bot]
     title = await group_title_link(group)
 
     builder = InlineKeyboardBuilder()
     builder.row(
-        types.InlineKeyboardButton(text=MODES["spam"][0], callback_data=f"gg:mode:{gid}:spam"),
-        types.InlineKeyboardButton(text=MODES["files"][0], callback_data=f"gg:mode:{gid}:files"),
+        types.InlineKeyboardButton(text=MODES["spam"][0], callback_data=group_callback(group, "mode", "spam")),
+        types.InlineKeyboardButton(text=MODES["files"][0], callback_data=group_callback(group, "mode", "files")),
     )
     builder.row(
-        types.InlineKeyboardButton(text="📛АнтиНакрутка", callback_data=f"gg:mode:{gid}:raid"),
-        types.InlineKeyboardButton(text=MODES["service"][0], callback_data=f"gg:mode:{gid}:service"),
+        types.InlineKeyboardButton(text="📛АнтиНакрутка", callback_data=group_callback(group, "mode", "raid")),
+        types.InlineKeyboardButton(text=MODES["service"][0], callback_data=group_callback(group, "mode", "service")),
     )
     builder.row(
-        types.InlineKeyboardButton(text="📑 Команды", callback_data=f"gg:commands:{gid}"),
-        types.InlineKeyboardButton(text="🔖 Жалобы", callback_data=f"gg:targets:{gid}:0"),
+        types.InlineKeyboardButton(text="📑 Команды", callback_data=group_callback(group, "commands")),
+        types.InlineKeyboardButton(text="🔖 Жалобы", callback_data=group_callback(group, "targets", 0)),
     )
-    button(builder, "🗑 Удалить из списка", f"gg:remove:{gid}")
-    button(builder, "Назад в меню ⬅️", "gg:list:0")
+    button(builder, "🗑 Удалить из списка", group_callback(group, "remove"))
+    button(builder, "Назад в меню ⬅️", "guard" if preview else "gg:list:0")
 
     text = (f"<b>👥 {title}</b>\n\n"
             f"Защита группы — {'активна 🟢' if active else 'пока неактивна ⚪'}\n\n"
@@ -971,22 +1040,22 @@ async def render_group(uid, group):
             f"<b>Админы:</b> {', '.join(names[:20]) if names else 'Нет данных'}")
     if len(names) > 20:
         text += f" и ещё {len(names)-20}"
-    if gid in STORE.errors:
+    if not preview and gid in STORE.errors:
         text += "\n\n<i>Резервная копия настроек ещё не записана. Повторяем автоматически.</i>"
-    await show(uid, text, builder)
+    await show(uid, text, builder, "PREVIEW" if preview else "GROUP")
 
 
 async def render_mode(uid, group, mode):
     title, description = MODES[mode]
     enabled = bool(group["settings"].get(mode))
     builder = InlineKeyboardBuilder()
-    button(builder, "Выключить 🔴" if enabled else "Включить 🟢", f"gg:toggle:{group['id']}:{mode}")
-    button(builder, "Назад в меню ⬅️", f"gg:group:{group['id']}")
+    button(builder, "Выключить 🔴" if enabled else "Включить 🟢", group_callback(group, "toggle", mode))
+    button(builder, "Назад в меню ⬅️", group_callback(group, "group"))
     text = f"<b>{title}</b>\n👥 <b>{await group_title_link(group)}</b>"
     if description:
         text += f"\n\n<i>{description}</i>"
     text += f"\n\n<b>Статус:</b> {'Включён 🟢' if enabled else 'Выключен 🔴'}"
-    await show(uid, text, builder)
+    await show(uid, text, builder, "PREVIEW" if group.get("_preview") else "GROUP")
 
 
 async def render_info(uid, group):
@@ -1013,7 +1082,7 @@ async def render_info(uid, group):
 
 async def render_commands(uid, group):
     builder = InlineKeyboardBuilder()
-    button(builder, "Назад в меню ⬅️", f"gg:group:{group['id']}")
+    button(builder, "Назад в меню ⬅️", group_callback(group, "group"))
     await show(uid, "<b>📑 Список команд</b>\n\n"
                "<code>/ban 1 day 2 hours @username</code>\n"
                "<code>/mute 5 мин 2 часа 1 день @username</code>\n"
@@ -1026,7 +1095,8 @@ async def render_commands(uid, group):
                "Допустимый временный срок: от 60 секунд до 365 дней.\n\n"
                "<i>Для @username участник должен недавно написать в группе. "
                "Если бот его ещё не видел, используйте ответ на сообщение. "
-               "Мут доступен в супергруппах. Команды управления требуют права блокировки участников.</i>", builder)
+               "Мут доступен в супергруппах. Команды управления требуют права блокировки участников.</i>",
+               builder, "PREVIEW" if group.get("_preview") else "GROUP")
 
 
 def unread_reports(group, uid):
@@ -1128,9 +1198,13 @@ async def guard_callback(callback: types.CallbackQuery):
         return
     action = callback.data
     try:
+        if action.startswith("gg:preview:"):
+            await render_guard_preview(callback)
+            return
         if action == "guard" or action.startswith("gg:list:"):
             await safe_answer(callback)
-            await render_groups(uid, int(action.rsplit(":", 1)[1]) if action != "guard" else 0)
+            await render_groups(uid, int(action.rsplit(":", 1)[1]) if action != "guard" else 0,
+                                entry=action == "guard")
             return
         parts = action.split(":")
         command = parts[1]
