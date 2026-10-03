@@ -27,7 +27,7 @@ from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
 from pyrogram import Client, enums, filters
 from pyrogram.handlers import MessageHandler, EditedMessageHandler, RawUpdateHandler
 from pyrogram.raw import functions, types as raw_types
-from pyrogram.errors import SessionPasswordNeeded, PhoneCodeInvalid, PhoneCodeExpired, Unauthorized, FloodWait
+from pyrogram.errors import SessionPasswordNeeded, PhoneCodeInvalid, PhoneCodeExpired, Unauthorized, FloodWait, UserNotParticipant, ChannelPrivate
 
 from supabase import create_client, Client as SupabaseClient
 
@@ -2333,17 +2333,15 @@ async def process_password(message: types.Message):
 def show_main_menu_builder(user_id, user_obj: types.User = None):
 
     builder = InlineKeyboardBuilder()
-    count = 0 if is_preview(user_id) else SAVED.unread_chat_count(user_id)
-    suffix = f" ({count})" if count else ""
     builder.row(
-        types.InlineKeyboardButton(text=f"Сохранённые сообщения{suffix} 🗂", callback_data="saved_menu"),
-        types.InlineKeyboardButton(text="АнтиВирус⚠️", callback_data="menu_antivirus"),
+        types.InlineKeyboardButton(text="🗂 Сохранённые", callback_data="saved_menu"),
+        types.InlineKeyboardButton(text="⚠️ АнтиВирус", callback_data="menu_antivirus"),
     )
     builder.row(
-        types.InlineKeyboardButton(text=get_text(user_id, "btn_autoresp"), callback_data="menu_autoresponder"),
-        types.InlineKeyboardButton(text=get_text(user_id, "btn_timenick"), callback_data="menu_timenick"),
+        types.InlineKeyboardButton(text="🤖 Автоответчик", callback_data="menu_autoresponder"),
+        types.InlineKeyboardButton(text="⏰ Время в имени", callback_data="menu_timenick"),
     )
-    builder.row(types.InlineKeyboardButton(text="Назад в главное меню 🏠", callback_data="root_menu"))
+    builder.row(types.InlineKeyboardButton(text="⬅️ Главное меню", callback_data="root_menu"))
     return builder
 
 @dp.callback_query(F.data == "main_menu")
@@ -2383,6 +2381,25 @@ def antivirus_local_chat(chat):
     }
 
 
+async def antivirus_current_chat(client, chat):
+    """Only private dialogs and groups where this session is a current member."""
+    if not antivirus_local_chat(chat):
+        return False
+    if chat.type != enums.ChatType.GROUP:
+        return True
+    if getattr(chat, "is_left", False):
+        return False
+    try:
+        member = await client.get_chat_member(chat.id, "me")
+    except (UserNotParticipant, ChannelPrivate):
+        return False
+    status = member.status
+    return status in {
+        enums.ChatMemberStatus.OWNER, enums.ChatMemberStatus.ADMINISTRATOR,
+        enums.ChatMemberStatus.MEMBER,
+    } or (status == enums.ChatMemberStatus.RESTRICTED and bool(member.is_member))
+
+
 async def antivirus_delete(client, message):
     uid = client.owner_id
     if not antivirus_enabled(uid) or not dangerous_file(message):
@@ -2399,6 +2416,12 @@ async def antivirus_delete(client, message):
             if not antivirus_enabled(uid) or state.get("client") is not client:
                 return False
             try:
+                # Recheck membership immediately before deletion; never touch
+                # an old group just because its history remains accessible.
+                if not await antivirus_current_chat(client, message.chat):
+                    return False
+                if not antivirus_enabled(uid) or state.get("client") is not client:
+                    return False
                 deleted = await client.delete_messages(message.chat.id, message.id, revoke=False)
                 state["antivirus_next_at"] = time.monotonic() + 0.5
                 if deleted:
@@ -2450,6 +2473,10 @@ async def antivirus_history_loop(uid):
                 try:
                     # No history limit: visit every available old message. Fetch
                     # pages explicitly so FloodWait never drops the cursor.
+                    if not await antivirus_current_chat(client, chat):
+                        completed_chats.add(chat.id)
+                        state["antivirus_history_offsets"].pop(chat.id, None)
+                        break
                     messages = [msg async for msg in client.get_chat_history(chat.id, limit=100, offset_id=offset)]
                     if not messages:
                         completed_chats.add(chat.id)
@@ -2461,9 +2488,15 @@ async def antivirus_history_loop(uid):
                         if dangerous_file(message) and not await antivirus_delete(client, message):
                             if not antivirus_enabled(uid) or state.get("client") is not client:
                                 return
+                            if not await antivirus_current_chat(client, chat):
+                                completed_chats.add(chat.id)
+                                state["antivirus_history_offsets"].pop(chat.id, None)
+                                break
                             raise RuntimeError("File deletion failed; retain history cursor")
                         offset = message.id
                         state["antivirus_history_offsets"][chat.id] = offset
+                    if chat.id in completed_chats:
+                        break
                     await asyncio.sleep(1)
                 except FloodWait as exc:
                     state["antivirus_error"] = f"Проверка истории на паузе Telegram: {exc.value} сек."
@@ -2517,7 +2550,6 @@ def start_antivirus_history(uid):
 
 def antivirus_menu_content(uid, preview=False):
     active = False if preview else antivirus_enabled(uid)
-    state = {} if preview else get_user_state(uid)
     text = (
         "<b>⚠️ АнтиВирус</b>\n\n"
         f"<b>Статус:</b> {'🟢 Включен' if active else '🔴 Выключен'}\n\n"
@@ -2525,13 +2557,6 @@ def antivirus_menu_content(uid, preview=False):
         "в личках, чатах с ботами и обычных группах. "
         "Проверяет новые сообщения, изменения и всю доступную историю.\n\n"
     )
-    if state.get("antivirus_history_loading"):
-        text += "\n\n⏳ Проверяем старые сообщения…"
-    elif state.get("antivirus_history_done") and active:
-        text += "\n\n✅ Проверка доступной истории завершена."
-    text += f"\n<b>Удалено за этот запуск:</b> {state.get('antivirus_deleted', 0)}"
-    if state.get("antivirus_error"):
-        text += "\n⚠️ " + html.escape(state["antivirus_error"], quote=False)
     builder = InlineKeyboardBuilder()
     builder.button(text="Выключить 🔴" if active else "Включить 🟢", callback_data="toggle_antivirus")
     builder.button(text="Назад в меню 🏠", callback_data="main_menu")
@@ -3525,13 +3550,8 @@ def saved_menu_content(uid):
         "<b>🗂 Сохранённые сообщения</b>\n"
         "<i>Удалённые и отредактированные сообщения из личных чатов 👤</i>\n\n"
         f"<b>Статус:</b> {'🟢 Включено' if active else '🔴 Выключено'}\n\n"
-        "🕛 <i>Архив очищается в 00:00 по часовому поясу аккаунта.</i>\n"
-        "<i>На каждую личку хранится до 100 записей. Медиафайлы не скачиваются.</i>\n"
-        "<i>При включении временно сохраняются тексты входящих сообщений и их изменения. "
-        "Доступ к ним в боте есть только у владельца подключённого аккаунта.</i>"
+        "🕛 <i>Очищается в 00:00 по часовому поясу аккаунта.</i>"
     )
-    if not active:
-        text += "\n<i>После выключения уже сохранённые записи доступны до полуночи.</i>"
     state = get_user_state(uid)
     if state.get("saved_history_loading"):
         text += "\n⏳ <i>Последние сообщения загружаются по очереди. Новые уже сохраняются.</i>"
@@ -4155,7 +4175,8 @@ async def render_userbot_preview(callback):
     elif action == 'saved_menu':
         text = ('<b>🗂 Сохранённые сообщения</b>\n'
                 '<i>Удалённые и отредактированные сообщения из личных чатов 👤</i>\n\n'
-                '<b>Статус:</b> 🔴 Выключено')
+                '<b>Статус:</b> 🔴 Выключено\n\n'
+                '🕛 <i>Очищается в 00:00 по часовому поясу аккаунта.</i>')
         builder.button(text='Включить 🟢', callback_data='saved_toggle')
         builder.button(text='Лички 🗣', callback_data='saved_chats:0')
         builder.button(text='Назад ⬅️', callback_data='main_menu')
