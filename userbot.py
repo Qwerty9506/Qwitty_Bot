@@ -1,4 +1,5 @@
 import copy
+import io
 from contextvars import ContextVar
 import struct
 import binascii
@@ -234,7 +235,7 @@ TEXTS = {
     "btn_tz_select": "Выбрать часовой пояс 🌐",
     "btn_refresh": "Обновить 🔄",
     "btn_server_stats": "Статистика сервера 🖥",
-    "btn_autoresp_setup": "Изменить текст ✏️",
+    "btn_autoresp_setup": "Изменить приветствие ✏️",
     "btn_im_sure": "Я уверен 👍",
     "btn_register": "Регистрироваться 📝",
     "msg_start": "Здравствуйте!\nДобро пожаловать в бота автоматизированного управления аккаунтом.\nОзнакомьтесь с правилами.",
@@ -274,8 +275,8 @@ TEXTS = {
     "msg_timenick_text": "Вывод текущего времени в имя профиля.\n\nТекущий статус: {0}\nТекущий вид: {1}\nСмещение часового пояса: UTC{2}",
     "msg_tz_select": "Выберите ваш часовой пояс🌐",
     "msg_tz_saved": "Часовой пояс изменен на UTC{0}!",
-    "msg_autoresp_text": "🤖 **Автоответчик**\n\nСтатус: {1}\nОтветы: только новым собеседникам 👤\n\nТекст приветствия:\n💬 \"{0}\"",
-    "msg_autoresp_req": "Напишите новый текст приветствия в чат ✏️",
+    "msg_autoresp_text": "🤖 **Автоответчик**\n\nСтатус: {1}\nОтветы: только новым собеседникам 👤\n\nТекущее приветствие:\n💬 «{0}»",
+    "msg_autoresp_req": "Отправьте новое приветствие: текст, стикер или GIF ✏️",
     "msg_autoresp_saved": "Приветствие успешно сохранено! 🎉",
     "msg_autoresp_default": "👋 Здравствуйте! Сейчас я не в сети, отвечу позже.",
 }
@@ -1381,6 +1382,41 @@ def show_start_menu(user_id):
     return builder.as_markup()
 
 
+AUTORESP_MEDIA_LIMIT = 20 * 1024 * 1024
+AUTORESP_MEDIA_LOCK = asyncio.Semaphore(2)
+
+
+def autoresponder_greeting_label(uid, cfg):
+    kind = cfg.get("autoresponder_greeting_type", "text")
+    if kind == "sticker":
+        return "Стикер"
+    if kind == "animation":
+        return "Гиф"
+    return cfg.get("autoresponder_greeting") or get_text(uid, "msg_autoresp_default")
+
+
+async def send_autoresponder_greeting(client, chat_id, uid, cfg):
+    kind = cfg.get("autoresponder_greeting_type", "text")
+    if kind not in {"sticker", "animation"}:
+        await client.send_message(chat_id=chat_id, text=autoresponder_greeting_label(uid, cfg))
+        return
+    media = cfg.get("autoresponder_greeting_media") or {}
+    file_id = media.get("file_id")
+    if not file_id:
+        raise ValueError("Greeting media is missing; select the greeting again")
+    # Bot API file IDs must not be passed straight to a user's MTProto client.
+    # Transfer only the selected greeting through a bounded in-memory buffer.
+    async with AUTORESP_MEDIA_LOCK:
+        with io.BytesIO() as buffer:
+            buffer.name = media.get("file_name") or ("greeting.webp" if kind == "sticker" else "greeting.mp4")
+            await bot.download(file_id, destination=buffer)
+            buffer.seek(0)
+            if kind == "sticker":
+                await client.send_sticker(chat_id=chat_id, sticker=buffer)
+            else:
+                await client.send_animation(chat_id=chat_id, animation=buffer)
+
+
 async def autoresponder_func(client, message):
     owner_id = None
     try:
@@ -1414,15 +1450,7 @@ async def autoresponder_func(client, message):
         if history_messages:
             return
 
-        custom_greeting = user_cfg.get(
-            "autoresponder_greeting",
-            get_text(owner_id, "msg_autoresp_default")
-        )
-
-        await client.send_message(
-            chat_id=message.chat.id,
-            text=custom_greeting
-        )
+        await send_autoresponder_greeting(client, message.chat.id, owner_id, user_cfg)
 
         last_replied[chat_key] = int(message.id)
         if len(last_replied) > 200:
@@ -3015,6 +3043,8 @@ def saved_message_record(message):
             or not message.from_user or message.from_user.is_self or message.from_user.is_bot
             or message.outgoing or message.service or message.empty):
         return None
+    if getattr(message, "sticker", None) or getattr(message, "animation", None):
+        return None
     labels = {"sticker": "🎭 Стикер", "photo": "🖼 Фото", "video": "🎬 Видео",
               "voice": "🎤 Голосовое сообщение", "video_note": "📹 Видеосообщение",
               "audio": "🎵 Аудио", "animation": "🎞 GIF", "document": "📎 Файл",
@@ -3833,13 +3863,14 @@ async def menu_autoresponder(callback: types.CallbackQuery):
     cfg = cached_config(uid_str)
     is_active = cfg.get("autoresponder_active", False)
     status_str = get_text(user_id, "status_on") if is_active else get_text(user_id, "status_off")
-    greeting = cfg.get("autoresponder_greeting", get_text(user_id, "msg_autoresp_default"))
+    greeting = autoresponder_greeting_label(user_id, cfg)
+    get_user_state(user_id)["state"] = "MENU"
 
     text = (
         "<b>🤖 Автоответчик</b>\n"
         "<i>Отвечает только новым собеседникам 👤</i>\n\n"
         f"<b>Статус:</b> {html.escape(status_str, quote=False)}\n\n"
-        "<b>Текст приветствия:</b>\n"
+        "<b>Текущее приветствие:</b>\n"
         f"💬 «{html.escape(greeting, quote=False)}»"
     )
 
@@ -3882,7 +3913,7 @@ async def autoresp_setup(callback: types.CallbackQuery):
     try: await callback.answer()
     except Exception: pass
 
-@dp.message(F.chat.type == "private", F.from_user, F.text, lambda msg: get_user_state(msg.from_user.id)["state"] == "WAITING_AUTORESP_TEXT")
+@dp.message(F.chat.type == "private", F.from_user, lambda msg: get_user_state(msg.from_user.id)["state"] == "WAITING_AUTORESP_TEXT")
 async def process_autoresp_text(message: types.Message):
     user_id = message.from_user.id
     data = get_user_state(user_id)
@@ -3890,14 +3921,45 @@ async def process_autoresp_text(message: types.Message):
         data['state'] = 'SESSION_MISSING'
         await edit_or_send(user_id, 'Сначала подключите аккаунт 👤', reply_markup=get_missing_session_markup(user_id))
         return
-    new_text = message.text.strip() if message.text else ""
-
-    if new_text:
-        uid_str = str(user_id)
-        cfg = cached_config(uid_str)
+    cfg = dict(cached_config(str(user_id)))
+    sticker = message.sticker
+    animation = message.animation
+    if sticker or animation:
+        media = sticker or animation
+        if (media.file_size or 0) > AUTORESP_MEDIA_LIMIT:
+            await edit_or_send(user_id, "Приветствие должно быть не больше 20 МБ. Отправьте другой стикер или GIF.")
+            return
+        try:
+            available = await bot.get_file(media.file_id)
+            if (available.file_size or 0) > AUTORESP_MEDIA_LIMIT:
+                await edit_or_send(user_id, "Приветствие должно быть не больше 20 МБ. Отправьте другой стикер или GIF.")
+                return
+        except Exception:
+            await edit_or_send(user_id, "Не удалось получить файл. Отправьте стикер или GIF ещё раз.")
+            return
+        if sticker:
+            extension = ".webm" if sticker.is_video else ".tgs" if sticker.is_animated else ".webp"
+            kind = "sticker"
+        else:
+            extension = ".gif" if animation.mime_type == "image/gif" else ".mp4"
+            kind = "animation"
+        cfg["autoresponder_greeting_type"] = kind
+        cfg["autoresponder_greeting_media"] = {
+            "file_id": media.file_id, "file_name": "greeting" + extension,
+        }
+    elif message.text and message.text.strip():
+        new_text = message.text.strip()
+        if len(new_text) > 4096:
+            await edit_or_send(user_id, "Текст приветствия должен быть не длиннее 4096 символов.")
+            return
         cfg["autoresponder_greeting"] = new_text
-        await persist_user_config_now(user_id, cfg)
-        log_action(user_id, "Изменён текст автоответчика")
+        cfg["autoresponder_greeting_type"] = "text"
+        cfg.pop("autoresponder_greeting_media", None)
+    else:
+        await edit_or_send(user_id, "Отправьте текст, стикер или GIF для приветствия.")
+        return
+    await persist_user_config_now(user_id, cfg)
+    log_action(user_id, "Изменено приветствие автоответчика")
 
     data["state"] = "MENU"
     builder = InlineKeyboardBuilder()
@@ -4195,11 +4257,11 @@ async def render_userbot_preview(callback):
             '<b>🤖 Автоответчик</b>\n'
             '<i>Отвечает только новым собеседникам 👤</i>\n\n'
             '<b>Статус:</b> 🔴 Выключен\n\n'
-            '<b>Текст приветствия:</b>\n'
+            '<b>Текущее приветствие:</b>\n'
             f'💬 «{preview_greeting}»'
         )
         builder.button(text='Включить 🟢', callback_data='toggle_autoresponder')
-        builder.button(text='Изменить текст ✏️', callback_data='autoresp_setup')
+        builder.button(text='Изменить приветствие ✏️', callback_data='autoresp_setup')
         builder.button(text='Назад ⬅️', callback_data='main_menu')
         builder.adjust(1)
     elif action == 'menu_timenick':
