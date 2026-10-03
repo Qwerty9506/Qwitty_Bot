@@ -856,7 +856,7 @@ async def render_active_profile(viewer_id, target_uid, fresh_cfg, phone_number):
         f"<b>Номер:</b> {_html(phone_str)}\n\n"
         "<b>⚙️ Функции</b>\n"
         f"<b>Время в профиль:</b> {_html(time_status)}\n"
-        f"<i>{_html(timezone_name)}</i>\n\n"
+        f"<i>{_html(timezone_name)}</i>\n"
         f"<b>Автоответчик:</b> {_html(autoresponder_status)}\n"
         f"<b>АнтиВирус:</b> {_html(antivirus_status)}"
     )
