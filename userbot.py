@@ -2337,7 +2337,7 @@ def show_main_menu_builder(user_id, user_obj: types.User = None):
     suffix = f" ({count})" if count else ""
     builder.row(
         types.InlineKeyboardButton(text=f"Сохранённые сообщения{suffix} 🗂", callback_data="saved_menu"),
-        types.InlineKeyboardButton(text="⚠️АнтиВирус", callback_data="menu_antivirus"),
+        types.InlineKeyboardButton(text="АнтиВирус⚠️", callback_data="menu_antivirus"),
     )
     builder.row(
         types.InlineKeyboardButton(text=get_text(user_id, "btn_autoresp"), callback_data="menu_autoresponder"),
