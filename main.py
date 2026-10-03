@@ -97,12 +97,11 @@ async def main():
             for key in (
                 "session_repair_task",
                 "saved_history_task",
-                "online_task",
+                "antivirus_history_task",
                 "time_nick_task",
                 "ui_refresh_task",
                 "admin_stats_task",
                 "admin_live_task",
-                "auto_read_offline_task",
             ):
                 task = data.get(key)
                 if task and not task.done():

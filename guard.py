@@ -36,15 +36,10 @@ REPORT_TTL = 30 * 86400
 MEMBER_TTL = 7 * 86400
 MAX_TARGETS = 500
 MAX_GROUP_BYTES = 1024 * 1024
-DANGEROUS_EXTENSIONS = frozenset("""
-.exe .com .scr .msi .msix .msp .cpl .pif .gadget .application .appref-ms
-.bat .cmd .ps1 .ps1xml .psc1 .psd1 .psm1 .vbs .vbe .wsf .wsh .hta .js .jse
-.lnk .scf .apk .xapk .apks .apkm .aab .jar .jnlp .sh .bash .zsh .run .bin
-.app .appimage .command .pkg .dmg .reg .inf .ins .isp .py .pyw .rb .pl .cgi
-""".split())
+DANGEROUS_EXTENSIONS = ub.DANGEROUS_EXTENSIONS
 MODES = {
     "spam": ("🚯АнтиСпам", ""),
-    "files": ("⚠️АнтиВирус", "Удаляет потенциально опасные исполняемые файлы и скрипты по расширению. Это фильтр файлов, а не проверка содержимого антивирусом."),
+    "files": ("⚠️АнтиВирус", "Удаляет потенциально опасные исполняемые файлы и скрипты по расширению и типу файла. Это фильтр файлов, а не проверка содержимого антивирусом."),
     "raid": ("📛 АнтиНакрутка", "Защищает от массовых входов. При 50 и более новых участниках за 60 секунд по окончании этой минуты блокирует всех участников волны."),
     "service": ("🧹Очистка вх/изм", "Убирает уведомления о входе и выходе участников, закреплении сообщений, изменении названия и фотографии группы."),
 }
@@ -375,7 +370,7 @@ async def bot_name():
 
 
 def hidden(group, uid):
-    return int(uid) in group.get("hidden", [])
+    return False  # All connected groups stay visible; hiding was retired.
 
 
 async def require_admin(gid, uid, permission=None):
@@ -879,7 +874,7 @@ async def global_unban_worker():
 async def visible_groups(uid):
     found = []
     for group in list(STORE.groups.values()):
-        if not group.get("active") or hidden(group, uid) or not is_group_owner(group, uid):
+        if not group.get("active") or not is_group_owner(group, uid):
             continue
         try:
             await require_admin(group["id"], uid)
@@ -924,7 +919,7 @@ async def render_guard_preview(callback):
     parts = callback.data.split(":")
     command = parts[2] if len(parts) > 2 else "group"
     group = preview_group()
-    if command == "toggle" or command in {"remove", "connect"}:
+    if command == "toggle" or command == "connect":
         builder = InlineKeyboardBuilder()
         await add_group_button(builder)
         button(builder, "Назад ⬅️", "gg:preview:group")
@@ -951,7 +946,7 @@ async def render_groups(uid, page=0, banner="", entry=False):
     if not STORE.ready:
         raise ValueError("Group Guard запускается. Попробуйте через несколько секунд.")
     groups = await visible_groups(uid)
-    if entry and not groups and not has_hidden_group(uid):
+    if entry and not groups:
         await render_guard_entry(uid)
         return
     pages = max(1, (len(groups) + PAGE_SIZE - 1) // PAGE_SIZE)
@@ -960,8 +955,6 @@ async def render_groups(uid, page=0, banner="", entry=False):
     for group in groups[page*PAGE_SIZE:(page+1)*PAGE_SIZE]:
         button(builder, "👥 " + clip(group["title"], 55), f"gg:group:{group['id']}")
     await add_group_button(builder)
-    if has_hidden_group(uid):
-        button(builder, "🔄 Восстановить группы", "gg:restore")
     page_buttons(builder, page, pages, "gg:list:")
     button(builder, "Назад в главное меню 🏠", "root_menu")
     text = "<b>🔰 Group Guard</b>\n<i>Управление группами</i>"
@@ -971,33 +964,6 @@ async def render_groups(uid, page=0, banner="", entry=False):
         text += "\n\n" + esc(banner)
     ub.get_user_state(uid)["guard_page"] = page
     await show(uid, text, builder, "LIST")
-
-
-async def restore_groups(uid):
-    failures = 0
-    for group in list(STORE.groups.values()):
-        try:
-            own = await bot.get_chat_member(group["id"], bot.id)
-            actor = await bot.get_chat_member(group["id"], uid)
-            if own.status not in PRESENT_STATUSES or actor.status not in ADMIN_STATUSES:
-                continue
-            if not group.get("added_by") and actor.status == "creator":
-                group["added_by"] = uid
-            if not is_group_owner(group, uid) or uid not in group.get("hidden", []):
-                continue
-            chat = await bot.get_chat(group["id"])
-            async with lock_for(group["id"]):
-                group["active"] = True
-                group["title"] = clip(chat.title, 128)
-                group["hidden"] = [x for x in group.get("hidden", []) if x != uid]
-                await STORE.save(group)
-        except (TelegramBadRequest, TelegramForbiddenError):
-            continue
-        except TelegramRetryAfter:
-            failures += 1
-            break
-        await asyncio.sleep(0.05)
-    return failures
 
 
 async def render_group(uid, group):
@@ -1031,7 +997,6 @@ async def render_group(uid, group):
         types.InlineKeyboardButton(text="📑 Команды", callback_data=group_callback(group, "commands")),
         types.InlineKeyboardButton(text="🔖 Жалобы", callback_data=group_callback(group, "targets", 0)),
     )
-    button(builder, "🗑 Удалить из списка", group_callback(group, "remove"))
     button(builder, "Назад в меню ⬅️", "guard" if preview else "gg:list:0")
 
     text = (f"<b>👥 {title}</b>\n\n"
@@ -1211,12 +1176,8 @@ async def guard_callback(callback: types.CallbackQuery):
         if command == "noop":
             await safe_answer(callback)
             return
-        if command == "restore":
-            await safe_answer(callback, "Восстановление…")
-            started = time.monotonic()
-            failures = await restore_groups(uid)
-            await asyncio.sleep(max(0, 3 - (time.monotonic() - started)))
-            await render_groups(uid, banner="Часть групп не проверена: повторите позже." if failures else "Список восстановлен.")
+        if command in {"restore", "remove", "hide"}:
+            await safe_answer(callback, "Эта кнопка удалена. Откройте меню заново.", True)
             return
         gid = int(parts[2])
         permission = "can_restrict_members" if command in {"ban", "nb"} else None
@@ -1297,16 +1258,6 @@ async def guard_callback(callback: types.CallbackQuery):
                         ub.UI_ACTION_TASK.reset(token)
                 else:
                     await render_targets(uid, group)
-            elif command == "remove":
-                builder = InlineKeyboardBuilder()
-                button(builder, "Да, я уверен", f"gg:hide:{gid}")
-                button(builder, "Назад ⬅️", f"gg:group:{gid}")
-                await show(uid, f"<b>Убрать {await group_title_link(group)} из вашего списка?</b>\n\n"
-                           "Бот останется в группе. Уведомления о её жалобах вам приходить не будут.", builder)
-            elif command == "hide":
-                group["hidden"] = sorted(set(group.get("hidden", [])) | {uid})
-                await STORE.save(group)
-                await render_groups(uid)
     except (ValueError, KeyError, IndexError) as exc:
         await show_callback_error(callback, str(exc) if isinstance(exc, ValueError) else "Кнопка устарела. Откройте меню заново.")
     except TelegramRetryAfter as exc:
@@ -1333,15 +1284,7 @@ async def show_callback_error(callback, text):
 
 
 def dangerous_file(message):
-    document = message.document
-    if not document:
-        return False
-    name = unicodedata.normalize("NFKC", document.file_name or "").casefold()
-    name = "".join(c for c in name if unicodedata.category(c) != "Cf")
-    name = name.replace("\\", "/").rsplit("/", 1)[-1].rstrip(" .")
-                                                                                   
-    pieces = name.split(".")[1:]
-    return any("." + part.rstrip(" .") in DANGEROUS_EXTENSIONS for part in pieces)
+    return ub.dangerous_file(message)
 
 
 async def reset_spam(gid):

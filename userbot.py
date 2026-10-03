@@ -17,6 +17,7 @@ import glob
 import logging
 import re
 import random
+import unicodedata
 import ntplib
 from aiogram import Bot, Dispatcher, types, F, BaseMiddleware
 from aiogram.filters import CommandStart
@@ -280,6 +281,41 @@ TEXTS = {
 }
 
 
+DANGEROUS_EXTENSIONS = frozenset("""
+.exe .com .scr .msi .msix .msp .cpl .pif .gadget .application .appref-ms
+.bat .cmd .ps1 .ps1xml .psc1 .psd1 .psm1 .vbs .vbe .wsf .wsh .hta .js .jse
+.lnk .scf .apk .xapk .apks .apkm .aab .jar .jnlp .sh .bash .zsh .run .bin
+.app .appimage .command .pkg .dmg .reg .inf .ins .isp .py .pyw .rb .pl .cgi
+""".split())
+DANGEROUS_MIME_TYPES = frozenset({
+    "application/vnd.android.package-archive", "application/java-archive",
+    "application/x-java-archive", "application/x-msdownload",
+    "application/x-msdos-program", "application/x-dosexec",
+    "application/x-executable", "application/x-sharedlib",
+    "application/x-msi", "application/x-bat", "application/x-sh",
+    "application/x-shellscript", "application/x-powershell",
+    "application/javascript", "text/javascript", "text/x-python",
+    "application/x-python-code", "text/x-shellscript",
+})
+
+
+def dangerous_file(message):
+    """Shared Guard/session filter; inspect metadata without downloading files."""
+    for field in ("document", "audio", "video", "animation"):
+        media = getattr(message, field, None)
+        if not media:
+            continue
+        mime = (getattr(media, "mime_type", "") or "").split(";", 1)[0].strip().lower()
+        if mime in DANGEROUS_MIME_TYPES:
+            return True
+        name = unicodedata.normalize("NFKC", getattr(media, "file_name", "") or "").casefold()
+        name = "".join(c for c in name if unicodedata.category(c) != "Cf")
+        name = name.replace("\\", "/").rsplit("/", 1)[-1].rstrip(" .")
+        if any("." + part.rstrip(" .") in DANGEROUS_EXTENSIONS for part in name.split(".")[1:]):
+            return True
+    return False
+
+
 TIME_STYLES = (
     ("0123456789", "[", "]", ":"),
     ("𝟬𝟭𝟮𝟯𝟰𝟱𝟲𝟳𝟴𝟵", "[", "]", ":"),
@@ -326,6 +362,36 @@ TIME_STYLES = (
     ('𝟶𝟷𝟸𝟹𝟺𝟻𝟼𝟽𝟾𝟿', '⸙ ', ' ⸙', '∶'),
     ('𝟢𝟣𝟤𝟥𝟦𝟧𝟨𝟩𝟪𝟫', '༄ ', ' ༄', ':'),
     ('0123456789', 'ミ★ ', ' ★彡', '∶'),
+    ('0123456789', '⟬', '⟭', ':'),
+    ('𝟬𝟭𝟮𝟯𝟰𝟱𝟲𝟳𝟴𝟵', '⦃', '⦄', '∶'),
+    ('𝟎𝟏𝟐𝟑𝟒𝟓𝟔𝟕𝟖𝟗', '⧼', '⧽', ':'),
+    ('𝟘𝟙𝟚𝟛𝟜𝟝𝟞𝟟𝟠𝟡', '⌈', '⌉', '∶'),
+    ('𝟶𝟷𝟸𝟹𝟺𝟻𝟼𝟽𝟾𝟿', '⌊', '⌋', ':'),
+    ('０１２３４５６７８９', '〖', '〗', '：'),
+    ('⁰¹²³⁴⁵⁶⁷⁸⁹', '˖⁺ ', ' ⁺˖', ':'),
+    ('₀₁₂₃₄₅₆₇₈₉', '₊˚ ', ' ˚₊', ':'),
+    ('⓪①②③④⑤⑥⑦⑧⑨', '❀ ', ' ❀', '∶'),
+    ('⓿❶❷❸❹❺❻❼❽❾', '', '', ':'),
+    ('0123456789', '☀ ', ' ☀', ':'),
+    ('𝟬𝟭𝟮𝟯𝟰𝟱𝟲𝟳𝟴𝟵', '☁ ', ' ☁', '∶'),
+    ('𝟎𝟏𝟐𝟑𝟒𝟓𝟔𝟕𝟖𝟗', '⚡ ', ' ⚡', ':'),
+    ('𝟘𝟙𝟚𝟛𝟜𝟝𝟞𝟟𝟠𝟡', '♫ ', ' ♫', '∶'),
+    ('𝟶𝟷𝟸𝟹𝟺𝟻𝟼𝟽𝟾𝟿', '⌘ ', ' ⌘', ':'),
+    ('𝟢𝟣𝟤𝟥𝟦𝟧𝟨𝟩𝟪𝟫', '✿ ', ' ✿', '∶'),
+    ('0123456789', '⚙ ', ' ⚙', ':'),
+    ('𝟬𝟭𝟮𝟯𝟰𝟱𝟲𝟳𝟴𝟵', '➤ ', '', ':'),
+    ('𝟎𝟏𝟐𝟑𝟒𝟓𝟔𝟕𝟖𝟗', '◆ ', ' ◆', '∶'),
+    ('𝟘𝟙𝟚𝟛𝟜𝟝𝟞𝟟𝟠𝟡', '⊶ ', ' ⊷', ':'),
+    ('𝟶𝟷𝟸𝟹𝟺𝟻𝟼𝟽𝟾𝟿', '⋘ ', ' ⋙', '∶'),
+    ('０１２３４５６７８９', '《', '》', '：'),
+    ('⁰¹²³⁴⁵⁶⁷⁸⁹', '♡ ', ' ♡', ':'),
+    ('₀₁₂₃₄₅₆₇₈₉', '⋆₊ ', ' ₊⋆', ':'),
+    ('⓪①②③④⑤⑥⑦⑧⑨', '❬', '❭', '∶'),
+    ('⓿❶❷❸❹❺❻❼❽❾', '⟮', '⟯', ':'),
+    ('0123456789', '⏱ ', '', ':'),
+    ('𝟬𝟭𝟮𝟯𝟰𝟱𝟲𝟳𝟴𝟵', '⌖ ', ' ⌖', '∶'),
+    ('𝟎𝟏𝟐𝟑𝟒𝟓𝟔𝟕𝟖𝟗', '✺ ', ' ✺', ':'),
+    ('𝟘𝟙𝟚𝟛𝟜𝟝𝟞𝟟𝟠𝟡', '❰ ', ' ❱', '∶'),
 )
 
 
@@ -506,12 +572,13 @@ UI_ACTION_TASK = ContextVar("qwitty_ui_action_task", default=None)
 
 
 def minimize_config(cfg):
-    """Remove only short-lived sign-in secrets before persistent DB writes.
+    """Remove sign-in secrets and retired feature flags before persistent DB writes.
 
     Profile data (including phone, names and settings) is intentionally kept in
     Supabase. One-time login secrets must never become persistent config fields.
     """
-    for key in ("password", "phone_code_hash", "phone_code", "auth_code"):
+    for key in ("password", "phone_code_hash", "phone_code", "auth_code",
+                "online_247", "auto_read"):
         cfg.pop(key, None)
     return cfg
 
@@ -1376,78 +1443,9 @@ async def autoresponder_func(client, message):
     except Exception as e:
         logging.error(f"Ошибка автоответчика: {e}")
 
-async def auto_read_message(client, message):
-    uid = client.owner_id
-    cfg = MEMORY_DB["config"].get(str(uid), {})
-    if not cfg.get("auto_read", False):
-        return
-    data = get_user_state(uid)
-    try:
-
-
-        await client.read_chat_history(message.chat.id, max_id=message.id)
-        data.pop("auto_read_error", None)
-    except FloodWait as e:
-        data["auto_read_error"] = f"Telegram ограничил чтение на {e.value} сек."
-    except Unauthorized:
-        await handle_revoked_session(uid, "сессия отозвана")
-    except Exception as e:
-        logging.warning("Автопрочтение %s: %s", uid, type(e).__name__)
-
-
-async def auto_read_offline(uid, client):
-
-
-    return
-
-
-async def send_online_status(user_id):
-
-    data = get_user_state(user_id)
-    lock = data.setdefault("online_lock", asyncio.Lock())
-    async with lock:
-        if not MEMORY_DB["config"].get(str(user_id), {}).get("online_247", False):
-            return
-        if time.monotonic() < data.get("online_next_at", 0):
-            return
-        client = data.get("client")
-        if not client or not client.is_connected:
-            data["online_error"] = "Нет соединения с Telegram; ожидаем восстановления."
-            data["online_next_at"] = time.monotonic() + 45
-            return
-        try:
-            await client.invoke(functions.account.UpdateStatus(offline=False))
-            data.pop("online_error", None)
-            data["online_next_at"] = time.monotonic() + 45
-        except FloodWait as e:
-            data["online_next_at"] = time.monotonic() + max(1, e.value) + 1
-            data["online_error"] = f"Пауза Telegram: {e.value} сек."
-        except Unauthorized:
-            await handle_revoked_session(user_id, "сессия отозвана")
-        except Exception as e:
-            data["online_error"] = "Не удалось обновить онлайн; повторим через 45 секунд."
-            data["online_next_at"] = time.monotonic() + 45
-            logging.warning("Режим 24/7 %s: %s", user_id, e)
-
-
-async def online_mode_loop(user_id):
-    data = get_user_state(user_id)
-    while MEMORY_DB["config"].get(str(user_id), {}).get("online_247", False):
-        await send_online_status(user_id)
-        await asyncio.sleep(max(1, data.get("online_next_at", 0) - time.monotonic()))
-
-
-def start_online_mode(user_id):
-    data = get_user_state(user_id)
-    task = data.get("online_task")
-    if MEMORY_DB["config"].get(str(user_id), {}).get("online_247", False):
-        if not task or task.done():
-            data["online_task"] = asyncio.create_task(online_mode_loop(user_id))
-
-
 def start_userbot_features(user_id):
-    start_online_mode(user_id)
     start_saved_history(user_id)
+    start_antivirus_history(user_id)
 
 
 async def update_profile_branding(user_id, sync_base=True):
@@ -1551,7 +1549,8 @@ async def _build_runtime_client(user_id, session_string):
     client.add_handler(MessageHandler(saved_new_message, incoming_private), group=-4)
     client.add_handler(EditedMessageHandler(saved_edited_message, incoming_private), group=-4)
     client.add_handler(RawUpdateHandler(saved_raw_update), group=-3)
-    client.add_handler(MessageHandler(auto_read_message, filters.private & filters.incoming & ~filters.me), group=-1)
+    client.add_handler(MessageHandler(antivirus_message, filters.all), group=-5)
+    client.add_handler(EditedMessageHandler(antivirus_message, filters.all), group=-5)
     try:
         authorized = await client.connect()
         if not authorized:
@@ -1627,7 +1626,7 @@ async def _activate_client(uid, client, session_string):
 async def _drop_invalid_session(uid, reason):
     data = get_user_state(uid)
     cfg = cached_config(uid)
-    for key in ('time_nick_task', 'saved_history_task', 'online_task', 'auto_read_offline_task'):
+    for key in ('time_nick_task', 'saved_history_task', 'antivirus_history_task'):
         task = data.get(key)
         if task and task is not asyncio.current_task():
             task.cancel()
@@ -1882,7 +1881,7 @@ async def cmd_start(message: types.Message):
         MEMORY_DB["config"][uid_str] = db_get_data("config", uid_str) or {
             "phone": "Не указан",
             "time_nick_active": False, "autoresponder_active": False,
-            "online_247": False, "auto_read": False,
+            "antivirus_enabled": False,
             "autoresponder_greeting": get_text(user_id, "msg_autoresp_default"),
             "timezone_offset": 5,
             "used_timenick_seconds": 0.0,
@@ -2195,8 +2194,7 @@ def save_user_config(user_id, message, is_logged_in=True):
         "phone": data["phone"] or old_cfg.get("phone", "Не указан"),
         "time_nick_active": data["time_nick_active"],
         "autoresponder_active": data.get("autoresponder_active", old_cfg.get("autoresponder_active", False)),
-        "online_247": bool(old_cfg.get("online_247", False)),
-        "auto_read": bool(old_cfg.get("auto_read", False)),
+        "antivirus_enabled": bool(old_cfg.get("antivirus_enabled", False)),
         "autoresponder_greeting": old_cfg.get("autoresponder_greeting", get_text(user_id, "msg_autoresp_default")),
         "timezone_offset": old_cfg.get("timezone_offset", 5),
         "delete_today_count": old_cfg.get("delete_today_count", 0),
@@ -2337,11 +2335,9 @@ def show_main_menu_builder(user_id, user_obj: types.User = None):
     builder = InlineKeyboardBuilder()
     count = 0 if is_preview(user_id) else SAVED.unread_chat_count(user_id)
     suffix = f" ({count})" if count else ""
-    builder.row(types.InlineKeyboardButton(
-        text=f"Сохранённые сообщения{suffix} 🗂", callback_data="saved_menu"))
     builder.row(
-        types.InlineKeyboardButton(text="Вечный онлайн 📊", callback_data="menu_online"),
-        types.InlineKeyboardButton(text="Автопрочтение 👀", callback_data="menu_auto_read"),
+        types.InlineKeyboardButton(text=f"Сохранённые сообщения{suffix} 🗂", callback_data="saved_menu"),
+        types.InlineKeyboardButton(text="⚠️АнтиВирус", callback_data="menu_antivirus"),
     )
     builder.row(
         types.InlineKeyboardButton(text=get_text(user_id, "btn_autoresp"), callback_data="menu_autoresponder"),
@@ -2374,90 +2370,212 @@ def ru_plural(value, one, few, many):
     return one if value % 10 == 1 else few if 2 <= value % 10 <= 4 else many
 
 
-@dp.callback_query(F.data == "menu_online")
-async def menu_online(callback: types.CallbackQuery):
-    uid = callback.from_user.id
-    if not await ensure_client_connected(uid):
-        await callback.answer("Сначала подключите аккаунт.", show_alert=True)
-        return
+def antivirus_enabled(uid):
     cfg = MEMORY_DB["config"].get(str(uid), {})
-    active = cfg.get("online_247", False)
-    text = "<b>📊 Вечный онлайн</b>\n\n<b>Статус:</b> " + ("🟢 <b>Включен</b>" if active else "🔴 <b>Выключен</b>")
-    text += "\n<i>Поддерживает статус постоянного «в сети».</i>"
-    if get_user_state(uid).get("online_error") and active:
-        text += "\n⚠️ " + html.escape(str(get_user_state(uid)["online_error"]), quote=False)
+    return bool(cfg.get("antivirus_enabled") and cfg.get("logged_in"))
 
-    builder = InlineKeyboardBuilder()
-    builder.button(text="🔴 Выключить" if active else "🟢 Включить", callback_data="toggle_247")
-    builder.button(text="Назад в меню 🏠", callback_data="main_menu")
-    builder.adjust(1)
-    await edit_or_send(uid, text, reply_markup=builder.as_markup(), parse_mode="HTML")
+
+def antivirus_local_chat(chat):
+    # Pyrogram always revokes channel/supergroup messages for everyone,
+    # even with revoke=False. Never call deletion for those peer types.
+    return getattr(chat, "type", None) in {
+        enums.ChatType.PRIVATE, enums.ChatType.BOT, enums.ChatType.GROUP,
+    }
+
+
+async def antivirus_delete(client, message):
+    uid = client.owner_id
+    if not antivirus_enabled(uid) or not dangerous_file(message):
+        return False
+    state = get_user_state(uid)
+    if not antivirus_local_chat(message.chat):
+        return False
+    lock = state.setdefault("antivirus_lock", asyncio.Lock())
+    async with lock:
+        while antivirus_enabled(uid) and state.get("client") is client and client.is_connected:
+            delay = state.get("antivirus_next_at", 0) - time.monotonic()
+            if delay > 0:
+                await asyncio.sleep(delay)
+            if not antivirus_enabled(uid) or state.get("client") is not client:
+                return False
+            try:
+                deleted = await client.delete_messages(message.chat.id, message.id, revoke=False)
+                state["antivirus_next_at"] = time.monotonic() + 0.5
+                if deleted:
+                    state["antivirus_deleted"] = state.get("antivirus_deleted", 0) + 1
+                    state.pop("antivirus_error", None)
+                    return True
+                return True  # An already-deleted message needs no further action.
+            except FloodWait as exc:
+                state["antivirus_next_at"] = time.monotonic() + exc.value + 1
+                state["antivirus_error"] = f"Пауза Telegram: {exc.value} сек."
+            except Unauthorized:
+                await handle_revoked_session(uid, "сессия отозвана")
+                return False
+            except Exception as exc:
+                state["antivirus_error"] = "Некоторые сообщения удалить не удалось. Проверьте соединение."
+                logging.warning("АнтиВирус удаления %s: %s", uid, type(exc).__name__)
+                return False
+    return False
+
+
+async def antivirus_message(client, message):
     try:
-        await callback.answer()
-    except TelegramBadRequest:
-        pass
+        await antivirus_delete(client, message)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        logging.warning("АнтиВирус сообщения %s: %s", client.owner_id, type(exc).__name__)
 
 
-@dp.callback_query(F.data == "toggle_247")
-async def toggle_247(callback: types.CallbackQuery):
-    uid = callback.from_user.id
-    if not await ensure_client_connected(uid):
-        await callback.answer("Сначала подключите аккаунт.", show_alert=True)
-        return
+async def antivirus_history_loop(uid):
+    state = get_user_state(uid)
+    client = state.get("client")
+    state["antivirus_history_loading"] = True
+    completed_chats = state.setdefault("antivirus_scanned_chats", set())
+    try:
+        async for dialog in client.get_dialogs():
+            if not antivirus_enabled(uid) or state.get("client") is not client or not client.is_connected:
+                return
+            chat = dialog.chat
+            if chat.id in completed_chats:
+                continue
+            if not antivirus_local_chat(chat):
+                completed_chats.add(chat.id)
+                state["antivirus_skipped_chats"] = state.get("antivirus_skipped_chats", 0) + 1
+                continue
+            offsets = state.setdefault("antivirus_history_offsets", {})
+            offset = offsets.setdefault(chat.id, 0)
+            while antivirus_enabled(uid) and state.get("client") is client and client.is_connected:
+                try:
+                    # No history limit: visit every available old message. Fetch
+                    # pages explicitly so FloodWait never drops the cursor.
+                    messages = [msg async for msg in client.get_chat_history(chat.id, limit=100, offset_id=offset)]
+                    if not messages:
+                        completed_chats.add(chat.id)
+                        state["antivirus_history_offsets"].pop(chat.id, None)
+                        break
+                    for message in messages:
+                        if not antivirus_enabled(uid) or state.get("client") is not client:
+                            return
+                        if dangerous_file(message) and not await antivirus_delete(client, message):
+                            if not antivirus_enabled(uid) or state.get("client") is not client:
+                                return
+                            raise RuntimeError("File deletion failed; retain history cursor")
+                        offset = message.id
+                        state["antivirus_history_offsets"][chat.id] = offset
+                    await asyncio.sleep(1)
+                except FloodWait as exc:
+                    state["antivirus_error"] = f"Проверка истории на паузе Telegram: {exc.value} сек."
+                    await asyncio.sleep(exc.value + 1)
+                except Unauthorized:
+                    await handle_revoked_session(uid, "сессия отозвана")
+                    return
+                except Exception as exc:
+                    # Keep the cursor; retry this chat during the next pass.
+                    state["antivirus_error"] = "История проверена частично. Продолжим автоматически."
+                    logging.warning("АнтиВирус истории %s: %s", uid, type(exc).__name__)
+                    break
+        if antivirus_enabled(uid) and state.get("client") is client:
+            if state.get("antivirus_history_offsets"):
+                state["antivirus_history_retry_at"] = time.monotonic() + 60
+            else:
+                state["antivirus_history_done"] = True
+    except asyncio.CancelledError:
+        raise
+    except Unauthorized:
+        await handle_revoked_session(uid, "сессия отозвана")
+    except FloodWait as exc:
+        state["antivirus_history_retry_at"] = time.monotonic() + exc.value + 1
+        state["antivirus_error"] = f"Проверка истории на паузе Telegram: {exc.value} сек."
+    except Exception as exc:
+        state["antivirus_history_retry_at"] = time.monotonic() + 60
+        state["antivirus_error"] = "Проверка истории продолжится после восстановления соединения."
+        logging.warning("АнтиВирус истории %s: %s", uid, type(exc).__name__)
+    finally:
+        state["antivirus_history_loading"] = False
 
-    data = get_user_state(uid)
-    cfg = MEMORY_DB["config"].setdefault(str(uid), {})
-    cfg["online_247"] = not cfg.get("online_247", False)
-    await persist_user_config_now(uid, cfg)
 
-    if cfg["online_247"]:
-        data["online_next_at"] = 0
-        await callback.answer()
-        await send_online_status(uid)
-        start_online_mode(uid)
-    else:
-        task = data.get("online_task")
-        if task:
+def start_antivirus_history(uid):
+    state = get_user_state(uid)
+    client = state.get("client")
+    task = state.get("antivirus_history_task")
+    if client is not state.get("antivirus_history_client"):
+        if task and not task.done():
             task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
-        data["online_task"] = None
-        data.pop("online_error", None)
-        await callback.answer()
+            return  # The service retries after the previous client task exits.
+        state["antivirus_history_client"] = client
+        for key in ("antivirus_history_done", "antivirus_scanned_chats", "antivirus_history_offsets",
+                    "antivirus_history_retry_at"):
+            state.pop(key, None)
+    if (antivirus_enabled(uid) and client and client.is_connected
+            and not SAVED.closing and (not task or task.done())
+            and not state.get("antivirus_history_done")
+            and time.monotonic() >= state.get("antivirus_history_retry_at", 0)):
+        state["antivirus_history_task"] = asyncio.create_task(antivirus_history_loop(uid))
 
-    await maybe_recreate_ui(callback)
-    await menu_online(callback)
 
-
-@dp.callback_query(F.data == "menu_auto_read")
-async def menu_auto_read(callback: types.CallbackQuery):
-    uid = callback.from_user.id
-    cfg = MEMORY_DB["config"].get(str(uid), {})
-    active = cfg.get("auto_read", False)
-    text = "<b>👀 Автопрочтение</b>\n\n<b>Статус:</b> " + ("🟢 <b>Включен</b>" if active else "🔴 <b>Выключен</b>")
-    text += "\n<i>Автоматически отмечает новые сообщения в ЛС прочитанными.</i>"
+def antivirus_menu_content(uid, preview=False):
+    active = False if preview else antivirus_enabled(uid)
+    state = {} if preview else get_user_state(uid)
+    text = (
+        "<b>⚠️ АнтиВирус</b>\n\n"
+        f"<b>Статус:</b> {'🟢 Включен' if active else '🔴 Выключен'}\n\n"
+        "Удаляет подозрительные исполняемые файлы и скрипты только у вас: "
+        "в личках, чатах с ботами и обычных группах. "
+        "Проверяет новые сообщения, изменения и всю доступную историю.\n\n"
+        "В супергруппах и каналах Telegram не позволяет удалять отдельные "
+        "сообщения только у себя, поэтому они пропускаются.\n\n"
+        "<i>Фильтр такой же, как в Guard: расширения и типы файлов. "
+        "Содержимое файлов не скачивается и на вирусы не сканируется.</i>"
+    )
+    if state.get("antivirus_history_loading"):
+        text += "\n\n⏳ Проверяем старые сообщения…"
+    elif state.get("antivirus_history_done") and active:
+        text += "\n\n✅ Проверка доступной истории завершена."
+    text += f"\n<b>Удалено за этот запуск:</b> {state.get('antivirus_deleted', 0)}"
+    if state.get("antivirus_error"):
+        text += "\n⚠️ " + html.escape(state["antivirus_error"], quote=False)
     builder = InlineKeyboardBuilder()
-    builder.button(text="🔴 Выключить" if active else "🟢 Включить", callback_data="toggle_auto_read")
+    builder.button(text="Выключить 🔴" if active else "Включить 🟢", callback_data="toggle_antivirus")
     builder.button(text="Назад в меню 🏠", callback_data="main_menu")
     builder.adjust(1)
-    await edit_or_send(uid, text, reply_markup=builder.as_markup(), parse_mode="HTML")
+    return text, builder.as_markup()
+
+
+@dp.callback_query(F.data.in_({"menu_online", "menu_auto_read", "toggle_247", "toggle_auto_read"}))
+async def retired_feature(callback: types.CallbackQuery):
+    await callback.answer("Эта функция удалена. Откройте меню заново.", show_alert=True)
+
+
+@dp.callback_query(F.data == "menu_antivirus")
+async def menu_antivirus(callback: types.CallbackQuery):
+    text, markup = antivirus_menu_content(callback.from_user.id)
+    await edit_or_send(callback.from_user.id, text, reply_markup=markup, parse_mode="HTML")
     await callback.answer()
 
 
-@dp.callback_query(F.data == "toggle_auto_read")
-async def toggle_auto_read(callback: types.CallbackQuery):
+@dp.callback_query(F.data == "toggle_antivirus")
+async def toggle_antivirus(callback: types.CallbackQuery):
     uid = callback.from_user.id
     if not await ensure_client_connected(uid):
         await callback.answer("Сначала подключите аккаунт.", show_alert=True)
         return
     cfg = MEMORY_DB["config"].setdefault(str(uid), {})
-    cfg["auto_read"] = not cfg.get("auto_read", False)
+    cfg["antivirus_enabled"] = not cfg.get("antivirus_enabled", False)
     await persist_user_config_now(uid, cfg)
-    if not cfg["auto_read"]:
-        task = get_user_state(uid).get("auto_read_offline_task")
-        if task and not task.done():
-            task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
-    await menu_auto_read(callback)
+    state = get_user_state(uid)
+    task = state.get("antivirus_history_task")
+    if task and not task.done():
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+    state["antivirus_history_task"] = None
+    for key in ("antivirus_history_done", "antivirus_history_offsets", "antivirus_scanned_chats",
+                "antivirus_history_retry_at", "antivirus_error", "antivirus_skipped_chats"):
+        state.pop(key, None)
+    if cfg["antivirus_enabled"]:
+        start_antivirus_history(uid)
+    await menu_antivirus(callback)
 
 
 SAVED_CHAT_LIMIT = 100
@@ -3359,6 +3477,8 @@ async def saved_maintenance_loop():
                 logging.warning("Archive maintenance %s: %s", uid, type(e).__name__)
 
         for uid_text in list(MEMORY_DB["config"]):
+            if uid_text.isdigit():
+                start_antivirus_history(int(uid_text))
             if uid_text.isdigit() and int(uid_text) not in SAVED.ready:
                 uid = int(uid_text)
                 if time.monotonic() >= SAVED.retry_load_at.get(uid, 0):
@@ -3511,7 +3631,7 @@ async def saved_refresh_visible(uid):
         state["saved_refresh_at"] = time.monotonic() + 3
         markup = state.get("last_ui_reply_markup")
         callbacks = {b.callback_data for row in getattr(markup, "inline_keyboard", []) for b in row}
-        if "saved_menu" in callbacks and "menu_online" in callbacks:
+        if "saved_menu" in callbacks and "menu_antivirus" in callbacks:
             await edit_or_send(
                 uid,
                 state.get("last_ui_text") or "<b>♨️ Account Manager</b>\n<i>Управление аккаунтом</i>",
@@ -4047,14 +4167,11 @@ async def render_userbot_preview(callback):
     elif action.startswith(('saved_chats:', 'saved_chat:', 'saved_page:', 'saved_back:', 'saved_full:')):
         text = '<b>🗣 Лички</b>\n\n<i>Сохранённых сообщений пока нет ✨</i>'
         builder.button(text='Назад ⬅️', callback_data='saved_menu')
-    elif action in ('menu_online', 'menu_auto_read'):
-        online = action == 'menu_online'
-        text = (
-            '<b>📊 Вечный онлайн</b>' if online else '<b>👀 Автопрочтение</b>'
-        ) + '\n\n<b>Статус:</b> 🔴 Выключено'
-        builder.button(text='Включить 🟢', callback_data='toggle_247' if online else 'toggle_auto_read')
-        builder.button(text='Назад ⬅️', callback_data='main_menu')
-        builder.adjust(1)
+    elif action == 'menu_antivirus':
+        text, markup = antivirus_menu_content(uid, preview=True)
+        await edit_or_send(uid, text, reply_markup=markup, parse_mode="HTML")
+        await callback.answer()
+        return
     elif action == 'menu_autoresponder':
         preview_greeting = html.escape(get_text(uid, 'msg_autoresp_default'), quote=False)
         text = (
@@ -4100,7 +4217,7 @@ async def render_userbot_preview(callback):
 
 
 def preview_action(action):
-    return action in {'userbot_preview', 'main_menu', 'menu_online', 'menu_auto_read',
+    return action in {'userbot_preview', 'main_menu', 'menu_antivirus',
                       'menu_autoresponder', 'menu_timenick', 'autoresp_setup', 'tz_select',
                       'time_styles', 'saved_menu', 'saved_toggle'} or action.startswith(
                       ('toggle_', 'set_tz_', 'time_style_', 'time_styles_page_', 'saved_chats:',

@@ -846,8 +846,7 @@ async def render_active_profile(viewer_id, target_uid, fresh_cfg, phone_number):
     timezone_name = userbot.TIMEZONE_NAMES.get(timezone_offset, f"UTC{timezone_offset:+d}")
     time_status = userbot.get_text(viewer_id, "status_on") if cfg.get("time_nick_active", False) else userbot.get_text(viewer_id, "status_off")
     autoresponder_status = userbot.get_text(viewer_id, "status_on") if cfg.get("autoresponder_active", False) else userbot.get_text(viewer_id, "status_off")
-    online_247_status = userbot.get_text(viewer_id, "status_on") if cfg.get("online_247", False) else userbot.get_text(viewer_id, "status_off")
-    auto_read_status = userbot.get_text(viewer_id, "status_on") if cfg.get("auto_read", False) else userbot.get_text(viewer_id, "status_off")
+    antivirus_status = userbot.get_text(viewer_id, "status_on") if cfg.get("antivirus_enabled", False) else userbot.get_text(viewer_id, "status_off")
     phone_str = phone_number or "Недоступен"
 
     text = (
@@ -859,8 +858,7 @@ async def render_active_profile(viewer_id, target_uid, fresh_cfg, phone_number):
         f"<b>Время в профиль:</b> {_html(time_status)}\n"
         f"<i>{_html(timezone_name)}</i>\n\n"
         f"<b>Автоответчик:</b> {_html(autoresponder_status)}\n"
-        f"<b>Вечный онлайн:</b> {_html(online_247_status)}\n\n"
-        f"<b>Автопрочтение:</b> {_html(auto_read_status)}"
+        f"<b>АнтиВирус:</b> {_html(antivirus_status)}"
     )
 
     builder = InlineKeyboardBuilder()
