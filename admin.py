@@ -1,31 +1,19 @@
 """Admin screens, live statistics, account inspection and server restart."""
-import asyncio
-import datetime
-import html
-import json
-import logging
-import os
-import time
-import psutil
-import aiohttp
-from aiogram import F, types
-from aiogram.utils.keyboard import InlineKeyboardBuilder
-from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
-import userbot
-import guard
-from userbot import bot, dp, MEMORY_DB, async_db_save
-from userbot import SUPABASE_DB_SIZE_RPC, SUPABASE_DB_LIMIT_MB, supabase, format_remaining_time
-
-ADMIN_ID = userbot.ADMIN_ID
+from main import (
+    asyncio, datetime, html, json, logging, os, time, psutil, aiohttp,
+    F, types, InlineKeyboardBuilder, TelegramBadRequest, TelegramRetryAfter,
+    userbot, guard, bot, dp, ADMIN_ID, RENDER_API_KEY, RENDER_SERVICE_ID,
+    RENDER_INSTANCE_ID, DATABASES, SUPABASE_DB_SIZE_RPC, SUPABASE_DB_LIMIT_MB,
+)
+MEMORY_DB = userbot.MEMORY_DB
+async_db_save = userbot.async_db_save
+format_remaining_time = userbot.format_remaining_time
 
 
 def _html(value):
     return html.escape(str(value), quote=False)
 
 
-RENDER_API_KEY = os.getenv("RENDER_API_KEY", "").strip()
-RENDER_SERVICE_ID = os.getenv("RENDER_SERVICE_ID", "").strip()
-RENDER_INSTANCE_ID = os.getenv("RENDER_INSTANCE_ID", "").strip()
 RESTART_PENDING_KEY = "server_restart_pending"
 RESTART_SUCCESS_AFTER_SECONDS = 45
 RESTART_ANIMATION_TASKS = {}
@@ -1130,30 +1118,24 @@ def _next_render_reset_utc(now=None):
 
 
 async def _get_supabase_db_mb():
-    if not supabase:
-        return None, "нет подключения"
-
-
     rpc_name = SUPABASE_DB_SIZE_RPC or "get_database_size_bytes"
-    try:
-        result = await asyncio.to_thread(lambda: supabase.rpc(rpc_name, {}).execute())
-        raw = result.data
-        if isinstance(raw, list) and raw:
-            raw = raw[0]
-        if isinstance(raw, dict):
-            raw = (
-                raw.get("bytes")
-                or raw.get("size_bytes")
-                or raw.get("db_size_bytes")
-                or raw.get("size")
-                or raw.get("database_size_bytes")
-            )
-        value = float(raw)
-        return (value / (1024 * 1024), "rpc_bytes")
-    except Exception as e:
-        logging.warning(f"Не удалось получить точный размер Supabase через RPC {rpc_name}: {e}")
-
+    async def read_size(client):
+        try:
+            result = await asyncio.to_thread(lambda: client.rpc(rpc_name, {}).execute())
+            raw = result.data
+            if isinstance(raw, list) and raw:
+                raw = raw[0]
+            if isinstance(raw, dict):
+                raw = next((raw[k] for k in ("bytes", "size_bytes", "db_size_bytes", "size", "database_size_bytes")
+                            if k in raw and raw[k] is not None), None)
+            return float(raw) / (1024 * 1024)
+        except Exception as exc:
+            logging.warning("Supabase size RPC failed: %s", type(exc).__name__)
+            return None
+    sizes = await asyncio.gather(*(read_size(client) for client in DATABASES.clients))
+    if any(value is None for value in sizes):
         return None, "rpc_error"
+    return sum(sizes), "rpc_bytes_total"
 
 
 async def refresh_server_stats_cache(force=False):
@@ -1171,7 +1153,7 @@ def _build_server_stats_text(cache):
     size = cache.get("supabase_db_mb")
     db_line = (
         f"<b>База:</b> {size:.1f} / {SUPABASE_DB_LIMIT_MB:g} MB"
-        if size is not None else "<b>База:</b> данные недоступны"
+        if size is not None else "<b>База:</b> данные недоступны / 1000 MB"
     )
     return (
         "<b>🖥 Статистика сервера</b>\n\n"

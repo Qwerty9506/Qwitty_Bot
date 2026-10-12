@@ -1,54 +1,15 @@
-import copy
-import io
-from contextvars import ContextVar
-import struct
-import binascii
-import hashlib
-import html
-import json
-import sqlite3
-import threading
-import uuid
-import zlib
-import asyncio
-import os
-import datetime
-import time
-import glob
-import logging
-import re
-import random
-import unicodedata
-import ntplib
-from aiogram import Bot, Dispatcher, types, F, BaseMiddleware
-from aiogram.filters import CommandStart
-from aiogram.utils.keyboard import InlineKeyboardBuilder
-from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
-
-from pyrogram import Client, enums, filters
-from pyrogram.handlers import MessageHandler, EditedMessageHandler, RawUpdateHandler
-from pyrogram.raw import functions, types as raw_types
-from pyrogram.errors import SessionPasswordNeeded, PhoneCodeInvalid, PhoneCodeExpired, Unauthorized, FloodWait, UserNotParticipant, ChannelPrivate
-
-from supabase import create_client, Client as SupabaseClient
-
-BOT_TOKEN = os.getenv("BOT_TOKEN", "")
-API_ID = int(os.getenv("API_ID", "0") or 0)
-API_HASH = os.getenv("API_HASH", "")
-SUPABASE_URL = os.getenv("SUPABASE_URL", "")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
-
-SUPABASE_DB_SIZE_RPC = os.getenv("SUPABASE_DB_SIZE_RPC", "get_database_size_bytes")
-SUPABASE_DB_LIMIT_MB = float(os.getenv("SUPABASE_DB_LIMIT_MB", "500") or 500)
-
-
-ADMIN_ID = 8845929618
-ADMIN_USERNAME = "Qwitty_Cc"
-
-logging.basicConfig(level=logging.INFO)
-logging.getLogger("aiogram").setLevel(logging.WARNING)
-logging.getLogger("pyrogram").setLevel(logging.WARNING)
-
+from main import (
+    copy, io, ContextVar, struct, binascii, hashlib, html, json, sqlite3,
+    threading, uuid, zlib, asyncio, os, datetime, time, glob, logging, re,
+    random, unicodedata, ntplib, types, F, BaseMiddleware, CommandStart,
+    InlineKeyboardBuilder, TelegramBadRequest, TelegramRetryAfter, Client,
+    enums, filters, MessageHandler, EditedMessageHandler, RawUpdateHandler,
+    functions, raw_types, SessionPasswordNeeded, PhoneCodeInvalid,
+    PhoneCodeExpired, Unauthorized, FloodWait, UserNotParticipant, ChannelPrivate,
+    API_ID, API_HASH, ADMIN_ID, ADMIN_USERNAME, SESSIONS_DIR, bot, dp,
+    DATABASES, CONFIG_OUTBOX_SQLITE, SAVED_MESSAGES_SQLITE, get_guard,
+    DB_WRITE_SEMAPHORE, DB_CONFIG_SAVE_DEBOUNCE_SECONDS, DB_LOG_SAVE_DEBOUNCE_SECONDS,
+)
 
 NTP_OFFSET_SECONDS = 0.0
 NTP_LAST_SYNC_MONOTONIC = 0.0
@@ -126,20 +87,6 @@ async def sleep_until_next_world_minute():
         delay = 0.01
     await asyncio.sleep(delay)
 
-
-supabase: SupabaseClient = None
-if SUPABASE_URL and SUPABASE_KEY:
-    try:
-        supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
-        logging.info("✅ Supabase успешно подключен")
-    except Exception as e:
-        logging.error(f"❌ Ошибка подключения к Supabase: {e}")
-
-
-SESSIONS_DIR = "sessions"
-if not os.path.exists(SESSIONS_DIR):
-    os.makedirs(SESSIONS_DIR, mode=0o700)
-os.chmod(SESSIONS_DIR, 0o700)
 
 RU_MONTHS = {
     1: "Января", 2: "Февраля", 3: "Марта", 4: "Апреля",
@@ -592,7 +539,7 @@ class DurableOutbox:
 
     def open(self):
         if self.db is None:
-            path = os.getenv("CONFIG_OUTBOX_SQLITE", os.path.join(SESSIONS_DIR, "config_outbox.sqlite3"))
+            path = CONFIG_OUTBOX_SQLITE
             os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
             self.db = sqlite3.connect(path, check_same_thread=False, timeout=10)
             os.chmod(path, 0o600)
@@ -631,69 +578,35 @@ OUTBOX = DurableOutbox()
 
 
 def db_get_data(table: str, user_id: str):
-    if not supabase:
-        return {}
     try:
-        res = supabase.table(table).select("data").eq("id", str(user_id)).execute()
-        if res.data:
-            return res.data[0].get("data", {})
-    except Exception as e:
-        logging.error("Supabase read failed (%s): %s", table, type(e).__name__)
-        raise RuntimeError("Не удалось загрузить настройки из Supabase; повторите позже.") from e
-    return {}
+        return DATABASES.get_data(table, str(user_id))
+    except Exception as exc:
+        logging.error("Supabase read failed (%s): %s", table, type(exc).__name__)
+        raise RuntimeError("Не удалось загрузить настройки из Supabase; повторите позже.") from exc
+
 
 def db_get_all_config():
-    if not supabase:
-        return []
-    try:
-        rows = []
-        offset = 0
-        while True:
-            batch = supabase.table("config").select("id, data").gt("id", "0").order("id").range(offset, offset + 499).execute().data or []
-            rows.extend(batch)
-            if len(batch) < 500:
-                return rows
-            offset += 500
-    except Exception as e:
-        logging.error(f"Error fetching all Supabase configs: {e}")
-        raise RuntimeError("Не удалось загрузить настройки: запуск остановлен, данные не перезаписаны.") from e
+    return DATABASES.list_configs()
+
 
 def db_save_data(table: str, user_id: str, data: dict):
-
-    if not supabase:
-        return False
     try:
-        payload_data = copy.deepcopy(data)
+        payload = copy.deepcopy(data)
         if table == "config" and str(user_id).isdigit():
-            minimize_config(payload_data)
-        payload = {"id": str(user_id), "data": payload_data}
-        query = supabase.table(table)
-        try:
-
-
-            query.upsert(payload, on_conflict="id").execute()
-        except TypeError:
-
-            query.upsert(payload).execute()
+            minimize_config(payload)
+        DATABASES.save_data(table, str(user_id), payload)
         return True
-    except Exception as e:
-        logging.warning(
-            "Supabase write failed (%s/%s): %s",
-            table,
-            user_id,
-            type(e).__name__,
-        )
+    except Exception as exc:
+        logging.warning("Supabase write failed (%s/%s): %s", table, user_id, type(exc).__name__)
         return False
+
 
 def db_delete_data(table: str, user_id: str):
-    """Delete one persistent row. Used to purge legacy daily saved-message archives."""
-    if not supabase:
-        return False
     try:
-        supabase.table(table).delete().eq("id", str(user_id)).execute()
+        DATABASES.delete_data(table, str(user_id))
         return True
-    except Exception as e:
-        logging.warning("Supabase delete failed (%s/%s): %s", table, user_id, type(e).__name__)
+    except Exception as exc:
+        logging.warning("Supabase delete failed (%s/%s): %s", table, user_id, type(exc).__name__)
         return False
 
 
@@ -717,12 +630,12 @@ DB_TASKS = set()
 DB_WORKERS = {}
 DB_REVISIONS = {}
 DB_SAVED_REVISIONS = {}
-DB_WRITE_SEMAPHORE = asyncio.Semaphore(max(1, int(os.getenv("SUPABASE_MAX_PARALLEL_WRITES", "4") or 4)))
+
 
 
 DB_SAVE_DEBOUNCE_SECONDS = 0.35
-DB_CONFIG_SAVE_DEBOUNCE_SECONDS = max(0.05, float(os.getenv("SUPABASE_CONFIG_DEBOUNCE", "0.20") or 0.20))
-DB_LOG_SAVE_DEBOUNCE_SECONDS = max(0.20, float(os.getenv("SUPABASE_LOG_DEBOUNCE", "0.80") or 0.80))
+
+
 DB_SAVE_RETRY_BASE_SECONDS = 1.0
 DB_SAVE_RETRY_MAX_SECONDS = 30.0
 DB_SAVE_WARNING_AFTER_SECONDS = 20.0
@@ -1117,8 +1030,6 @@ def get_missing_session_markup(user_id):
     builder.adjust(1)
     return builder.as_markup()
 
-bot = Bot(token=BOT_TOKEN)
-dp = Dispatcher()
 
 class RestartMiddleware(BaseMiddleware):
     async def __call__(self, handler, event, data):
@@ -1941,7 +1852,7 @@ async def cmd_start(message: types.Message):
     minimize_config(cfg)
     argument = (message.text or "").split(maxsplit=1)
     if len(argument) == 2 and argument[1].startswith("gg_"):
-        import guard
+        guard = get_guard()
         await guard.open_deep_link(message, argument[1])
         return
     data["state"] = "ROOT"
@@ -2674,7 +2585,7 @@ def saved_trim(chat):
 
 class SavedMessageStore:
     def __init__(self, path=None):
-        self.path = path or os.getenv("SAVED_MESSAGES_SQLITE", os.path.join(SESSIONS_DIR, "saved_messages.sqlite3"))
+        self.path = path or SAVED_MESSAGES_SQLITE
         self.db = None
         self.lock = asyncio.Lock()
         self.remote_lock = asyncio.Lock()

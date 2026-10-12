@@ -4,24 +4,13 @@ Group state is committed to SQLite first. Small snapshots are coalesced into
 negative-ID rows of the existing Supabase config(id, data) table. Private
 account configuration keeps positive IDs and is not used for group evidence.
 """
-import asyncio
-import copy
-import datetime as dt
-import hashlib
-import html
-import json
-import logging
-import os
-import re
-import sqlite3
-import time
-import unicodedata
-from collections import OrderedDict
-
-from aiogram import F, types
-from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramRetryAfter
-from aiogram.utils.keyboard import InlineKeyboardBuilder
-import userbot as ub
+from main import (
+    asyncio, copy, datetime, hashlib, html, json, logging, os, re, sqlite3,
+    time, unicodedata, OrderedDict, F, types, TelegramBadRequest,
+    TelegramForbiddenError, TelegramRetryAfter, InlineKeyboardBuilder,
+    userbot as ub, GUARD_SQLITE, DATABASES,
+)
+dt = datetime
 
 bot, dp = ub.bot, ub.dp
 FORMAT = "qwitty.guard.v1"
@@ -100,7 +89,7 @@ def fresh_group(gid, title):
 
 class GuardStore:
     def __init__(self, path=None):
-        self.path = path or os.getenv("GUARD_SQLITE", os.path.join(ub.SESSIONS_DIR, "guard.sqlite3"))
+        self.path = path or GUARD_SQLITE
         self.db = None
         self.groups = {}
         self.dirty = set()
@@ -154,15 +143,7 @@ class GuardStore:
 
     @staticmethod
     def _remote_groups():
-        rows, offset = [], 0
-        while True:
-            result = (ub.supabase.table("config").select("id,data").lt("id", "0")
-                      .order("id").range(offset, offset + 99).execute())
-            batch = result.data or []
-            rows.extend(batch)
-            if len(batch) < 100:
-                return rows
-            offset += 100
+        return DATABASES.list_configs(groups=True)
 
     async def open(self):
         local_groups, local_meta = await self.sql(self._open)
